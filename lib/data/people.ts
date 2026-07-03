@@ -35,8 +35,11 @@ export interface PersonListRow {
   emailStatus: string | null;
   phone: string | null;
   phoneType: string | null;
+  linkedinUrl: string | null;
   companyId: string | null;
   companyName: string | null;
+  domain: string | null;
+  companyLinkedinUrl: string | null;
   city: string | null;
   state: string | null;
   country: string | null;
@@ -74,6 +77,8 @@ interface RawPersonRow {
   job_title: string | null;
   email: string | null;
   phone: string | null;
+  linkedin_url: string | null;
+  domain: string | null;
   city: string | null;
   state: string | null;
   country: string | null;
@@ -86,12 +91,13 @@ interface RawPersonRow {
 }
 
 const LIST_COLUMNS =
-  "id,company_id,full_name,job_title,email,phone,city,state,country,source,tags,last_updated,email_status,phone_type,company_name";
+  "id,company_id,full_name,job_title,email,phone,linkedin_url,domain,city,state,country,source,tags,last_updated,email_status,phone_type,company_name";
 
 interface LinkedCompanyJoinRow {
   niche: string | null;
   employee_count: number | null;
   industry: string | null;
+  linkedin_url: string | null;
 }
 
 interface CompanyJoinData {
@@ -99,11 +105,12 @@ interface CompanyJoinData {
   knownClients: Set<string>;
 }
 
-/** The companies table is ~29k rows; both getPeople and getPersonFilterOptions
+/** The companies table is ~87k rows; both getPeople and getPersonFilterOptions
  * need this join per request, and it's identical across requests until the
  * next sync, so it's cached the same way as the companies filter-option rows
- * (see companies.ts) rather than re-fetched from Supabase every time. TTL
- * matches the page's own `revalidate = 3600`. */
+ * (see companies.ts) rather than re-fetched from Supabase every time. The
+ * stable cacheKey lets the store persist across dev recompiles. TTL matches
+ * the page's own `revalidate = 3600`. */
 const fetchCompanyJoinRows = withTtlCache(
   () =>
     fetchAllRows<{
@@ -112,8 +119,10 @@ const fetchCompanyJoinRows = withTtlCache(
       employee_count: number | null;
       industry: string | null;
       client: string | null;
-    }>("companies", "id,niche,employee_count,industry,client"),
-  3_600_000
+      linkedin_url: string | null;
+    }>("companies", "id,niche,employee_count,industry,client,linkedin_url"),
+  3_600_000,
+  "people:companyJoin"
 );
 
 /** Companies have native niche/employee_count/industry columns people lack on
@@ -131,6 +140,7 @@ async function loadCompanyJoinData(): Promise<CompanyJoinData> {
       niche: row.niche,
       employee_count: row.employee_count,
       industry: row.industry,
+      linkedin_url: row.linkedin_url,
     });
     if (row.client) knownClients.add(row.client.trim().toLowerCase());
   }
@@ -178,12 +188,13 @@ async function fetchBaseRowsUncached(filters: BaseFilters): Promise<RawPersonRow
   });
 }
 
-/** The people table dwarfs companies; re-fetching and re-filtering it from
- * Supabase on every request (this page is force-dynamic) is the dominant
- * cost on /people, same as companies.ts. Cached per unique search term —
- * see the companies.ts comment for why a TTL matching the page's
- * `revalidate` window is safe for this synced-in-batches dataset. */
-const fetchBaseRows = withTtlCache(fetchBaseRowsUncached, 3_600_000);
+/** Re-fetching and re-filtering the whole people table from Supabase on every
+ * request (this page is force-dynamic) is the dominant cost on /people, same
+ * as companies.ts. Cached per unique search term — see the companies.ts
+ * comment for why a TTL matching the page's `revalidate` window is safe for
+ * this synced-in-batches dataset. The stable cacheKey persists the store
+ * across dev recompiles. */
+const fetchBaseRows = withTtlCache(fetchBaseRowsUncached, 3_600_000, "people:base");
 
 function matchesEmailPresence(row: RawPersonRow, filters: PersonListFilters): boolean {
   if (filters.email === "not_empty" && !row.email) return false;
@@ -287,7 +298,8 @@ async function fetchFilteredRowsUncached(
   });
 }
 
-function toListRow(row: RawPersonRow): PersonListRow {
+function toListRow(row: RawPersonRow, companyData: CompanyJoinData): PersonListRow {
+  const company = row.company_id ? companyData.byId.get(row.company_id) : undefined;
   return {
     id: row.id,
     fullName: row.full_name,
@@ -296,8 +308,11 @@ function toListRow(row: RawPersonRow): PersonListRow {
     emailStatus: row.email_status,
     phone: row.phone,
     phoneType: row.phone_type,
+    linkedinUrl: row.linkedin_url,
     companyId: row.company_id,
     companyName: row.company_name,
+    domain: row.domain,
+    companyLinkedinUrl: company?.linkedin_url ?? null,
     city: row.city,
     state: row.state,
     country: row.country,
@@ -316,7 +331,7 @@ export async function getPeople(
   const rows = sortByLastUpdatedDesc(candidateRows);
   const start = (page - 1) * pageSize;
   return {
-    rows: rows.slice(start, start + pageSize).map(toListRow),
+    rows: rows.slice(start, start + pageSize).map((row) => toListRow(row, companyData)),
     total: rows.length,
     page,
     pageSize,
@@ -328,7 +343,7 @@ export async function getPeople(
 export async function getAllFilteredPeople(filters: PersonListFilters): Promise<PersonListRow[]> {
   const companyData = await loadCompanyJoinData();
   const candidateRows = await fetchFilteredRowsUncached(filters, companyData);
-  return sortByLastUpdatedDesc(candidateRows).map(toListRow);
+  return sortByLastUpdatedDesc(candidateRows).map((row) => toListRow(row, companyData));
 }
 
 /** Facet counts reflect the currently active filters, not the whole table —

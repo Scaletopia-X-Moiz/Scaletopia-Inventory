@@ -29,6 +29,24 @@ CREATE TABLE IF NOT EXISTS import_history (
   completed_at timestamptz
 );
 
+-- Clay push history: one row per "Push to Clay" run, updated in place as it progresses.
+-- webhook_host only (never the full URL) since Clay webhook URLs embed a bearer token in the path.
+CREATE TABLE IF NOT EXISTS clay_push_runs (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  webhook_host text,
+  filters jsonb NOT NULL DEFAULT '{}',
+  status text NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'done', 'failed')),
+  total_matched int NOT NULL DEFAULT 0,
+  pushed_count int NOT NULL DEFAULT 0,
+  error_count int NOT NULL DEFAULT 0,
+  failed_companies jsonb NOT NULL DEFAULT '[]',
+  error_message text,
+  started_at timestamptz DEFAULT now(),
+  completed_at timestamptz
+);
+
+CREATE INDEX IF NOT EXISTS clay_push_runs_started_at_idx ON clay_push_runs (started_at DESC);
+
 -- RPC: bulk company updates (appends source, overwrites tags, merges enrichment fields)
 -- Enrichment fields use COALESCE so only non-null incoming values overwrite existing data.
 -- custom_data is merged (||) so new keys are added without wiping existing provider data.
@@ -173,7 +191,7 @@ DECLARE
   rec jsonb;
 BEGIN
   FOR rec IN SELECT * FROM jsonb_array_elements(updates) LOOP
-    IF (rec->>'linkedin_url') IS NOT NULL THEN
+    IF (rec->>'linkedin_url') IS NOT NULL OR (rec->>'email') IS NOT NULL THEN
       UPDATE people SET
         tags = ARRAY(SELECT jsonb_array_elements_text(rec->'tags')),
         source = CASE
@@ -205,7 +223,9 @@ BEGIN
             )
           ELSE custom_data
         END
-      WHERE linkedin_url = rec->>'linkedin_url';
+      WHERE
+        (rec->>'linkedin_url' IS NOT NULL AND linkedin_url = rec->>'linkedin_url')
+        OR (rec->>'email' IS NOT NULL AND lower(email) = lower(rec->>'email'));
     END IF;
   END LOOP;
 END;

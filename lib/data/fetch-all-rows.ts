@@ -10,9 +10,15 @@ type QueryBuilder = any;
 
 /** PostgREST caps a single response at 1000 rows. Count the matching set up
  * front, then fire every page request in parallel instead of paging
- * sequentially — at ~29k rows that's the difference between ~30 round trips
+ * sequentially — at ~87k rows that's the difference between ~90 round trips
  * in series and one round trip's worth of latency.
- * `build` can attach extra filters (eq/ilike/or/etc.) before pagination. */
+ * `build` can attach extra filters (eq/ilike/or/etc.) before pagination.
+ *
+ * Pages are fetched as separate OFFSET/LIMIT queries, so they only line up
+ * into a consistent set if the underlying order is stable — without an
+ * explicit ORDER BY, Postgres doesn't guarantee the same row order across
+ * repeated executions, which silently drops/duplicates rows across page
+ * boundaries. Order by `id` to pin it down. */
 export async function fetchAllRows<T>(
   table: string,
   columns: string,
@@ -31,7 +37,7 @@ export async function fetchAllRows<T>(
     Array.from({ length: pageCount }, (_, i) => {
       let query = supabaseAdmin.from(table).select(columns);
       if (build) query = build(query);
-      return query.range(i * PAGE_SIZE, i * PAGE_SIZE + PAGE_SIZE - 1);
+      return query.order("id", { ascending: true }).range(i * PAGE_SIZE, i * PAGE_SIZE + PAGE_SIZE - 1);
     })
   );
 

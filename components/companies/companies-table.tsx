@@ -73,7 +73,7 @@ export function CompaniesTable({ rows }: { rows: CompanyListRow[] }) {
                     href={`https://${row.domain}`}
                     target="_blank"
                     rel="noreferrer"
-                    className="block whitespace-nowrap px-3 py-2.5 text-stamp underline-offset-2 hover:underline group-hover:bg-rule/30"
+                    className="block whitespace-nowrap px-3 py-2.5 text-ink underline-offset-2 hover:underline group-hover:bg-rule/30"
                   >
                     {row.domain}
                   </a>
@@ -92,7 +92,7 @@ export function CompaniesTable({ rows }: { rows: CompanyListRow[] }) {
                     href={row.linkedinUrl}
                     target="_blank"
                     rel="noreferrer"
-                    className="block whitespace-nowrap px-3 py-2.5 text-stamp underline-offset-2 hover:underline group-hover:bg-rule/30"
+                    className="block whitespace-nowrap px-3 py-2.5 text-ink underline-offset-2 hover:underline group-hover:bg-rule/30"
                   >
                     LinkedIn ↗
                   </a>

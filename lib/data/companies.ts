@@ -135,8 +135,11 @@ async function fetchBaseRowsUncached(filters: BaseFilters): Promise<RawCompanyRo
 /** Cached the same way as the rest of this module's Supabase reads — see the
  * comment on fetchFilteredRows below. Keyed on the base filter subset only,
  * so requests that differ solely in niche/country/industry/source (which are
- * matched in-app) share the same cached fetch. */
-const fetchBaseRows = withTtlCache(fetchBaseRowsUncached, 3_600_000);
+ * matched in-app) share the same cached fetch. The stable cacheKey lets this
+ * store live on globalThis so the companies list *and* its filter facets share
+ * one base fetch (see fetchFilteredRowsUncached below) and it survives dev
+ * recompiles. */
+const fetchBaseRows = withTtlCache(fetchBaseRowsUncached, 3_600_000, "companies:base");
 
 function matchesNiche(row: RawCompanyRow, filters: CompanyListFilters): boolean {
   return !filters.niche?.length || (row.niche != null && filters.niche.includes(row.niche));
@@ -160,17 +163,17 @@ function matchesSource(row: RawCompanyRow, filters: CompanyListFilters): boolean
   return tokens.some((t) => filters.source!.includes(t));
 }
 
-/** Deliberately calls fetchBaseRowsUncached (not the cached fetchBaseRows)
- * here: fetchBaseRows's cache key excludes niche/country/industry/source
- * (see the comment above it), so routing this path through it would let two
- * requests that only differ by e.g. niche collide on the same cache entry —
- * one request's fetch (and its cached snapshot) would silently answer for
- * the other's rows, including rows that didn't exist yet when that snapshot
- * was taken. fetchFilteredRows below is keyed on the *full* filters object,
- * which already includes niche/country/industry/source, so caching still
- * happens — just at this function's boundary instead of one layer down. */
+/** Routes through the cached fetchBaseRows (keyed on the base filter subset),
+ * then applies niche/country/industry/source in-app. The base rows are
+ * filter-independent of those four facets — they're stripped by toBaseFilters
+ * before the DB query — so two requests that differ only by e.g. niche pull
+ * the *same* base set and are correctly narrowed afterward in JS. Sharing that
+ * one base fetch is exactly what getCompanyFilterOptions below also does, so
+ * loading /companies (list + facets, fired concurrently) now pays for one
+ * full-table read instead of two. Any staleness is bounded by the same TTL the
+ * page's `revalidate` already accepts (matches lib/data/people.ts). */
 async function fetchFilteredRowsUncached(filters: CompanyListFilters): Promise<RawCompanyRow[]> {
-  const rows = await fetchBaseRowsUncached(toBaseFilters(filters));
+  const rows = await fetchBaseRows(toBaseFilters(filters));
   return rows.filter(
     (row) =>
       matchesNiche(row, filters) &&
@@ -180,14 +183,19 @@ async function fetchFilteredRowsUncached(filters: CompanyListFilters): Promise<R
   );
 }
 
-/** The companies table is ~29k rows; fetching and re-filtering all of it from
- * Supabase on every request (this page is force-dynamic) is the dominant cost
- * on /companies. Data here is synced in batches (see the "Synced ... UTC"
- * stamp in the UI), not edited live, so a cross-request cache trades a little
- * staleness for skipping that full-table round trip on every view. TTL
- * matches the page's own `revalidate = 3600`, since that's the staleness
- * window already accepted at the page level. */
-const fetchFilteredRows = withTtlCache(fetchFilteredRowsUncached, 3_600_000);
+/** The companies table is ~87k rows (and growing); fetching and re-filtering
+ * all of it from Supabase on every request (this page is force-dynamic) is the
+ * dominant cost on /companies — a full read is ~40 MB / several seconds. Data
+ * here is synced in batches (see the "Synced ... UTC" stamp in the UI), not
+ * edited live, so a cross-request cache trades a little staleness for skipping
+ * that full-table round trip on every view. TTL matches the page's own
+ * `revalidate = 3600`, since that's the staleness window already accepted at
+ * the page level. */
+const fetchFilteredRows = withTtlCache(
+  fetchFilteredRowsUncached,
+  3_600_000,
+  "companies:filtered"
+);
 
 function toListRow(row: RawCompanyRow): CompanyListRow {
   return {

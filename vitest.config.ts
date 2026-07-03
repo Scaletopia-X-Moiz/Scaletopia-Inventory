@@ -5,7 +5,7 @@ export default defineConfig({
   test: {
     environment: "node",
     setupFiles: ["./vitest.setup.ts"],
-    // companies.test.ts pages through the full 29k-row table several times
+    // companies.test.ts pages through the full ~87k-row table several times
     testTimeout: 60000,
   },
   resolve: {

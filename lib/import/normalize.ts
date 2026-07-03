@@ -168,16 +168,20 @@ export function dedupeCompanies(
 export function dedupePeople(
   records: Record<string, unknown>[]
 ): Record<string, unknown>[] {
-  const seen = new Set<string>();
+  const seenLinkedin = new Set<string>();
+  const seenEmail = new Set<string>();
   const result: Record<string, unknown>[] = [];
 
   for (const rec of records) {
     const linkedin =
       typeof rec.linkedin_url === "string" ? rec.linkedin_url : null;
-    if (linkedin) {
-      if (seen.has(linkedin)) continue;
-      seen.add(linkedin);
-    }
+    const email = typeof rec.email === "string" ? rec.email.toLowerCase() : null;
+
+    if (linkedin && seenLinkedin.has(linkedin)) continue;
+    if (email && seenEmail.has(email)) continue;
+
+    if (linkedin) seenLinkedin.add(linkedin);
+    if (email) seenEmail.add(email);
     result.push(rec);
   }
 

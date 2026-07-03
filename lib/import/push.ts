@@ -135,11 +135,12 @@ async function fetchExistingCompanies(
 async function fetchExistingPeople(
   _records: Record<string, unknown>[]
 ): Promise<Set<string>> {
-  const rows = await fetchAllRows("people", "linkedin_url");
+  const rows = await fetchAllRows("people", "linkedin_url,email");
 
   const existingKeys = new Set<string>();
   for (const row of rows) {
     if (row.linkedin_url) existingKeys.add(`linkedin:${row.linkedin_url}`);
+    if (row.email) existingKeys.add(`email:${String(row.email).toLowerCase()}`);
   }
   return existingKeys;
 }
@@ -151,9 +152,11 @@ function recordExistsKey(
   const domain = typeof rec.domain === "string" ? rec.domain : null;
   const linkedin =
     typeof rec.linkedin_url === "string" ? rec.linkedin_url : null;
+  const email = typeof rec.email === "string" ? rec.email.toLowerCase() : null;
 
   if (domain && existingKeys.has(`domain:${domain}`)) return true;
   if (linkedin && existingKeys.has(`linkedin:${linkedin}`)) return true;
+  if (email && existingKeys.has(`email:${email}`)) return true;
   return false;
 }
 
@@ -326,6 +329,7 @@ async function bulkUpdate(
     const updatePayload = records.map((r) => {
       const payload: Record<string, unknown> = {
         linkedin_url: r.linkedin_url ?? null,
+        email: r.email ?? null,
         tags,
         source: sourceKey,
         last_updated: now,
@@ -349,11 +353,18 @@ async function bulkUpdate(
           batch.map((rec) => {
             const linkedin =
               typeof rec.linkedin_url === "string" ? rec.linkedin_url : null;
-            if (!linkedin) return Promise.resolve({ error: new Error("no linkedin") });
-            return supabaseAdmin
+            const email =
+              typeof rec.email === "string" ? rec.email : null;
+            const query = supabaseAdmin
               .from("people")
-              .update({ tags, source: sourceKey, last_updated: now })
-              .eq("linkedin_url", linkedin);
+              .update({ tags, source: sourceKey, last_updated: now });
+
+            if (linkedin) {
+              return query.eq("linkedin_url", linkedin);
+            } else if (email) {
+              return query.ilike("email", email);
+            }
+            return Promise.resolve({ error: new Error("no key") });
           })
         );
 

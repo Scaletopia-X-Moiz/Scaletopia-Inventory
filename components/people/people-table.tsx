@@ -1,28 +1,14 @@
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 import type { PersonListRow } from "@/lib/data/people";
-import { SourceChip } from "@/components/companies/source-chip";
-import { EmailStatusBadge } from "@/components/people/email-status-badge";
-import { PhoneTypeBadge } from "@/components/people/phone-type-badge";
-
-function formatLastUpdated(value: string | null): string {
-  if (!value) return "—";
-  return new Date(value).toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-}
 
 const HEADERS = [
   "Full Name",
-  "Job Title",
+  "LinkedIn URL",
   "Email",
-  "Phone",
   "Company",
-  "Country",
-  "Source",
-  "Last Updated",
+  "Company Domain",
+  "Company LinkedIn URL",
 ];
 
 export function PeopleTable({ rows }: { rows: PersonListRow[] }) {
@@ -61,30 +47,13 @@ export function PeopleTable({ rows }: { rows: PersonListRow[] }) {
                   {row.fullName ?? "—"}
                 </Link>
               </td>
-              <PersonCell href={`/people/${row.id}`}>{row.jobTitle ?? "—"}</PersonCell>
-              <td className="p-0">
-                <Link
-                  href={`/people/${row.id}`}
-                  className="flex items-center gap-2 whitespace-nowrap px-3 py-2.5 group-hover:bg-rule/30"
-                >
-                  <span className="text-ink">{row.email ?? "—"}</span>
-                  <EmailStatusBadge email={row.email} status={row.emailStatus} />
-                </Link>
-              </td>
-              <td className="p-0">
-                <Link
-                  href={`/people/${row.id}`}
-                  className="flex items-center gap-2 whitespace-nowrap px-3 py-2.5 group-hover:bg-rule/30"
-                >
-                  <span className="text-ink">{row.phone ?? "—"}</span>
-                  <PhoneTypeBadge phone={row.phone} type={row.phoneType} />
-                </Link>
-              </td>
+              <ExternalLinkCell url={row.linkedinUrl} />
+              <PersonCell href={`/people/${row.id}`}>{row.email ?? "—"}</PersonCell>
               <td className="p-0">
                 {row.companyId ? (
                   <Link
                     href={`/companies/${row.companyId}`}
-                    className="block whitespace-nowrap px-3 py-2.5 text-stamp underline-offset-2 hover:underline group-hover:bg-rule/30"
+                    className="block whitespace-nowrap px-3 py-2.5 text-ink underline-offset-2 hover:underline group-hover:bg-rule/30"
                   >
                     {row.companyName ?? "—"}
                   </Link>
@@ -97,22 +66,8 @@ export function PeopleTable({ rows }: { rows: PersonListRow[] }) {
                   </Link>
                 )}
               </td>
-              <PersonCell href={`/people/${row.id}`}>
-                {[row.city, row.country].filter(Boolean).join(", ") || "—"}
-              </PersonCell>
-              <td className="p-0">
-                <Link
-                  href={`/people/${row.id}`}
-                  className="flex flex-wrap gap-1 px-3 py-2.5 group-hover:bg-rule/30"
-                >
-                  {row.sources.length > 0
-                    ? row.sources.map((id) => <SourceChip key={id} id={id} />)
-                    : "—"}
-                </Link>
-              </td>
-              <PersonCell href={`/people/${row.id}`} mono>
-                {formatLastUpdated(row.lastUpdated)}
-              </PersonCell>
+              <PersonCell href={`/people/${row.id}`}>{row.domain ?? "—"}</PersonCell>
+              <ExternalLinkCell url={row.companyLinkedinUrl} />
             </tr>
           ))}
         </tbody>
@@ -141,6 +96,24 @@ function PersonCell({
       >
         {children}
       </Link>
+    </td>
+  );
+}
+
+function ExternalLinkCell({ url }: { url: string | null }) {
+  if (!url) {
+    return <td className="whitespace-nowrap px-3 py-2.5 text-ink-soft">—</td>;
+  }
+  return (
+    <td className="p-0">
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="block max-w-[260px] truncate whitespace-nowrap px-3 py-2.5 text-ink underline-offset-2 hover:underline"
+      >
+        {url}
+      </a>
     </td>
   );
 }

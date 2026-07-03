@@ -7,6 +7,17 @@ export const IN_CHUNK = 200;
 export const WEBHOOK_RETRIES = 1;
 export const FAILED_PREVIEW = 20;
 
+/** 429s get their own retry budget, separate from WEBHOOK_RETRIES (which
+ * covers 5xx/network blips): concurrency fires 8 requests at once, so a
+ * short burst tripping Clay's rate limit is expected, not exceptional. A
+ * single flat 250ms retry isn't enough to clear it — this backs off
+ * exponentially (honoring `Retry-After` when Clay sends one) instead of
+ * lowering CLAY_CONCURRENCY, so the push doesn't get slower for the common
+ * case of a request that never gets rate-limited. */
+export const RATE_LIMIT_MAX_RETRIES = 5;
+const RATE_LIMIT_BASE_DELAY_MS = 500;
+const RATE_LIMIT_MAX_DELAY_MS = 8_000;
+
 export interface ClayPushProgress {
   phase: "resolving" | "pushing" | "done";
   done: number;
@@ -115,31 +126,112 @@ function toWebhookPayload(row: CompanyRow) {
   };
 }
 
-const TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
+const TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
+
+interface PostResult {
+  ok: boolean;
+  status?: number;
+  error?: string;
+}
+
+function parseRetryAfterMs(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header);
+  if (!Number.isNaN(seconds)) return Math.max(0, seconds * 1000);
+  const dateMs = Date.parse(header);
+  return Number.isNaN(dateMs) ? null : Math.max(0, dateMs - Date.now());
+}
+
+function rateLimitBackoffMs(attempt: number): number {
+  const exp = Math.min(RATE_LIMIT_BASE_DELAY_MS * 2 ** attempt, RATE_LIMIT_MAX_DELAY_MS);
+  return exp + Math.random() * 250; // jitter so a burst doesn't retry in lockstep
+}
 
 async function postWithRetry(
   fetchImpl: typeof fetch,
   webhookUrl: string,
   row: CompanyRow
-): Promise<boolean> {
+): Promise<PostResult> {
   const body = JSON.stringify(toWebhookPayload(row));
-  for (let attempt = 0; attempt <= WEBHOOK_RETRIES; attempt++) {
+  let transientAttempt = 0;
+  let rateLimitAttempt = 0;
+
+  for (;;) {
     try {
       const resp = await fetchImpl(webhookUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body,
       });
-      if (resp.ok) return true;
-      if (!TRANSIENT_STATUSES.has(resp.status)) return false;
-    } catch {
-      // transient (network) failure — fall through to retry/backoff
-    }
-    if (attempt < WEBHOOK_RETRIES) {
+      if (resp.ok) return { ok: true };
+
+      if (resp.status === 429) {
+        if (rateLimitAttempt >= RATE_LIMIT_MAX_RETRIES) return { ok: false, status: 429 };
+        const retryAfterMs = parseRetryAfterMs(resp.headers?.get?.("Retry-After") ?? null);
+        await new Promise((r) => setTimeout(r, retryAfterMs ?? rateLimitBackoffMs(rateLimitAttempt)));
+        rateLimitAttempt++;
+        continue;
+      }
+
+      if (!TRANSIENT_STATUSES.has(resp.status)) return { ok: false, status: resp.status };
+      if (transientAttempt >= WEBHOOK_RETRIES) return { ok: false, status: resp.status };
       await new Promise((r) => setTimeout(r, 250));
+      transientAttempt++;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (transientAttempt >= WEBHOOK_RETRIES) return { ok: false, error: message };
+      await new Promise((r) => setTimeout(r, 250));
+      transientAttempt++;
     }
   }
-  return false;
+}
+
+interface FailedCompanyDetail {
+  company_id: string;
+  company_name: string | null;
+  status: number | null;
+  error: string | null;
+}
+
+/** Best-effort persistence — logging must never take down the push itself
+ * (e.g. the migration hasn't been run yet in this environment). */
+async function logRunStart(webhookUrl: string, filters: CompanyListFilters): Promise<string | null> {
+  try {
+    const webhookHost = new URL(webhookUrl).host;
+    const { data, error } = await supabaseAdmin
+      .from("clay_push_runs")
+      .insert({ webhook_host: webhookHost, filters })
+      .select("id")
+      .single();
+    if (error) throw error;
+    return data.id as string;
+  } catch (err) {
+    console.error("Clay push: failed to log run start", err);
+    return null;
+  }
+}
+
+async function logRunEnd(
+  runId: string | null,
+  update: {
+    status: "done" | "failed";
+    total_matched?: number;
+    pushed_count?: number;
+    error_count?: number;
+    failed_companies?: FailedCompanyDetail[];
+    error_message?: string;
+  }
+): Promise<void> {
+  if (!runId) return;
+  try {
+    const { error } = await supabaseAdmin
+      .from("clay_push_runs")
+      .update({ ...update, completed_at: new Date().toISOString() })
+      .eq("id", runId);
+    if (error) throw error;
+  } catch (err) {
+    console.error("Clay push: failed to log run end", err);
+  }
 }
 
 /** Push every company in the current filtered view to `webhookUrl`.
@@ -160,51 +252,88 @@ export async function runClayPush(
   const fetchImpl = deps.fetchImpl ?? fetch;
   const onProgress = deps.onProgress;
 
-  onProgress?.({ phase: "resolving", done: 0, total: 0, pushed: 0, errors: 0 });
+  const runId = await logRunStart(webhookUrl, filters);
 
-  const matched = await getAllFilteredCompanies(filters);
-  const total_matched = matched.length;
+  try {
+    onProgress?.({ phase: "resolving", done: 0, total: 0, pushed: 0, errors: 0 });
 
-  if (total_matched === 0) {
-    onProgress?.({ phase: "done", done: 0, total: 0, pushed: 0, errors: 0 });
-    return { total_matched: 0, pushed: 0, errors: 0, failed_companies: [] };
-  }
+    const matched = await getAllFilteredCompanies(filters);
+    const total_matched = matched.length;
 
-  const rows = await fetchMatchedRows(matched.map((c) => c.id));
-
-  onProgress?.({ phase: "pushing", done: 0, total: rows.length, pushed: 0, errors: 0 });
-
-  let pushed = 0;
-  let errors = 0;
-  let done = 0;
-  const failed_companies: string[] = [];
-
-  for (const group of chunk(rows, CLAY_CONCURRENCY)) {
-    const results = await Promise.allSettled(
-      group.map(async (row) => ({
-        row,
-        ok: await postWithRetry(fetchImpl, webhookUrl, row),
-      }))
-    );
-
-    for (const result of results) {
-      done++;
-      if (result.status === "fulfilled" && result.value.ok) {
-        pushed++;
-      } else {
-        errors++;
-        const name =
-          result.status === "fulfilled" ? result.value.row.company_name : null;
-        if (failed_companies.length < FAILED_PREVIEW) {
-          failed_companies.push(name || "unknown");
-        }
-      }
+    if (total_matched === 0) {
+      onProgress?.({ phase: "done", done: 0, total: 0, pushed: 0, errors: 0 });
+      await logRunEnd(runId, {
+        status: "done",
+        total_matched: 0,
+        pushed_count: 0,
+        error_count: 0,
+        failed_companies: [],
+      });
+      return { total_matched: 0, pushed: 0, errors: 0, failed_companies: [] };
     }
 
-    onProgress?.({ phase: "pushing", done, total: rows.length, pushed, errors });
+    const rows = await fetchMatchedRows(matched.map((c) => c.id));
+
+    onProgress?.({ phase: "pushing", done: 0, total: rows.length, pushed: 0, errors: 0 });
+
+    let pushed = 0;
+    let errors = 0;
+    let done = 0;
+    const failed_companies: string[] = [];
+    const failed_details: FailedCompanyDetail[] = [];
+
+    for (const group of chunk(rows, CLAY_CONCURRENCY)) {
+      const results = await Promise.allSettled(
+        group.map(async (row) => ({
+          row,
+          result: await postWithRetry(fetchImpl, webhookUrl, row),
+        }))
+      );
+
+      for (const settled of results) {
+        done++;
+        if (settled.status === "fulfilled" && settled.value.result.ok) {
+          pushed++;
+        } else {
+          errors++;
+          const row = settled.status === "fulfilled" ? settled.value.row : null;
+          const result = settled.status === "fulfilled" ? settled.value.result : null;
+          const name = row?.company_name ?? null;
+          if (failed_companies.length < FAILED_PREVIEW) {
+            failed_companies.push(name || "unknown");
+          }
+          failed_details.push({
+            company_id: row?.id ?? "unknown",
+            company_name: name,
+            status: result?.status ?? null,
+            error:
+              result?.error ??
+              (settled.status === "rejected"
+                ? String((settled as PromiseRejectedResult).reason)
+                : null),
+          });
+        }
+      }
+
+      onProgress?.({ phase: "pushing", done, total: rows.length, pushed, errors });
+    }
+
+    onProgress?.({ phase: "done", done, total: rows.length, pushed, errors });
+
+    await logRunEnd(runId, {
+      status: "done",
+      total_matched,
+      pushed_count: pushed,
+      error_count: errors,
+      failed_companies: failed_details,
+    });
+
+    return { total_matched, pushed, errors, failed_companies };
+  } catch (err) {
+    await logRunEnd(runId, {
+      status: "failed",
+      error_message: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
   }
-
-  onProgress?.({ phase: "done", done, total: rows.length, pushed, errors });
-
-  return { total_matched, pushed, errors, failed_companies };
 }
