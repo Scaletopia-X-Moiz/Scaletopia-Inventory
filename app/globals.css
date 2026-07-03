@@ -396,6 +396,20 @@ body {
 .animate-slide-right-delay-7 { animation: slide-in-right 0.3s ease-out 0.35s both; }
 .animate-slide-right-delay-8 { animation: slide-in-right 0.3s ease-out 0.4s both; }
 
+/* Side drawer panel (e.g. people-linked-to-company drawer) */
+@keyframes drawer-slide-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes drawer-slide-out {
+  from { transform: translateX(0); }
+  to { transform: translateX(100%); }
+}
+
+.animate-drawer-in { animation: drawer-slide-in 0.25s ease-out both; }
+.animate-drawer-out { animation: drawer-slide-out 0.2s ease-in both; }
+
 /* Bar grow animation */
 @keyframes bar-grow {
   from {

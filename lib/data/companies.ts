@@ -35,6 +35,11 @@ export interface CompanyListRow {
   sources: string[];
   qualityTier: string | null;
   lastUpdated: string | null;
+  /** Count of people rows linked via people.company_id — only populated for
+   * getCompanies (the rendered table page), not getAllFilteredCompanies
+   * (export), so exporting the full filtered set doesn't pay for a people
+   * lookup on every row. */
+  peopleCount?: number;
 }
 
 export interface CompanyListResult {
@@ -90,22 +95,31 @@ function employeeBucketOrClause(bucketIds: string[]): string {
     .join(",");
 }
 
-/** Applies every filter that maps cleanly onto Postgres/PostgREST (search,
- * niche, employee buckets — all native columns with no casing/synonym mess),
- * then fetches the candidate set so Country/Industry/Source — whose raw
- * values have synonyms or casing variants the DB doesn't normalize — can be
- * matched in-app via the same normalizers used for Overview/display. */
-async function fetchFilteredRowsUncached(filters: CompanyListFilters): Promise<RawCompanyRow[]> {
+/** Subset of CompanyListFilters that maps cleanly onto Postgres/PostgREST
+ * (search, employee buckets — native columns with no casing/synonym mess).
+ * Niche/Country/Industry/Source raw values have synonyms or casing variants
+ * the DB doesn't normalize, so they're matched in-app instead — which also
+ * lets facet counts be computed by excluding one filter at a time (see
+ * getCompanyFilterOptions) without re-querying Postgres per facet. */
+type BaseFilters = Pick<CompanyListFilters, "search" | "employeeMin" | "employeeMax" | "employeeBucket">;
+
+function toBaseFilters(filters: CompanyListFilters): BaseFilters {
+  return {
+    search: filters.search,
+    employeeMin: filters.employeeMin,
+    employeeMax: filters.employeeMax,
+    employeeBucket: filters.employeeBucket,
+  };
+}
+
+async function fetchBaseRowsUncached(filters: BaseFilters): Promise<RawCompanyRow[]> {
   const search = filters.search?.trim();
 
-  const rows = await fetchAllRows<RawCompanyRow>("companies", LIST_COLUMNS, (query) => {
+  return fetchAllRows<RawCompanyRow>("companies", LIST_COLUMNS, (query) => {
     let q = query;
     if (search) {
       const term = search.replace(/[%,]/g, "");
       q = q.or(`company_name.ilike.%${term}%,domain.ilike.%${term}%`);
-    }
-    if (filters.niche?.length) {
-      q = q.in("niche", filters.niche);
     }
     if (filters.employeeMin != null || filters.employeeMax != null) {
       if (filters.employeeMin != null) q = q.gte("employee_count", filters.employeeMin);
@@ -116,22 +130,54 @@ async function fetchFilteredRowsUncached(filters: CompanyListFilters): Promise<R
     }
     return q;
   });
+}
 
-  return rows.filter((row) => {
-    if (filters.country?.length) {
-      const country = normalizeCountry(row.country);
-      if (!country || !filters.country.includes(country.id)) return false;
-    }
-    if (filters.industry?.length) {
-      const industry = normalizeIndustry(row.industry);
-      if (!industry || !filters.industry.includes(industry.id)) return false;
-    }
-    if (filters.source?.length) {
-      const tokens = normalizeSourceTokens(row.source);
-      if (!tokens.some((t) => filters.source!.includes(t))) return false;
-    }
-    return true;
-  });
+/** Cached the same way as the rest of this module's Supabase reads — see the
+ * comment on fetchFilteredRows below. Keyed on the base filter subset only,
+ * so requests that differ solely in niche/country/industry/source (which are
+ * matched in-app) share the same cached fetch. */
+const fetchBaseRows = withTtlCache(fetchBaseRowsUncached, 3_600_000);
+
+function matchesNiche(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+  return !filters.niche?.length || (row.niche != null && filters.niche.includes(row.niche));
+}
+
+function matchesCountry(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+  if (!filters.country?.length) return true;
+  const country = normalizeCountry(row.country);
+  return Boolean(country && filters.country.includes(country.id));
+}
+
+function matchesIndustry(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+  if (!filters.industry?.length) return true;
+  const industry = normalizeIndustry(row.industry);
+  return Boolean(industry && filters.industry.includes(industry.id));
+}
+
+function matchesSource(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+  if (!filters.source?.length) return true;
+  const tokens = normalizeSourceTokens(row.source);
+  return tokens.some((t) => filters.source!.includes(t));
+}
+
+/** Deliberately calls fetchBaseRowsUncached (not the cached fetchBaseRows)
+ * here: fetchBaseRows's cache key excludes niche/country/industry/source
+ * (see the comment above it), so routing this path through it would let two
+ * requests that only differ by e.g. niche collide on the same cache entry —
+ * one request's fetch (and its cached snapshot) would silently answer for
+ * the other's rows, including rows that didn't exist yet when that snapshot
+ * was taken. fetchFilteredRows below is keyed on the *full* filters object,
+ * which already includes niche/country/industry/source, so caching still
+ * happens — just at this function's boundary instead of one layer down. */
+async function fetchFilteredRowsUncached(filters: CompanyListFilters): Promise<RawCompanyRow[]> {
+  const rows = await fetchBaseRowsUncached(toBaseFilters(filters));
+  return rows.filter(
+    (row) =>
+      matchesNiche(row, filters) &&
+      matchesCountry(row, filters) &&
+      matchesIndustry(row, filters) &&
+      matchesSource(row, filters)
+  );
 }
 
 /** The companies table is ~29k rows; fetching and re-filtering all of it from
@@ -142,11 +188,6 @@ async function fetchFilteredRowsUncached(filters: CompanyListFilters): Promise<R
  * matches the page's own `revalidate = 3600`, since that's the staleness
  * window already accepted at the page level. */
 const fetchFilteredRows = withTtlCache(fetchFilteredRowsUncached, 3_600_000);
-
-const fetchFilterOptionRows = withTtlCache(
-  () => fetchAllRows<RawCompanyRow>("companies", "niche,source,industry,country"),
-  3_600_000
-);
 
 function toListRow(row: RawCompanyRow): CompanyListRow {
   return {
@@ -168,6 +209,45 @@ function toListRow(row: RawCompanyRow): CompanyListRow {
   };
 }
 
+/** Ids per `.in()` chunk when querying people-by-company below. Keeps each
+ * request's query string (and the HEAD count query fetchAllRows issues
+ * first) comfortably under URL length limits — a single `.in()` clause built
+ * from ~1000 UUIDs (e.g. an export-sized page) was long enough to fail the
+ * request outright. */
+const PEOPLE_COUNT_ID_CHUNK_SIZE = 100;
+
+/** People linked to each company, scoped to just the ids on the rendered
+ * page — avoids both an N+1 (one count query per row) and pulling the whole
+ * people table (which dwarfs companies) just to tally a handful of rows.
+ * PostgREST has no GROUP BY, so this fetches the matching company_id column
+ * (paginated via fetchAllRows in case a chunk's companies collectively link
+ * to more than 1000 people) and reduces the counts in app code. */
+async function getPeopleCountsForCompanies(ids: string[]): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  if (ids.length === 0) return counts;
+
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += PEOPLE_COUNT_ID_CHUNK_SIZE) {
+    chunks.push(ids.slice(i, i + PEOPLE_COUNT_ID_CHUNK_SIZE));
+  }
+
+  const chunkResults = await Promise.all(
+    chunks.map((chunk) =>
+      fetchAllRows<{ company_id: string | null }>("people", "company_id", (query) =>
+        query.in("company_id", chunk)
+      )
+    )
+  );
+
+  for (const rows of chunkResults) {
+    for (const row of rows) {
+      if (!row.company_id) continue;
+      counts.set(row.company_id, (counts.get(row.company_id) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
 export async function getCompanies(
   filters: CompanyListFilters,
   page = 1,
@@ -175,8 +255,15 @@ export async function getCompanies(
 ): Promise<CompanyListResult> {
   const rows = sortByLastUpdatedDesc(await fetchFilteredRows(filters));
   const start = (page - 1) * pageSize;
+  const pageRows = rows.slice(start, start + pageSize).map(toListRow);
+
+  const peopleCounts = await getPeopleCountsForCompanies(pageRows.map((r) => r.id));
+  for (const row of pageRows) {
+    row.peopleCount = peopleCounts.get(row.id) ?? 0;
+  }
+
   return {
-    rows: rows.slice(start, start + pageSize).map(toListRow),
+    rows: pageRows,
     total: rows.length,
     page,
     pageSize,
@@ -191,8 +278,16 @@ export async function getAllFilteredCompanies(
   return sortByLastUpdatedDesc(await fetchFilteredRows(filters)).map(toListRow);
 }
 
-export async function getCompanyFilterOptions(): Promise<CompanyFilterOptions> {
-  const rows = await fetchFilterOptionRows();
+/** Facet counts reflect the currently active filters, not the whole table —
+ * e.g. narrowing to an Industry with 6k companies should make the Source
+ * dropdown show source counts within that 6k, not the global total. Each
+ * facet's own count excludes its own filter (so picking "Manual Csv" under
+ * Source doesn't zero out every other source option), but is scoped by every
+ * other active filter. */
+export async function getCompanyFilterOptions(
+  filters: CompanyListFilters = {}
+): Promise<CompanyFilterOptions> {
+  const rows = await fetchBaseRows(toBaseFilters(filters));
 
   const niches = new Map<string, number>();
   const sources = new Map<string, number>();
@@ -200,22 +295,35 @@ export async function getCompanyFilterOptions(): Promise<CompanyFilterOptions> {
   const countries = new Map<string, { label: string; count: number }>();
 
   for (const row of rows) {
-    if (row.niche) niches.set(row.niche, (niches.get(row.niche) ?? 0) + 1);
+    const okCountry = matchesCountry(row, filters);
+    const okIndustry = matchesIndustry(row, filters);
+    const okSource = matchesSource(row, filters);
+    const okNiche = matchesNiche(row, filters);
 
-    for (const token of normalizeSourceTokens(row.source)) {
-      sources.set(token, (sources.get(token) ?? 0) + 1);
+    if (okCountry && okIndustry && okSource && row.niche) {
+      niches.set(row.niche, (niches.get(row.niche) ?? 0) + 1);
     }
 
-    const industry = normalizeIndustry(row.industry);
-    if (industry) {
-      const existing = industries.get(industry.id);
-      industries.set(industry.id, { label: industry.label, count: (existing?.count ?? 0) + 1 });
+    if (okNiche && okCountry && okIndustry) {
+      for (const token of normalizeSourceTokens(row.source)) {
+        sources.set(token, (sources.get(token) ?? 0) + 1);
+      }
     }
 
-    const country = normalizeCountry(row.country);
-    if (country) {
-      const existing = countries.get(country.id);
-      countries.set(country.id, { label: country.label, count: (existing?.count ?? 0) + 1 });
+    if (okNiche && okCountry && okSource) {
+      const industry = normalizeIndustry(row.industry);
+      if (industry) {
+        const existing = industries.get(industry.id);
+        industries.set(industry.id, { label: industry.label, count: (existing?.count ?? 0) + 1 });
+      }
+    }
+
+    if (okNiche && okIndustry && okSource) {
+      const country = normalizeCountry(row.country);
+      if (country) {
+        const existing = countries.get(country.id);
+        countries.set(country.id, { label: country.label, count: (existing?.count ?? 0) + 1 });
+      }
     }
   }
 

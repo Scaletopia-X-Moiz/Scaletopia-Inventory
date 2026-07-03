@@ -42,6 +42,19 @@ export interface PushResult {
 
 export type ProgressCallback = (progress: PushProgress) => void;
 
+/**
+ * Format a Supabase/Postgrest error (or arbitrary thrown value) into a short,
+ * human-readable reason string for surfacing on individual failed records.
+ */
+function formatError(error: unknown): string {
+  if (error && typeof error === "object") {
+    const anyErr = error as { message?: string; code?: string };
+    if (anyErr.code && anyErr.message) return `${anyErr.code}: ${anyErr.message}`;
+    if (anyErr.message) return anyErr.message;
+  }
+  return String(error);
+}
+
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let i = 0; i < arr.length; i += size) {
@@ -150,7 +163,12 @@ async function insertWithBinarySplit(
 ): Promise<{ inserted: number; failed: Record<string, unknown>[] }> {
   const { error } = await supabaseAdmin.from(targetTable).insert(batch);
   if (!error) return { inserted: batch.length, failed: [] };
-  if (batch.length === 1) return { inserted: 0, failed: batch };
+  if (batch.length === 1) {
+    return {
+      inserted: 0,
+      failed: [{ ...batch[0], _failure_reason: formatError(error) }],
+    };
+  }
 
   const mid = Math.floor(batch.length / 2);
   const [left, right] = await Promise.all([
@@ -294,7 +312,11 @@ async function bulkUpdate(
           ) {
             updated++;
           } else {
-            failed.push(batch[i]);
+            const reason =
+              r.status === "fulfilled"
+                ? formatError((r.value as { error?: unknown }).error)
+                : formatError(r.reason);
+            failed.push({ ...batch[i], _failure_reason: reason });
           }
         }
         onProgress?.(updated + failed.length, total);
@@ -343,7 +365,11 @@ async function bulkUpdate(
           ) {
             updated++;
           } else {
-            failed.push(batch[i]);
+            const reason =
+              r.status === "fulfilled"
+                ? formatError((r.value as { error?: unknown }).error)
+                : formatError(r.reason);
+            failed.push({ ...batch[i], _failure_reason: reason });
           }
         }
         onProgress?.(updated + failed.length, total);

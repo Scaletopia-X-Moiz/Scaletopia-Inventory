@@ -55,7 +55,8 @@ export function PeopleTable({ rows }: { rows: PersonListRow[] }) {
               <td className="p-0">
                 <Link
                   href={`/people/${row.id}`}
-                  className="block px-3 py-2.5 font-medium text-ink group-hover:bg-rule/30"
+                  className="block max-w-[220px] truncate px-3 py-2.5 font-medium text-ink group-hover:bg-rule/30"
+                  title={row.fullName ?? undefined}
                 >
                   {row.fullName ?? "—"}
                 </Link>
@@ -79,7 +80,23 @@ export function PeopleTable({ rows }: { rows: PersonListRow[] }) {
                   <PhoneTypeBadge phone={row.phone} type={row.phoneType} />
                 </Link>
               </td>
-              <PersonCell href={`/people/${row.id}`}>{row.companyName ?? "—"}</PersonCell>
+              <td className="p-0">
+                {row.companyId ? (
+                  <Link
+                    href={`/companies/${row.companyId}`}
+                    className="block whitespace-nowrap px-3 py-2.5 text-stamp underline-offset-2 hover:underline group-hover:bg-rule/30"
+                  >
+                    {row.companyName ?? "—"}
+                  </Link>
+                ) : (
+                  <Link
+                    href={`/people/${row.id}`}
+                    className="block whitespace-nowrap px-3 py-2.5 text-ink group-hover:bg-rule/30"
+                  >
+                    {row.companyName ?? "—"}
+                  </Link>
+                )}
+              </td>
               <PersonCell href={`/people/${row.id}`}>
                 {[row.city, row.country].filter(Boolean).join(", ") || "—"}
               </PersonCell>

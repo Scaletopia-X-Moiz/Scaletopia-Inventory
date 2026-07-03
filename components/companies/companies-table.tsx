@@ -1,8 +1,9 @@
 import Link from "next/link";
+import { Tooltip } from "radix-ui";
 import { cn } from "@/lib/utils";
 import type { CompanyListRow } from "@/lib/data/companies";
 import { SourceChip } from "@/components/companies/source-chip";
-import { QualityBadge } from "@/components/companies/quality-badge";
+import { PeopleDrawerTrigger } from "@/components/companies/people-drawer-trigger";
 
 function formatLastUpdated(value: string | null): string {
   if (!value) return "—";
@@ -20,11 +21,12 @@ function locationOf(row: CompanyListRow): string {
 const HEADERS = [
   "Company Name",
   "Domain",
+  "LinkedIn",
   "Industry",
   "Employees",
+  "People",
   "Location",
   "Source",
-  "Quality Tier",
   "Last Updated",
 ];
 
@@ -39,6 +41,7 @@ export function CompaniesTable({ rows }: { rows: CompanyListRow[] }) {
 
   return (
     <div className="overflow-x-auto rounded-lg border border-rule">
+      <Tooltip.Provider delayDuration={200}>
       <table className="w-full min-w-[920px] border-collapse text-sm">
         <thead>
           <tr className="border-b border-rule bg-card">
@@ -58,16 +61,63 @@ export function CompaniesTable({ rows }: { rows: CompanyListRow[] }) {
               <td className="p-0">
                 <Link
                   href={`/companies/${row.id}`}
-                  className="block px-3 py-2.5 font-medium text-ink group-hover:bg-rule/30"
+                  className="block max-w-[260px] truncate px-3 py-2.5 font-medium text-ink group-hover:bg-rule/30"
+                  title={row.companyName ?? undefined}
                 >
                   {row.companyName ?? "—"}
                 </Link>
               </td>
-              <CompanyCell href={`/companies/${row.id}`}>{row.domain ?? "—"}</CompanyCell>
+              <td className="p-0">
+                {row.domain ? (
+                  <a
+                    href={`https://${row.domain}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block whitespace-nowrap px-3 py-2.5 text-stamp underline-offset-2 hover:underline group-hover:bg-rule/30"
+                  >
+                    {row.domain}
+                  </a>
+                ) : (
+                  <Link
+                    href={`/companies/${row.id}`}
+                    className="block whitespace-nowrap px-3 py-2.5 text-ink group-hover:bg-rule/30"
+                  >
+                    —
+                  </Link>
+                )}
+              </td>
+              <td className="p-0">
+                {row.linkedinUrl ? (
+                  <a
+                    href={row.linkedinUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block whitespace-nowrap px-3 py-2.5 text-stamp underline-offset-2 hover:underline group-hover:bg-rule/30"
+                  >
+                    LinkedIn ↗
+                  </a>
+                ) : (
+                  <Link
+                    href={`/companies/${row.id}`}
+                    className="block whitespace-nowrap px-3 py-2.5 text-ink group-hover:bg-rule/30"
+                  >
+                    —
+                  </Link>
+                )}
+              </td>
               <CompanyCell href={`/companies/${row.id}`}>{row.industry ?? "—"}</CompanyCell>
               <CompanyCell href={`/companies/${row.id}`} mono>
                 {row.employeeCount?.toLocaleString("en-US") ?? "—"}
               </CompanyCell>
+              <td className="p-0">
+                <div className="flex items-center px-2 py-1.5">
+                  <PeopleDrawerTrigger
+                    companyId={row.id}
+                    companyName={row.companyName}
+                    count={row.peopleCount ?? 0}
+                  />
+                </div>
+              </td>
               <CompanyCell href={`/companies/${row.id}`}>{locationOf(row)}</CompanyCell>
               <td className="p-0">
                 <Link
@@ -79,14 +129,6 @@ export function CompaniesTable({ rows }: { rows: CompanyListRow[] }) {
                     : "—"}
                 </Link>
               </td>
-              <td className="p-0">
-                <Link
-                  href={`/companies/${row.id}`}
-                  className="block px-3 py-2.5 group-hover:bg-rule/30"
-                >
-                  <QualityBadge tier={row.qualityTier} />
-                </Link>
-              </td>
               <CompanyCell href={`/companies/${row.id}`} mono>
                 {formatLastUpdated(row.lastUpdated)}
               </CompanyCell>
@@ -94,6 +136,7 @@ export function CompaniesTable({ rows }: { rows: CompanyListRow[] }) {
           ))}
         </tbody>
       </table>
+      </Tooltip.Provider>
     </div>
   );
 }

@@ -66,8 +66,18 @@ interface CompanyScanRow {
 
 async function getDashboardUncached(range: DashboardDateRange = {}): Promise<Dashboard> {
   const [companiesCount, peopleCount, rows, recentCompaniesRes] = await Promise.all([
-    supabaseAdmin.from("companies").select("id", { count: "exact", head: true }),
-    supabaseAdmin.from("people").select("id", { count: "exact", head: true }),
+    (() => {
+      let q = supabaseAdmin.from("companies").select("id", { count: "exact", head: true });
+      if (range.from) q = q.gte("created_at", range.from);
+      if (range.to) q = q.lt("created_at", range.to);
+      return q;
+    })(),
+    (() => {
+      let q = supabaseAdmin.from("people").select("id", { count: "exact", head: true });
+      if (range.from) q = q.gte("created_at", range.from);
+      if (range.to) q = q.lt("created_at", range.to);
+      return q;
+    })(),
     fetchAllRows<CompanyScanRow>("companies", "niche,source,industry,country", (query) => {
       let q = query;
       if (range.from) q = q.gte("created_at", range.from);

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getCompanyDetail } from "@/lib/data/companies";
+import { getPeopleByCompanyId } from "@/lib/data/people";
 import { AppShell } from "@/components/dashboard/app-shell";
 import { Topbar } from "@/components/dashboard/topbar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -20,6 +21,8 @@ export default async function CompanyDetailPage({
   const { id } = await params;
   const company = await getCompanyDetail(id);
   if (!company) notFound();
+
+  const people = await getPeopleByCompanyId(company.id);
 
   const location = [company.city, company.state, company.country].filter(Boolean).join(", ");
 
@@ -146,6 +149,44 @@ export default async function CompanyDetailPage({
           </div>
 
           <section className="flex flex-col gap-2 animate-in animate-in-stagger-4">
+            <h2 className="text-sm font-semibold text-ink">Enrichment data</h2>
+            <EnrichmentList data={company.customData} />
+          </section>
+
+          <section className="flex flex-col gap-2 animate-in animate-in-stagger-5">
+            <h2 className="text-sm font-semibold text-ink">People</h2>
+            {people.length > 0 ? (
+              <ul className="flex flex-col divide-y divide-rule rounded-md border border-rule">
+                {people.map((person) => (
+                  <li key={person.id}>
+                    <Link
+                      href={`/people/${person.id}`}
+                      className="flex flex-wrap items-center justify-between gap-x-4 gap-y-0.5 px-3 py-2.5 transition-smooth hover:bg-hover"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-ink">
+                          {person.fullName ?? "—"}
+                        </p>
+                        <p className="truncate text-xs text-ink-soft">{person.jobTitle ?? "—"}</p>
+                      </div>
+                      {(person.email || person.phone) && (
+                        <div className="min-w-0 text-right text-xs text-ink-soft">
+                          {person.email && <p className="truncate">{person.email}</p>}
+                          {person.phone && <p className="truncate">{person.phone}</p>}
+                        </div>
+                      )}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <span className="text-sm text-ink-soft">
+                No people in our database are linked to this company yet.
+              </span>
+            )}
+          </section>
+
+          <section className="flex flex-col gap-2 animate-in animate-in-stagger-6">
             <h2 className="text-sm font-semibold text-ink">Tags</h2>
             <div className="flex flex-wrap gap-2">
               {company.tags.length > 0 ? (
@@ -154,11 +195,6 @@ export default async function CompanyDetailPage({
                 <span className="text-sm text-ink-soft">No tags</span>
               )}
             </div>
-          </section>
-
-          <section className="flex flex-col gap-2 animate-in animate-in-stagger-5">
-            <h2 className="text-sm font-semibold text-ink">Enrichment data</h2>
-            <EnrichmentList data={company.customData} />
           </section>
         </div>
       </main>

@@ -35,6 +35,7 @@ export interface PersonListRow {
   emailStatus: string | null;
   phone: string | null;
   phoneType: string | null;
+  companyId: string | null;
   companyName: string | null;
   city: string | null;
   state: string | null;
@@ -152,124 +153,137 @@ function jobTitleTerms(raw: string | undefined): string[] {
     .filter(Boolean);
 }
 
-/** Subset of PersonListFilters that fetchFilteredRowsUncached actually uses.
- * Caching on only these fields means requests that differ solely in
- * company-join-dependent filters (niche/industry/employeeBucket) share the
- * same cached DB result instead of triggering redundant full-table fetches. */
-type PersonDbFilters = Pick<
-  PersonListFilters,
-  "search" | "emailStatus" | "phoneType" | "email" | "phone" | "jobTitle" | "country" | "source"
->;
+/** Only `search` maps cleanly onto a cheap, cacheable PostgREST query.
+ * Everything else — including email_status/phone_type, which used to run as
+ * DB-level `.in()` filters — is matched in-app instead. That's what lets
+ * getPersonFilterOptions compute facet counts by excluding one filter at a
+ * time (e.g. Source counts scoped to the active Industry filter, without the
+ * Source filter itself collapsing every other source to zero). */
+type BaseFilters = Pick<PersonListFilters, "search">;
 
-function toPersonDbFilters(filters: PersonListFilters): PersonDbFilters {
-  return {
-    search: filters.search,
-    emailStatus: filters.emailStatus,
-    phoneType: filters.phoneType,
-    email: filters.email,
-    phone: filters.phone,
-    jobTitle: filters.jobTitle,
-    country: filters.country,
-    source: filters.source,
-  };
+function toBaseFilters(filters: PersonListFilters): BaseFilters {
+  return { search: filters.search };
 }
 
-/** Mirrors the Companies data layer's split: native-column filters
- * (search, email status, phone type) run through PostgREST; everything
- * touching synonyms or tag-parsing (country/source/email-or-phone-presence/
- * job title) is matched in-app against the candidate set. Filters that need
- * the company join (industry/employee size/niche) are deliberately left out
- * here — see `applyCompanyJoinFilters` — so this fetch's cache key doesn't
- * depend on the non-serializable company join map. */
-async function fetchFilteredRowsUncached(filters: PersonDbFilters): Promise<RawPersonRow[]> {
+async function fetchBaseRowsUncached(filters: BaseFilters): Promise<RawPersonRow[]> {
   const search = filters.search?.trim();
 
-  const rows = await fetchAllRows<RawPersonRow>("people", LIST_COLUMNS, (query) => {
+  return fetchAllRows<RawPersonRow>("people", LIST_COLUMNS, (query) => {
     let q = query;
     if (search) {
       const term = search.replace(/[%,]/g, "");
       q = q.or(`full_name.ilike.%${term}%,email.ilike.%${term}%`);
     }
-    if (filters.emailStatus?.length) q = q.in("email_status", filters.emailStatus);
-    if (filters.phoneType?.length) q = q.in("phone_type", filters.phoneType);
     return q;
-  });
-
-  const titleTerms = jobTitleTerms(filters.jobTitle);
-
-  return rows.filter((row) => {
-    if (filters.email === "not_empty" && !row.email) return false;
-    if (filters.email === "empty" && row.email) return false;
-    if (filters.phone === "not_empty" && !row.phone) return false;
-    if (filters.phone === "empty" && row.phone) return false;
-
-    if (titleTerms.length) {
-      const title = row.job_title?.toLowerCase() ?? "";
-      if (!titleTerms.some((t) => title.includes(t))) return false;
-    }
-
-    if (filters.country?.length) {
-      const country = normalizeCountry(row.country);
-      if (!country || !filters.country.includes(country.id)) return false;
-    }
-
-    if (filters.source?.length) {
-      const tokens = normalizeSourceTokens(row.source);
-      if (!tokens.some((t) => filters.source!.includes(t))) return false;
-    }
-
-    return true;
   });
 }
 
 /** The people table dwarfs companies; re-fetching and re-filtering it from
  * Supabase on every request (this page is force-dynamic) is the dominant
- * cost on /people, same as companies.ts. Cached per unique filter
- * combination — see the companies.ts comment for why a TTL matching the
- * page's `revalidate` window is safe for this synced-in-batches dataset. */
-const fetchFilteredRows = withTtlCache(fetchFilteredRowsUncached, 3_600_000);
+ * cost on /people, same as companies.ts. Cached per unique search term —
+ * see the companies.ts comment for why a TTL matching the page's
+ * `revalidate` window is safe for this synced-in-batches dataset. */
+const fetchBaseRows = withTtlCache(fetchBaseRowsUncached, 3_600_000);
 
-/** Applies the company-join-dependent filters (industry, employee size,
- * niche) that fetchFilteredRows can't cache on its own, since they depend on
- * the company join map rather than the filters object alone. */
-function applyCompanyJoinFilters(
-  rows: RawPersonRow[],
+function matchesEmailPresence(row: RawPersonRow, filters: PersonListFilters): boolean {
+  if (filters.email === "not_empty" && !row.email) return false;
+  if (filters.email === "empty" && row.email) return false;
+  return true;
+}
+
+function matchesPhonePresence(row: RawPersonRow, filters: PersonListFilters): boolean {
+  if (filters.phone === "not_empty" && !row.phone) return false;
+  if (filters.phone === "empty" && row.phone) return false;
+  return true;
+}
+
+function matchesJobTitle(row: RawPersonRow, filters: PersonListFilters): boolean {
+  const titleTerms = jobTitleTerms(filters.jobTitle);
+  if (!titleTerms.length) return true;
+  const title = row.job_title?.toLowerCase() ?? "";
+  return titleTerms.some((t) => title.includes(t));
+}
+
+function matchesCountry(row: RawPersonRow, filters: PersonListFilters): boolean {
+  if (!filters.country?.length) return true;
+  const country = normalizeCountry(row.country);
+  return Boolean(country && filters.country.includes(country.id));
+}
+
+function matchesSource(row: RawPersonRow, filters: PersonListFilters): boolean {
+  if (!filters.source?.length) return true;
+  const tokens = normalizeSourceTokens(row.source);
+  return tokens.some((t) => filters.source!.includes(t));
+}
+
+function matchesEmailStatus(row: RawPersonRow, filters: PersonListFilters): boolean {
+  if (!filters.emailStatus?.length) return true;
+  return Boolean(row.email_status && filters.emailStatus.includes(row.email_status));
+}
+
+function matchesPhoneType(row: RawPersonRow, filters: PersonListFilters): boolean {
+  if (!filters.phoneType?.length) return true;
+  return Boolean(row.phone_type && filters.phoneType.includes(row.phone_type));
+}
+
+function matchesIndustry(
+  company: LinkedCompanyJoinRow | undefined,
+  filters: PersonListFilters
+): boolean {
+  if (!filters.industry?.length) return true;
+  const industry = normalizeIndustry(company?.industry);
+  return Boolean(industry && filters.industry.includes(industry.id));
+}
+
+function matchesEmployeeSize(
+  company: LinkedCompanyJoinRow | undefined,
+  filters: PersonListFilters
+): boolean {
+  if (filters.employeeMin != null || filters.employeeMax != null) {
+    const count = company?.employee_count ?? null;
+    if (count == null) return false;
+    if (filters.employeeMin != null && count < filters.employeeMin) return false;
+    if (filters.employeeMax != null && count > filters.employeeMax) return false;
+    return true;
+  }
+  if (filters.employeeBucket?.length) {
+    const bucket = employeeBucketOf(company?.employee_count);
+    return Boolean(bucket && filters.employeeBucket.includes(bucket.id));
+  }
+  return true;
+}
+
+function matchesNiche(
+  row: RawPersonRow,
+  company: LinkedCompanyJoinRow | undefined,
+  knownClients: ReadonlySet<string>,
+  filters: PersonListFilters
+): boolean {
+  if (!filters.niche?.length) return true;
+  const niches = personNiches(row, company, knownClients);
+  return niches.some((n) => filters.niche!.includes(n));
+}
+
+async function fetchFilteredRowsUncached(
   filters: PersonListFilters,
   companyData: CompanyJoinData
-): RawPersonRow[] {
-  const hasCompanyFilters =
-    filters.industry?.length ||
-    filters.employeeBucket?.length ||
-    filters.niche?.length ||
-    filters.employeeMin != null ||
-    filters.employeeMax != null;
-
-  if (!hasCompanyFilters) return rows;
+): Promise<RawPersonRow[]> {
+  const rows = await fetchBaseRows(toBaseFilters(filters));
 
   return rows.filter((row) => {
     const company = row.company_id ? companyData.byId.get(row.company_id) : undefined;
-
-    if (filters.industry?.length) {
-      const industry = normalizeIndustry(company?.industry);
-      if (!industry || !filters.industry.includes(industry.id)) return false;
-    }
-
-    if (filters.employeeMin != null || filters.employeeMax != null) {
-      const count = company?.employee_count ?? null;
-      if (count == null) return false;
-      if (filters.employeeMin != null && count < filters.employeeMin) return false;
-      if (filters.employeeMax != null && count > filters.employeeMax) return false;
-    } else if (filters.employeeBucket?.length) {
-      const bucket = employeeBucketOf(company?.employee_count);
-      if (!bucket || !filters.employeeBucket.includes(bucket.id)) return false;
-    }
-
-    if (filters.niche?.length) {
-      const niches = personNiches(row, company, companyData.knownClients);
-      if (!niches.some((n) => filters.niche!.includes(n))) return false;
-    }
-
-    return true;
+    return (
+      matchesEmailPresence(row, filters) &&
+      matchesPhonePresence(row, filters) &&
+      matchesJobTitle(row, filters) &&
+      matchesCountry(row, filters) &&
+      matchesSource(row, filters) &&
+      matchesEmailStatus(row, filters) &&
+      matchesPhoneType(row, filters) &&
+      matchesIndustry(company, filters) &&
+      matchesEmployeeSize(company, filters) &&
+      matchesNiche(row, company, companyData.knownClients, filters)
+    );
   });
 }
 
@@ -282,6 +296,7 @@ function toListRow(row: RawPersonRow): PersonListRow {
     emailStatus: row.email_status,
     phone: row.phone,
     phoneType: row.phone_type,
+    companyId: row.company_id,
     companyName: row.company_name,
     city: row.city,
     state: row.state,
@@ -296,11 +311,9 @@ export async function getPeople(
   page = 1,
   pageSize = 50
 ): Promise<PersonListResult> {
-  const [companyData, candidateRows] = await Promise.all([
-    loadCompanyJoinData(),
-    fetchFilteredRows(toPersonDbFilters(filters)),
-  ]);
-  const rows = sortByLastUpdatedDesc(applyCompanyJoinFilters(candidateRows, filters, companyData));
+  const companyData = await loadCompanyJoinData();
+  const candidateRows = await fetchFilteredRowsUncached(filters, companyData);
+  const rows = sortByLastUpdatedDesc(candidateRows);
   const start = (page - 1) * pageSize;
   return {
     rows: rows.slice(start, start + pageSize).map(toListRow),
@@ -313,30 +326,23 @@ export async function getPeople(
 /** Same query + filtering as getPeople, with no pagination — the export
  * function must run through the identical filtered query, not a separate path. */
 export async function getAllFilteredPeople(filters: PersonListFilters): Promise<PersonListRow[]> {
-  const [companyData, candidateRows] = await Promise.all([
-    loadCompanyJoinData(),
-    fetchFilteredRows(toPersonDbFilters(filters)),
-  ]);
-  return sortByLastUpdatedDesc(applyCompanyJoinFilters(candidateRows, filters, companyData)).map(
-    toListRow
-  );
+  const companyData = await loadCompanyJoinData();
+  const candidateRows = await fetchFilteredRowsUncached(filters, companyData);
+  return sortByLastUpdatedDesc(candidateRows).map(toListRow);
 }
 
-const fetchPersonFilterOptionRows = withTtlCache(
-  () =>
-    fetchAllRows<{
-      company_id: string | null;
-      source: string | null;
-      country: string | null;
-      tags: string[] | null;
-      email_status: string | null;
-      phone_type: string | null;
-    }>("people", "company_id,source,country,tags,email_status,phone_type"),
-  3_600_000
-);
-
-export async function getPersonFilterOptions(): Promise<PersonFilterOptions> {
-  const [companyData, rows] = await Promise.all([loadCompanyJoinData(), fetchPersonFilterOptionRows()]);
+/** Facet counts reflect the currently active filters, not the whole table —
+ * e.g. narrowing to an Industry should make the Source dropdown show counts
+ * within that narrowed set, not the global total (see the same pattern in
+ * companies.ts::getCompanyFilterOptions). Each facet's own count excludes
+ * its own filter so picking a value doesn't zero out its sibling options. */
+export async function getPersonFilterOptions(
+  filters: PersonListFilters = {}
+): Promise<PersonFilterOptions> {
+  const [companyData, rows] = await Promise.all([
+    loadCompanyJoinData(),
+    fetchBaseRows(toBaseFilters(filters)),
+  ]);
 
   const niches = new Map<string, number>();
   const sources = new Map<string, number>();
@@ -348,31 +354,58 @@ export async function getPersonFilterOptions(): Promise<PersonFilterOptions> {
   for (const row of rows) {
     const company = row.company_id ? companyData.byId.get(row.company_id) : undefined;
 
-    for (const niche of personNiches(row, company, companyData.knownClients)) {
-      niches.set(niche, (niches.get(niche) ?? 0) + 1);
+    const okCommon =
+      matchesEmailPresence(row, filters) &&
+      matchesPhonePresence(row, filters) &&
+      matchesJobTitle(row, filters);
+    if (!okCommon) continue;
+
+    const okCountry = matchesCountry(row, filters);
+    const okSource = matchesSource(row, filters);
+    const okEmailStatus = matchesEmailStatus(row, filters);
+    const okPhoneType = matchesPhoneType(row, filters);
+    const okIndustry = matchesIndustry(company, filters);
+    const okEmployee = matchesEmployeeSize(company, filters);
+    const okNiche = matchesNiche(row, company, companyData.knownClients, filters);
+
+    if (okCountry && okSource && okEmailStatus && okPhoneType && okIndustry && okEmployee) {
+      for (const niche of personNiches(row, company, companyData.knownClients)) {
+        niches.set(niche, (niches.get(niche) ?? 0) + 1);
+      }
     }
 
-    for (const token of normalizeSourceTokens(row.source)) {
-      sources.set(token, (sources.get(token) ?? 0) + 1);
+    if (okNiche && okCountry && okEmailStatus && okPhoneType && okIndustry && okEmployee) {
+      for (const token of normalizeSourceTokens(row.source)) {
+        sources.set(token, (sources.get(token) ?? 0) + 1);
+      }
     }
 
-    const country = normalizeCountry(row.country);
-    if (country) {
-      const existing = countries.get(country.id);
-      countries.set(country.id, { label: country.label, count: (existing?.count ?? 0) + 1 });
+    if (okNiche && okSource && okEmailStatus && okPhoneType && okIndustry && okEmployee) {
+      const country = normalizeCountry(row.country);
+      if (country) {
+        const existing = countries.get(country.id);
+        countries.set(country.id, { label: country.label, count: (existing?.count ?? 0) + 1 });
+      }
     }
 
-    const industry = normalizeIndustry(company?.industry);
-    if (industry) {
-      const existing = industries.get(industry.id);
-      industries.set(industry.id, { label: industry.label, count: (existing?.count ?? 0) + 1 });
+    if (okNiche && okCountry && okSource && okEmailStatus && okPhoneType && okEmployee) {
+      const industry = normalizeIndustry(company?.industry);
+      if (industry) {
+        const existing = industries.get(industry.id);
+        industries.set(industry.id, { label: industry.label, count: (existing?.count ?? 0) + 1 });
+      }
     }
 
-    if (row.email_status) {
-      emailStatuses.set(row.email_status, (emailStatuses.get(row.email_status) ?? 0) + 1);
+    if (okNiche && okCountry && okSource && okIndustry && okEmployee && okPhoneType) {
+      if (row.email_status) {
+        emailStatuses.set(row.email_status, (emailStatuses.get(row.email_status) ?? 0) + 1);
+      }
     }
-    if (row.phone_type) {
-      phoneTypes.set(row.phone_type, (phoneTypes.get(row.phone_type) ?? 0) + 1);
+
+    if (okNiche && okCountry && okSource && okIndustry && okEmployee && okEmailStatus) {
+      if (row.phone_type) {
+        phoneTypes.set(row.phone_type, (phoneTypes.get(row.phone_type) ?? 0) + 1);
+      }
     }
   }
 
@@ -399,6 +432,39 @@ export async function getPersonFilterOptions(): Promise<PersonFilterOptions> {
       .map(([id, count]) => ({ id, label: id, count }))
       .sort(sortDesc),
   };
+}
+
+export interface CompanyPersonRow {
+  id: string;
+  fullName: string | null;
+  jobTitle: string | null;
+  email: string | null;
+  phone: string | null;
+}
+
+/** Powers the "people linked to this company" drawer opened from the
+ * companies table (see companies-table.tsx / people-drawer.tsx). Fetched
+ * on demand per company rather than joined into the companies list query,
+ * so the table payload stays cheap for every row while still rendering
+ * enough per person (name, title, email, phone) to be useful in the drawer.
+ * Capped at 500 — this is a browsing UI, not an export path. */
+export async function getPeopleByCompanyId(companyId: string): Promise<CompanyPersonRow[]> {
+  const { data, error } = await supabaseAdmin
+    .from("people")
+    .select("id,full_name,job_title,email,phone")
+    .eq("company_id", companyId)
+    .order("full_name", { ascending: true })
+    .limit(500);
+
+  if (error) throw error;
+
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    fullName: row.full_name,
+    jobTitle: row.job_title,
+    email: row.email,
+    phone: row.phone,
+  }));
 }
 
 export interface LinkedCompany {

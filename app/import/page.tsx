@@ -12,7 +12,7 @@ import {
   type TargetTable,
 } from "@/lib/import/providers";
 import { fuzzyMatchColumn } from "@/lib/import/normalize";
-import { parseCSV, applyColumnMap } from "@/lib/import/csv";
+import { parseCSV, applyColumnMap, filterMappedNonEmptyRows, serializeCSV } from "@/lib/import/csv";
 import { Upload, History, CheckCircle, AlertCircle, Loader2, Download, ChevronRight, RefreshCw } from "lucide-react";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -803,6 +803,7 @@ function StepSummary({
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(true);
   const [preflightErr, setPreflightErr] = useState<string | null>(null);
+  const [emptyRowCount, setEmptyRowCount] = useState<number | null>(null);
 
   const columnMap: Record<string, string> = {};
   for (const m of meta.columnMappings) {
@@ -818,6 +819,7 @@ function StepSummary({
     // Extract identity fields client-side so we only send small arrays, not the full CSV text
     const { rows } = parseCSV(csv.allText);
     const mapped = applyColumnMap(rows, columnMap);
+    setEmptyRowCount(rows.length - mapped.length);
     const domains = mapped.map((r) => r.domain).filter((d): d is string => typeof d === "string" && !!d);
     const linkedins = mapped.map((r) => r.linkedin_url).filter((l): l is string => typeof l === "string" && !!l);
 
@@ -887,6 +889,12 @@ function StepSummary({
         </div>
       ) : null}
 
+      {!preflightLoading && !preflightErr && emptyRowCount !== null && emptyRowCount > 0 && (
+        <p className="text-xs text-ink-mute">
+          {emptyRowCount.toLocaleString()} of {(emptyRowCount + (preflight?.inputCount ?? 0)).toLocaleString()} rows have no usable data for the mapped fields and will be skipped.
+        </p>
+      )}
+
       {/* Tags to be applied */}
       <div className="rounded-lg border border-rule bg-paper px-4 py-3">
         <p className="mb-1.5 text-xs font-medium text-ink-soft uppercase tracking-wide">Tags to apply</p>
@@ -925,7 +933,13 @@ const PHASE_LABELS: Record<string, string> = {
   error: "Error",
 };
 
-function StepProgress({ progress }: { progress: PushProgress | null }) {
+function StepProgress({
+  progress,
+  uploadNote,
+}: {
+  progress: PushProgress | null;
+  uploadNote?: string | null;
+}) {
   const phase = progress?.phase ?? "normalizing";
   const pct =
     progress && progress.total > 0
@@ -937,6 +951,9 @@ function StepProgress({ progress }: { progress: PushProgress | null }) {
       <div>
         <h3 className="text-base font-semibold text-ink">Importing…</h3>
         <p className="mt-1 text-sm text-ink-soft">Please keep this tab open.</p>
+        {uploadNote && (
+          <p className="mt-2 text-sm text-stamp">{uploadNote}</p>
+        )}
       </div>
 
       <div className="flex flex-col gap-4">
@@ -997,24 +1014,7 @@ function StepReport({
   onReset: () => void;
 }) {
   function downloadFailed() {
-    if (!result.failedRecords.length) return;
-    const headers = Object.keys(result.failedRecords[0]);
-    const lines = [
-      headers.join(","),
-      ...result.failedRecords.map((r) =>
-        headers.map((h) => {
-          const v = String(r[h] ?? "");
-          return v.includes(",") || v.includes('"') ? `"${v.replace(/"/g, '""')}"` : v;
-        }).join(",")
-      ),
-    ];
-    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "import_failed.csv";
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadFailedCsv(result.failedRecords, "import_failed.csv");
   }
 
   return (
@@ -1065,6 +1065,10 @@ function StepReport({
 // History tab
 // ────────────────────────────────────────────────────────────────────────────
 
+function csvCellValue(v: unknown): string {
+  return typeof v === "object" && v !== null ? JSON.stringify(v) : String(v ?? "");
+}
+
 function downloadFailedCsv(records: Record<string, unknown>[], filename = "failed_records.csv") {
   if (!records.length) return;
   const headers = Object.keys(records[0]);
@@ -1072,7 +1076,7 @@ function downloadFailedCsv(records: Record<string, unknown>[], filename = "faile
     headers.join(","),
     ...records.map((r) =>
       headers.map((h) => {
-        const v = String(r[h] ?? "");
+        const v = csvCellValue(r[h]);
         return v.includes(",") || v.includes('"') || v.includes("\n")
           ? `"${v.replace(/"/g, '""')}"`
           : v;
@@ -1284,6 +1288,11 @@ function HistoryTab({ token }: { token: string }) {
 
 type Step = "upload" | "mapping" | "metadata" | "summary" | "progress" | "report";
 
+// Vercel Route Handlers on the Hobby tier cap request bodies at ~4.5MB.
+// Above this threshold we relay the CSV through Supabase Storage instead of
+// posting it directly, so the upload bypasses the Vercel function entirely.
+const DIRECT_UPLOAD_MAX_BYTES = 4 * 1024 * 1024;
+
 const STEPS: Step[] = ["upload", "mapping", "metadata", "summary", "progress", "report"];
 const STEP_LABELS: Record<Step, string> = {
   upload: "Upload",
@@ -1311,6 +1320,7 @@ export default function ImportPage() {
   });
 
   const [progress, setProgress] = useState<PushProgress | null>(null);
+  const [uploadNote, setUploadNote] = useState<string | null>(null);
   const [result, setResult] = useState<PushResult | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -1336,6 +1346,7 @@ export default function ImportPage() {
       date: new Date().toISOString().slice(0, 10),
     });
     setProgress(null);
+    setUploadNote(null);
     setResult(null);
     setErrorMsg(null);
     setStep("upload");
@@ -1366,17 +1377,80 @@ export default function ImportPage() {
       columnMap,
     };
 
-    const formData = new FormData();
-    const blob = new Blob([csvData.allText], { type: "text/csv" });
-    formData.append("file", blob, "import.csv");
-    formData.append("metadata", JSON.stringify(metadata));
+    // Filter out rows that would be discarded server-side anyway (no
+    // populated identity field after mapping) so we don't waste upload
+    // payload size on rows that can never survive `applyColumnMap`.
+    const { headers, rows } = parseCSV(csvData.allText);
+    const nonEmptyRows = filterMappedNonEmptyRows(rows, columnMap);
+    const filteredText = serializeCSV(headers, nonEmptyRows);
+    const byteLength = new TextEncoder().encode(filteredText).length;
 
     try {
-      const response = await fetch("/api/import/stream", {
-        method: "POST",
-        headers: { "X-Import-Token": token },
-        body: formData,
-      });
+      let response: Response;
+
+      if (byteLength > DIRECT_UPLOAD_MAX_BYTES) {
+        setUploadNote(
+          "Large file detected — uploading via secure storage, this may take a bit longer."
+        );
+
+        try {
+          const signRes = await fetch("/api/import/storage-upload", {
+            method: "POST",
+            headers: { "X-Import-Token": token },
+          });
+
+          if (!signRes.ok) {
+            const text = await signRes.text();
+            throw new Error(text || `HTTP ${signRes.status}`);
+          }
+
+          const { path, signedUrl } = (await signRes.json()) as {
+            path: string;
+            token: string;
+            signedUrl: string;
+          };
+
+          // Mirrors the wire format used by supabase-js's
+          // `uploadToSignedUrl` (PUT with a multipart body containing an
+          // empty-named file field). We hit the signed URL directly with
+          // fetch instead of instantiating a Supabase client, since we have
+          // no anon/public key to give a browser-side client and the token
+          // embedded in the signed URL (already appended server-side by
+          // `createSignedUploadUrl`) is all the auth this endpoint needs.
+          const uploadBody = new FormData();
+          uploadBody.append("cacheControl", "3600");
+          uploadBody.append("", new Blob([filteredText], { type: "text/csv" }));
+
+          const uploadRes = await fetch(signedUrl, {
+            method: "PUT",
+            body: uploadBody,
+          });
+
+          if (!uploadRes.ok) {
+            const text = await uploadRes.text();
+            throw new Error(text || `Storage upload failed: HTTP ${uploadRes.status}`);
+          }
+
+          response = await fetch("/api/import/stream", {
+            method: "POST",
+            headers: { "X-Import-Token": token, "Content-Type": "application/json" },
+            body: JSON.stringify({ path, metadata: JSON.stringify(metadata) }),
+          });
+        } finally {
+          setUploadNote(null);
+        }
+      } else {
+        const formData = new FormData();
+        const blob = new Blob([filteredText], { type: "text/csv" });
+        formData.append("file", blob, "import.csv");
+        formData.append("metadata", JSON.stringify(metadata));
+
+        response = await fetch("/api/import/stream", {
+          method: "POST",
+          headers: { "X-Import-Token": token },
+          body: formData,
+        });
+      }
 
       if (!response.ok) {
         const text = await response.text();
@@ -1533,7 +1607,7 @@ export default function ImportPage() {
                   )}
 
                   {step === "progress" && (
-                    <StepProgress progress={progress} />
+                    <StepProgress progress={progress} uploadNote={uploadNote} />
                   )}
 
                   {step === "report" && (
