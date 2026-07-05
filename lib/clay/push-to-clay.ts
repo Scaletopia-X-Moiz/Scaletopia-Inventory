@@ -1,6 +1,8 @@
 import "server-only";
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import { getAllFilteredCompanies, type CompanyListFilters } from "@/lib/data/companies";
+import { getCompaniesForClay, type CompanyListFilters } from "@/lib/data/companies";
+import { getPeopleForClay, type PersonListFilters } from "@/lib/data/people";
+import type { ClayPushRecord } from "@/lib/clay/types";
 
 export const CLAY_CONCURRENCY = 8;
 export const IN_CHUNK = 200;
@@ -30,6 +32,7 @@ export interface ClayPushResult {
   total_matched: number;
   pushed: number;
   errors: number;
+  /** Preview of failed record display names (company/person), capped at FAILED_PREVIEW. */
   failed_companies: string[];
 }
 
@@ -51,79 +54,12 @@ export function isValidWebhookUrl(url: unknown): url is string {
   }
 }
 
-const PAYLOAD_COLUMNS =
-  "id,company_name,domain,website_url,linkedin_url,industry,city,state,country,employee_count,phone,description,founded_year,revenue,source,quality_tier,mx_provider,security_gateway,keywords,technologies";
-
-interface CompanyRow {
-  id: string;
-  company_name: string | null;
-  domain: string | null;
-  website_url: string | null;
-  linkedin_url: string | null;
-  industry: string | null;
-  city: string | null;
-  state: string | null;
-  country: string | null;
-  employee_count: number | null;
-  phone: string | null;
-  description: string | null;
-  founded_year: number | null;
-  revenue: number | null;
-  source: string | null;
-  quality_tier: string | null;
-  mx_provider: string | null;
-  security_gateway: string | null;
-  keywords: string[] | null;
-  technologies: string[] | null;
-}
-
 function chunk<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let i = 0; i < arr.length; i += size) {
     chunks.push(arr.slice(i, i + size));
   }
   return chunks;
-}
-
-/** Fetch full payload rows for the matched ids. Unlike the earlier version,
- * this no longer filters on `pushed_to_clay` — every company in the current
- * filter is pushed on every run, duplicates included (Clay dedupes its side). */
-async function fetchMatchedRows(matchedIds: string[]): Promise<CompanyRow[]> {
-  const rows: CompanyRow[] = [];
-  for (const idChunk of chunk(matchedIds, IN_CHUNK)) {
-    const { data, error } = await supabaseAdmin
-      .from("companies")
-      .select(PAYLOAD_COLUMNS)
-      .in("id", idChunk);
-    if (error) throw error;
-    if (data) rows.push(...(data as unknown as CompanyRow[]));
-  }
-  return rows;
-}
-
-function toWebhookPayload(row: CompanyRow) {
-  return {
-    company_id: row.id,
-    company_name: row.company_name,
-    domain: row.domain,
-    website_url: row.website_url,
-    linkedin_url: row.linkedin_url,
-    industry: row.industry,
-    city: row.city,
-    state: row.state,
-    country: row.country,
-    employee_count: row.employee_count,
-    phone: row.phone,
-    description: row.description,
-    founded_year: row.founded_year,
-    revenue: row.revenue,
-    source: row.source,
-    quality_tier: row.quality_tier,
-    mx_provider: row.mx_provider,
-    security_gateway: row.security_gateway,
-    keywords: row.keywords,
-    technologies: row.technologies,
-  };
 }
 
 const TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
@@ -150,9 +86,9 @@ function rateLimitBackoffMs(attempt: number): number {
 async function postWithRetry(
   fetchImpl: typeof fetch,
   webhookUrl: string,
-  row: CompanyRow
+  payload: Record<string, unknown>
 ): Promise<PostResult> {
-  const body = JSON.stringify(toWebhookPayload(row));
+  const body = JSON.stringify(payload);
   let transientAttempt = 0;
   let rateLimitAttempt = 0;
 
@@ -186,21 +122,25 @@ async function postWithRetry(
   }
 }
 
-interface FailedCompanyDetail {
-  company_id: string;
-  company_name: string | null;
+interface FailedRecordDetail {
+  id: string;
+  name: string | null;
   status: number | null;
   error: string | null;
 }
 
 /** Best-effort persistence — logging must never take down the push itself
  * (e.g. the migration hasn't been run yet in this environment). */
-async function logRunStart(webhookUrl: string, filters: CompanyListFilters): Promise<string | null> {
+async function logRunStart(
+  entity: string,
+  webhookUrl: string,
+  filters: unknown
+): Promise<string | null> {
   try {
     const webhookHost = new URL(webhookUrl).host;
     const { data, error } = await supabaseAdmin
       .from("clay_push_runs")
-      .insert({ webhook_host: webhookHost, filters })
+      .insert({ webhook_host: webhookHost, filters: { entity, ...(filters as object) } })
       .select("id")
       .single();
     if (error) throw error;
@@ -218,7 +158,7 @@ async function logRunEnd(
     total_matched?: number;
     pushed_count?: number;
     error_count?: number;
-    failed_companies?: FailedCompanyDetail[];
+    failed_companies?: FailedRecordDetail[];
     error_message?: string;
   }
 ): Promise<void> {
@@ -234,14 +174,24 @@ async function logRunEnd(
   }
 }
 
-/** Push every company in the current filtered view to `webhookUrl`.
+interface ClayEntity<TFilters> {
+  /** Discriminates run-log rows (companies vs people). */
+  label: string;
+  /** Resolves the current filtered view into full webhook payloads. */
+  loadRecords: (filters: TFilters) => Promise<ClayPushRecord[]>;
+}
+
+/** Push every record in the current filtered view to `webhookUrl`.
  *
- * The webhook target is passed in per-call from the UI. Filter resolution
- * reuses `getAllFilteredCompanies` (the same path CSV export uses) so the
- * pushed set always equals the on-screen set. No skip-already-pushed and no
- * `pushed_to_clay` marking: every matching company is sent on every run. */
-export async function runClayPush(
-  filters: CompanyListFilters,
+ * The webhook target is passed in per-call from the UI. Record resolution runs
+ * through the same filtered query the list/export use, so the pushed set always
+ * equals the on-screen set. No skip-already-pushed and no `pushed_to_clay`
+ * marking: every matching record is sent on every run (Clay dedupes its side).
+ * Each payload carries the full record — every native column plus all
+ * enrichment (custom_data) keys flattened to the top level. */
+async function runClayPush<TFilters>(
+  entity: ClayEntity<TFilters>,
+  filters: TFilters,
   webhookUrl: string,
   deps: RunClayPushDeps = {}
 ): Promise<ClayPushResult> {
@@ -252,13 +202,13 @@ export async function runClayPush(
   const fetchImpl = deps.fetchImpl ?? fetch;
   const onProgress = deps.onProgress;
 
-  const runId = await logRunStart(webhookUrl, filters);
+  const runId = await logRunStart(entity.label, webhookUrl, filters);
 
   try {
     onProgress?.({ phase: "resolving", done: 0, total: 0, pushed: 0, errors: 0 });
 
-    const matched = await getAllFilteredCompanies(filters);
-    const total_matched = matched.length;
+    const records = await entity.loadRecords(filters);
+    const total_matched = records.length;
 
     if (total_matched === 0) {
       onProgress?.({ phase: "done", done: 0, total: 0, pushed: 0, errors: 0 });
@@ -272,21 +222,19 @@ export async function runClayPush(
       return { total_matched: 0, pushed: 0, errors: 0, failed_companies: [] };
     }
 
-    const rows = await fetchMatchedRows(matched.map((c) => c.id));
-
-    onProgress?.({ phase: "pushing", done: 0, total: rows.length, pushed: 0, errors: 0 });
+    onProgress?.({ phase: "pushing", done: 0, total: records.length, pushed: 0, errors: 0 });
 
     let pushed = 0;
     let errors = 0;
     let done = 0;
     const failed_companies: string[] = [];
-    const failed_details: FailedCompanyDetail[] = [];
+    const failed_details: FailedRecordDetail[] = [];
 
-    for (const group of chunk(rows, CLAY_CONCURRENCY)) {
+    for (const group of chunk(records, CLAY_CONCURRENCY)) {
       const results = await Promise.allSettled(
-        group.map(async (row) => ({
-          row,
-          result: await postWithRetry(fetchImpl, webhookUrl, row),
+        group.map(async (record) => ({
+          record,
+          result: await postWithRetry(fetchImpl, webhookUrl, record.payload),
         }))
       );
 
@@ -296,15 +244,15 @@ export async function runClayPush(
           pushed++;
         } else {
           errors++;
-          const row = settled.status === "fulfilled" ? settled.value.row : null;
+          const record = settled.status === "fulfilled" ? settled.value.record : null;
           const result = settled.status === "fulfilled" ? settled.value.result : null;
-          const name = row?.company_name ?? null;
+          const name = record?.displayName ?? null;
           if (failed_companies.length < FAILED_PREVIEW) {
             failed_companies.push(name || "unknown");
           }
           failed_details.push({
-            company_id: row?.id ?? "unknown",
-            company_name: name,
+            id: record?.id ?? "unknown",
+            name,
             status: result?.status ?? null,
             error:
               result?.error ??
@@ -315,10 +263,10 @@ export async function runClayPush(
         }
       }
 
-      onProgress?.({ phase: "pushing", done, total: rows.length, pushed, errors });
+      onProgress?.({ phase: "pushing", done, total: records.length, pushed, errors });
     }
 
-    onProgress?.({ phase: "done", done, total: rows.length, pushed, errors });
+    onProgress?.({ phase: "done", done, total: records.length, pushed, errors });
 
     await logRunEnd(runId, {
       status: "done",
@@ -336,4 +284,32 @@ export async function runClayPush(
     });
     throw err;
   }
+}
+
+/** Push the current filtered Companies view to Clay. */
+export function runCompaniesClayPush(
+  filters: CompanyListFilters,
+  webhookUrl: string,
+  deps: RunClayPushDeps = {}
+): Promise<ClayPushResult> {
+  return runClayPush(
+    { label: "companies", loadRecords: getCompaniesForClay },
+    filters,
+    webhookUrl,
+    deps
+  );
+}
+
+/** Push the current filtered People view to Clay. */
+export function runPeopleClayPush(
+  filters: PersonListFilters,
+  webhookUrl: string,
+  deps: RunClayPushDeps = {}
+): Promise<ClayPushResult> {
+  return runClayPush(
+    { label: "people", loadRecords: getPeopleForClay },
+    filters,
+    webhookUrl,
+    deps
+  );
 }

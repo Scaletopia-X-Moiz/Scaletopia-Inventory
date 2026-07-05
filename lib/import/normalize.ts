@@ -76,6 +76,7 @@ const COLUMN_ALIAS_MAP: Record<string, string> = {
   position: "job_title",
   role: "job_title",
   "email address": "email",
+  emails: "email",
   "phone number": "phone",
   tel: "phone",
   telephone: "phone",
@@ -98,21 +99,58 @@ function normalizeHeader(h: string): string {
   return h.toLowerCase().replace(/[\s\-_]+/g, "");
 }
 
+/**
+ * Many providers export "joined" CSVs — one row per person, with the
+ * employer's entire company record repeated under prefixed headers (e.g.
+ * AI Ark's people export has both "City" (the person's) and "Company City"
+ * (the employer's)). Left unguarded, the fuzzy matcher's substring scoring
+ * (and the alias table) happily matches "Company City" -> city, "Company
+ * Email" -> email, etc. — and because these columns tend to sit later in
+ * the CSV than the real person columns, they silently overwrite the correct
+ * value. This table lists the prefixes that mark a column as describing the
+ * *other* entity for a given import target, so those columns are excluded
+ * from matching that target's own identity fields.
+ */
+const CROSS_ENTITY_PREFIXES: Record<string, string[]> = {
+  people: ["company ", "organization ", "employer ", "account "],
+  companies: ["contact ", "person ", "employee "],
+};
+
+/**
+ * Fields that legitimately cross-reference the *other* entity and are
+ * exempt from the cross-entity prefix exclusion above — e.g. a person row
+ * is meant to carry their employer's `company_name`/`domain`, so
+ * "Company Name" / "Company Domain" should still be allowed to match those
+ * two fields specifically, just not `city`, `phone`, `email`, etc.
+ */
+const CROSS_REFERENCE_FIELDS: Record<string, string[]> = {
+  people: ["company_name", "domain"],
+  companies: [],
+};
+
 export function fuzzyMatchColumn(
   header: string,
-  candidates: string[]
+  candidates: string[],
+  targetTable?: "companies" | "people"
 ): { field: string; score: number } | null {
   const lower = header.toLowerCase();
   const normalized = normalizeHeader(header);
 
+  const foreignPrefixes = targetTable ? CROSS_ENTITY_PREFIXES[targetTable] : [];
+  const hasForeignPrefix = foreignPrefixes.some((p) => lower.startsWith(p));
+  const exemptFields = targetTable ? CROSS_REFERENCE_FIELDS[targetTable] : [];
+  const isAllowed = (field: string) => !hasForeignPrefix || exemptFields.includes(field);
+
   const aliasResult = COLUMN_ALIAS_MAP[lower] ?? COLUMN_ALIAS_MAP[normalized];
-  if (aliasResult && candidates.includes(aliasResult)) {
+  if (aliasResult && candidates.includes(aliasResult) && isAllowed(aliasResult)) {
     return { field: aliasResult, score: 0.95 };
   }
 
   let best: { field: string; score: number } | null = null;
 
   for (const candidate of candidates) {
+    if (!isAllowed(candidate)) continue;
+
     let score = 0;
     const candLower = candidate.toLowerCase();
     const candNorm = normalizeHeader(candidate);

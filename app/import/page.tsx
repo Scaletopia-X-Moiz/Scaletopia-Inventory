@@ -154,7 +154,7 @@ function autoMapColumns(
     if (providerMap[header]) {
       return { csvHeader: header, supabaseField: providerMap[header], score: 1.0 };
     }
-    const match = fuzzyMatchColumn(header, candidates);
+    const match = fuzzyMatchColumn(header, candidates, targetTable);
     return {
       csvHeader: header,
       supabaseField: match?.field ?? "ignore",
@@ -275,7 +275,8 @@ function StepUpload({
 
   const allProviders = [...BUILTIN_PROVIDERS, ...customProviders];
   const selectedProvider = allProviders.find((p) => p.sourceKey === providerKey) ?? null;
-  const tableIsLocked = BUILTIN_PROVIDERS.some((p) => p.sourceKey === providerKey) && providerKey !== "manual-csv";
+  const providerHasBothTables = !!selectedProvider?.altColumnMap;
+  const tableIsLocked = BUILTIN_PROVIDERS.some((p) => p.sourceKey === providerKey) && !providerHasBothTables;
   const effectiveTable: TargetTable = tableIsLocked
     ? (selectedProvider?.targetTable ?? "companies")
     : (targetOverride || selectedProvider?.targetTable || "companies");
@@ -1553,9 +1554,13 @@ export default function ImportPage() {
                     <StepUpload
                       onNext={(parsedCsv, provider, sourceKey, targetTable) => {
                         setCsv(parsedCsv);
+                        const providerMap =
+                          provider && targetTable !== provider.targetTable
+                            ? provider.altColumnMap ?? {}
+                            : provider?.columnMap ?? {};
                         const mappings = autoMapColumns(
                           parsedCsv.headers,
-                          provider?.columnMap ?? {},
+                          providerMap,
                           targetTable
                         );
                         setMeta((prev) => ({

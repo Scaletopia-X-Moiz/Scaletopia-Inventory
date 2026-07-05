@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
-import { parseCompanyFilters } from "@/lib/data/companies-search-params";
-import { runCompaniesClayPush, isValidWebhookUrl, type ClayPushProgress } from "@/lib/clay/push-to-clay";
+import { parsePersonFilters } from "@/lib/data/people-search-params";
+import { runPeopleClayPush, isValidWebhookUrl, type ClayPushProgress } from "@/lib/clay/push-to-clay";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -12,7 +12,7 @@ function sseEvent(data: unknown): Uint8Array {
 export async function POST(request: NextRequest) {
   // Filters ride in the query string (identical parsing to export/results);
   // the webhook target is supplied per-push in the JSON body.
-  const filters = parseCompanyFilters(request.nextUrl.searchParams);
+  const filters = parsePersonFilters(request.nextUrl.searchParams);
 
   let webhookUrl: unknown;
   try {
@@ -31,7 +31,7 @@ export async function POST(request: NextRequest) {
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        const result = await runCompaniesClayPush(filters, webhookUrl, {
+        const result = await runPeopleClayPush(filters, webhookUrl, {
           onProgress: (p: ClayPushProgress) =>
             controller.enqueue(sseEvent({ type: "progress", ...p })),
         });

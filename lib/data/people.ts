@@ -5,9 +5,10 @@ import { normalizeSourceTokens, sourceLabel } from "@/lib/data/source";
 import { normalizeCountry } from "@/lib/data/country";
 import { normalizeIndustry } from "@/lib/data/industry";
 import { EMPLOYEE_BUCKETS, employeeBucketOf } from "@/lib/data/employee-size";
-import { filterCustomData } from "@/lib/data/custom-data";
+import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
 import { nichesFromTags } from "@/lib/data/niche";
 import { sortByLastUpdatedDesc } from "@/lib/data/sort";
+import type { ClayPushRecord } from "@/lib/clay/types";
 
 export type SingleSelectFilter = "any" | "not_empty" | "empty";
 
@@ -344,6 +345,158 @@ export async function getAllFilteredPeople(filters: PersonListFilters): Promise<
   const companyData = await loadCompanyJoinData();
   const candidateRows = await fetchFilteredRowsUncached(filters, companyData);
   return sortByLastUpdatedDesc(candidateRows).map((row) => toListRow(row, companyData));
+}
+
+/** The raw person row plus the enrichment blob the list query drops. */
+interface FullPersonRow extends RawPersonRow {
+  custom_data: Record<string, unknown> | null;
+}
+
+export interface PersonExportRow {
+  fullName: string | null;
+  jobTitle: string | null;
+  email: string | null;
+  emailStatus: string | null;
+  phone: string | null;
+  phoneType: string | null;
+  linkedinUrl: string | null;
+  companyName: string | null;
+  domain: string | null;
+  companyLinkedinUrl: string | null;
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  sources: string[];
+  tags: string[];
+  lastUpdated: string | null;
+  /** Enrichment fields (filtered custom_data), flattened into their own CSV
+   * columns by the export layer. */
+  customData: Record<string, unknown>;
+}
+
+/** Chunk size for the by-id `*` fetch — bounds both the id list in the query
+ * string and each response (querying by primary key, a chunk returns at most
+ * this many rows). */
+const FULL_ROW_ID_CHUNK_SIZE = 200;
+/** Cap on chunk queries in flight at once, so an unfiltered set (which can be
+ * the whole table) doesn't fire hundreds of parallel requests. */
+const FULL_ROW_FETCH_CONCURRENCY = 10;
+
+/** Full `*` rows for a set of ids, chunked and fetched with bounded concurrency. */
+async function fetchPeopleByIds(ids: string[]): Promise<Map<string, FullPersonRow>> {
+  const byId = new Map<string, FullPersonRow>();
+  if (ids.length === 0) return byId;
+
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += FULL_ROW_ID_CHUNK_SIZE) {
+    chunks.push(ids.slice(i, i + FULL_ROW_ID_CHUNK_SIZE));
+  }
+
+  for (let i = 0; i < chunks.length; i += FULL_ROW_FETCH_CONCURRENCY) {
+    const window = chunks.slice(i, i + FULL_ROW_FETCH_CONCURRENCY);
+    const results = await Promise.all(
+      window.map((chunk) => supabaseAdmin.from("people").select("*").in("id", chunk))
+    );
+    for (const { data, error } of results) {
+      if (error) throw error;
+      for (const row of (data ?? []) as unknown as FullPersonRow[]) {
+        byId.set(row.id, row);
+      }
+    }
+  }
+  return byId;
+}
+
+/** Full-record fetch for CSV export and the Clay push. Resolves the matched set
+ * cheaply through the cached list query, then pulls every column (including
+ * custom_data) only for those ids — so it never fetches `*` for the whole
+ * people table, which was slow enough to stall a push before the first row went
+ * out. Returned already sorted, in the same order as the list/export. */
+async function fetchFullFilteredPeople(
+  filters: PersonListFilters,
+  companyData: CompanyJoinData
+): Promise<FullPersonRow[]> {
+  const matched = sortByLastUpdatedDesc(await fetchFilteredRowsUncached(filters, companyData));
+  const ids = matched.map((row) => row.id);
+  const byId = await fetchPeopleByIds(ids);
+  return ids
+    .map((id) => byId.get(id))
+    .filter((row): row is FullPersonRow => row != null);
+}
+
+function toExportRow(row: FullPersonRow, companyData: CompanyJoinData): PersonExportRow {
+  const company = row.company_id ? companyData.byId.get(row.company_id) : undefined;
+  return {
+    fullName: row.full_name,
+    jobTitle: row.job_title,
+    email: row.email,
+    emailStatus: row.email_status,
+    phone: row.phone,
+    phoneType: row.phone_type,
+    linkedinUrl: row.linkedin_url,
+    companyName: row.company_name,
+    domain: row.domain,
+    companyLinkedinUrl: company?.linkedin_url ?? null,
+    city: row.city,
+    state: row.state,
+    country: row.country,
+    sources: normalizeSourceTokens(row.source),
+    tags: row.tags ?? [],
+    lastUpdated: row.last_updated,
+    customData: filterCustomData(row.custom_data, PERSON_EXTRA_BLOCKED_KEYS),
+  };
+}
+
+/** Full-record export: same filtered set as getAllFilteredPeople but with
+ * every native column and all enrichment (custom_data) keys retained. */
+export async function getAllFilteredPeopleForExport(
+  filters: PersonListFilters
+): Promise<PersonExportRow[]> {
+  const companyData = await loadCompanyJoinData();
+  const rows = await fetchFullFilteredPeople(filters, companyData);
+  return rows.map((row) => toExportRow(row, companyData));
+}
+
+/** The full Clay webhook payload for one person: every native column (including
+ * the joined company LinkedIn URL) plus each enrichment (custom_data) key
+ * flattened to the top level. Enrichment is spread first so native columns stay
+ * authoritative on any key collision. Keys are snake_case for clean Clay column
+ * mapping; matches the CSV export's field set and custom_data filtering. */
+function toClayPayload(row: FullPersonRow, companyData: CompanyJoinData): Record<string, unknown> {
+  const company = row.company_id ? companyData.byId.get(row.company_id) : undefined;
+  return {
+    ...toWebhookCustomData(row.custom_data),
+    person_id: row.id,
+    full_name: row.full_name,
+    job_title: row.job_title,
+    email: row.email,
+    email_status: row.email_status,
+    phone: row.phone,
+    phone_type: row.phone_type,
+    linkedin_url: row.linkedin_url,
+    company_id: row.company_id,
+    company_name: row.company_name,
+    company_domain: row.domain,
+    company_linkedin_url: company?.linkedin_url ?? null,
+    city: row.city,
+    state: row.state,
+    country: row.country,
+    source: row.source,
+    tags: row.tags,
+    last_updated: row.last_updated,
+  };
+}
+
+/** Clay push records for the current filtered view — the same set (and order)
+ * as getAllFilteredPeople, each carrying the full flattened webhook payload. */
+export async function getPeopleForClay(filters: PersonListFilters): Promise<ClayPushRecord[]> {
+  const companyData = await loadCompanyJoinData();
+  const rows = await fetchFullFilteredPeople(filters, companyData);
+  return rows.map((row) => ({
+    id: row.id,
+    displayName: row.full_name,
+    payload: toClayPayload(row, companyData),
+  }));
 }
 
 /** Facet counts reflect the currently active filters, not the whole table —

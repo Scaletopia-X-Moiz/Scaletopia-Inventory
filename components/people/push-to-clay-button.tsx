@@ -6,7 +6,7 @@ import { Loader2, Send } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
 
-const WEBHOOK_STORAGE_KEY = "clay-webhook-url";
+const WEBHOOK_STORAGE_KEY = "clay-webhook-url-people";
 
 type PushDoneResult = {
   total_matched: number;
@@ -41,7 +41,7 @@ export function PushToClayButton({ paramsStr, total }: { paramsStr: string; tota
   function handleClick() {
     if (busy) return;
     if (total === 0) {
-      showToast("No companies match the current filters.", "info");
+      showToast("No people match the current filters.", "info");
       return;
     }
     // Pre-fill the last URL used on this device for convenience.
@@ -67,7 +67,7 @@ export function PushToClayButton({ paramsStr, total }: { paramsStr: string; tota
     setPushLabel("Pushing…");
 
     try {
-      const response = await fetch(`/api/companies/push-to-clay?${paramsStr}`, {
+      const response = await fetch(`/api/people/push-to-clay?${paramsStr}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ webhookUrl: url }),
@@ -126,7 +126,7 @@ export function PushToClayButton({ paramsStr, total }: { paramsStr: string; tota
     if (event.type === "done") {
       const { pushed, errors, failed_companies } = event.result;
       if (errors === 0) {
-        showToast(`Pushed ${pushed} companies to Clay.`, "success");
+        showToast(`Pushed ${pushed} people to Clay.`, "success");
       } else if (pushed > 0) {
         const names = failed_companies.slice(0, 3).join(", ");
         const more = failed_companies.length > 3 ? "…" : "";
@@ -171,8 +171,8 @@ export function PushToClayButton({ paramsStr, total }: { paramsStr: string; tota
                 This is a large push — confirm your filters.
               </span>
             ) : null}
-            <strong className="text-ink">{total.toLocaleString("en-US")}</strong> companies in the
-            current view will be pushed. Every matching company is sent, including any pushed
+            <strong className="text-ink">{total.toLocaleString("en-US")}</strong> people in the
+            current view will be pushed. Every matching person is sent, including any pushed
             before.
           </AlertDialog.Description>
 

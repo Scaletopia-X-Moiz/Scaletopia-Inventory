@@ -6,6 +6,7 @@ import type { PersonListResult } from "@/lib/data/people";
 import { PeopleTable } from "@/components/people/people-table";
 import { Pagination } from "@/components/companies/pagination";
 import { ExportButton } from "@/components/people/export-button";
+import { PushToClayButton } from "@/components/people/push-to-clay-button";
 import { SkeletonTable } from "@/components/shared/skeleton-loaders";
 
 const cache = new Map<string, PersonListResult>();
@@ -76,7 +77,10 @@ export function PeopleResultsClient() {
         <h2 className="text-sm font-semibold text-ink">
           {result.total.toLocaleString("en-US")} people
         </h2>
-        <ExportButton href={exportHref} />
+        <div className="flex items-center gap-2">
+          <PushToClayButton paramsStr={paramsStr} total={result.total} />
+          <ExportButton href={exportHref} />
+        </div>
       </div>
 
       <PeopleTable rows={result.rows} />

@@ -5,8 +5,9 @@ import { normalizeSourceTokens, sourceLabel } from "@/lib/data/source";
 import { normalizeCountry } from "@/lib/data/country";
 import { normalizeIndustry } from "@/lib/data/industry";
 import { EMPLOYEE_BUCKETS, employeeBucketOf } from "@/lib/data/employee-size";
-import { filterCustomData } from "@/lib/data/custom-data";
+import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
 import { sortByLastUpdatedDesc } from "@/lib/data/sort";
+import type { ClayPushRecord } from "@/lib/clay/types";
 
 export interface CompanyListFilters {
   search?: string;
@@ -112,24 +113,31 @@ function toBaseFilters(filters: CompanyListFilters): BaseFilters {
   };
 }
 
-async function fetchBaseRowsUncached(filters: BaseFilters): Promise<RawCompanyRow[]> {
+/** Applies the base (DB-level) filters shared by the list query and the full
+ * export query, so both narrow the companies table identically before the
+ * in-app niche/country/industry/source pass. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyCompanyBaseFilters(query: any, filters: BaseFilters): any {
+  let q = query;
   const search = filters.search?.trim();
+  if (search) {
+    const term = search.replace(/[%,]/g, "");
+    q = q.or(`company_name.ilike.%${term}%,domain.ilike.%${term}%`);
+  }
+  if (filters.employeeMin != null || filters.employeeMax != null) {
+    if (filters.employeeMin != null) q = q.gte("employee_count", filters.employeeMin);
+    if (filters.employeeMax != null) q = q.lte("employee_count", filters.employeeMax);
+  } else if (filters.employeeBucket?.length) {
+    const clause = employeeBucketOrClause(filters.employeeBucket);
+    if (clause) q = q.or(clause);
+  }
+  return q;
+}
 
-  return fetchAllRows<RawCompanyRow>("companies", LIST_COLUMNS, (query) => {
-    let q = query;
-    if (search) {
-      const term = search.replace(/[%,]/g, "");
-      q = q.or(`company_name.ilike.%${term}%,domain.ilike.%${term}%`);
-    }
-    if (filters.employeeMin != null || filters.employeeMax != null) {
-      if (filters.employeeMin != null) q = q.gte("employee_count", filters.employeeMin);
-      if (filters.employeeMax != null) q = q.lte("employee_count", filters.employeeMax);
-    } else if (filters.employeeBucket?.length) {
-      const clause = employeeBucketOrClause(filters.employeeBucket);
-      if (clause) q = q.or(clause);
-    }
-    return q;
-  });
+async function fetchBaseRowsUncached(filters: BaseFilters): Promise<RawCompanyRow[]> {
+  return fetchAllRows<RawCompanyRow>("companies", LIST_COLUMNS, (query) =>
+    applyCompanyBaseFilters(query, filters)
+  );
 }
 
 /** Cached the same way as the rest of this module's Supabase reads — see the
@@ -172,8 +180,9 @@ function matchesSource(row: RawCompanyRow, filters: CompanyListFilters): boolean
  * loading /companies (list + facets, fired concurrently) now pays for one
  * full-table read instead of two. Any staleness is bounded by the same TTL the
  * page's `revalidate` already accepts (matches lib/data/people.ts). */
-async function fetchFilteredRowsUncached(filters: CompanyListFilters): Promise<RawCompanyRow[]> {
-  const rows = await fetchBaseRows(toBaseFilters(filters));
+/** The niche/country/industry/source pass shared by every consumer of the base
+ * rows, cached or not. */
+function filterCompanyRows(rows: RawCompanyRow[], filters: CompanyListFilters): RawCompanyRow[] {
   return rows.filter(
     (row) =>
       matchesNiche(row, filters) &&
@@ -181,6 +190,11 @@ async function fetchFilteredRowsUncached(filters: CompanyListFilters): Promise<R
       matchesIndustry(row, filters) &&
       matchesSource(row, filters)
   );
+}
+
+async function fetchFilteredRowsUncached(filters: CompanyListFilters): Promise<RawCompanyRow[]> {
+  const rows = await fetchBaseRows(toBaseFilters(filters));
+  return filterCompanyRows(rows, filters);
 }
 
 /** The companies table is ~87k rows (and growing); fetching and re-filtering
@@ -196,6 +210,18 @@ const fetchFilteredRows = withTtlCache(
   3_600_000,
   "companies:filtered"
 );
+
+/** Same filtering as fetchFilteredRows, but reads the base rows fresh instead
+ * of through the hour-long TTL cache. The list page can tolerate that
+ * staleness window (see above), but the full-record path below backs CSV
+ * export and the Clay push — actions users trigger right after a CSV import
+ * expecting the rows they just added to be included. Going through the cached
+ * base rows would silently drop anything inserted since the last cache fill,
+ * for up to an hour. */
+async function fetchFilteredRowsFresh(filters: CompanyListFilters): Promise<RawCompanyRow[]> {
+  const rows = await fetchBaseRowsUncached(toBaseFilters(filters));
+  return filterCompanyRows(rows, filters);
+}
 
 function toListRow(row: RawCompanyRow): CompanyListRow {
   return {
@@ -286,6 +312,194 @@ export async function getAllFilteredCompanies(
   return sortByLastUpdatedDesc(await fetchFilteredRows(filters)).map(toListRow);
 }
 
+/** Every column the list query omits, plus the raw enrichment blob. */
+interface FullCompanyRow extends RawCompanyRow {
+  email: string | null;
+  description: string | null;
+  founded_year: number | null;
+  revenue: number | null;
+  client: string | null;
+  tags: string[] | null;
+  domain_status: string | null;
+  mx_provider: string | null;
+  security_gateway: string | null;
+  keywords: string[] | null;
+  technologies: string[] | null;
+  custom_data: Record<string, unknown> | null;
+}
+
+export interface CompanyExportRow {
+  companyName: string | null;
+  domain: string | null;
+  websiteUrl: string | null;
+  linkedinUrl: string | null;
+  niche: string | null;
+  industry: string | null;
+  employeeCount: number | null;
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  phone: string | null;
+  email: string | null;
+  description: string | null;
+  foundedYear: number | null;
+  revenue: number | null;
+  client: string | null;
+  sources: string[];
+  qualityTier: string | null;
+  domainStatus: string | null;
+  mxProvider: string | null;
+  securityGateway: string | null;
+  keywords: string[];
+  technologies: string[];
+  tags: string[];
+  lastUpdated: string | null;
+  /** Enrichment fields (filtered custom_data), flattened into their own CSV
+   * columns by the export layer. */
+  customData: Record<string, unknown>;
+}
+
+/** Chunk size for the by-id `*` fetch — bounds both the id list in the query
+ * string and each response (querying by primary key, a chunk returns at most
+ * this many rows). */
+const FULL_ROW_ID_CHUNK_SIZE = 200;
+/** Cap on chunk queries in flight at once, so an unfiltered set (which can be
+ * the whole table) doesn't fire hundreds of parallel requests. */
+const FULL_ROW_FETCH_CONCURRENCY = 10;
+
+/** Full `*` rows for a set of ids, chunked and fetched with bounded concurrency. */
+async function fetchCompaniesByIds(ids: string[]): Promise<Map<string, FullCompanyRow>> {
+  const byId = new Map<string, FullCompanyRow>();
+  if (ids.length === 0) return byId;
+
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += FULL_ROW_ID_CHUNK_SIZE) {
+    chunks.push(ids.slice(i, i + FULL_ROW_ID_CHUNK_SIZE));
+  }
+
+  for (let i = 0; i < chunks.length; i += FULL_ROW_FETCH_CONCURRENCY) {
+    const window = chunks.slice(i, i + FULL_ROW_FETCH_CONCURRENCY);
+    const results = await Promise.all(
+      window.map((chunk) => supabaseAdmin.from("companies").select("*").in("id", chunk))
+    );
+    for (const { data, error } of results) {
+      if (error) throw error;
+      for (const row of (data ?? []) as unknown as FullCompanyRow[]) {
+        byId.set(row.id, row);
+      }
+    }
+  }
+  return byId;
+}
+
+/** Full-record fetch for CSV export and the Clay push. Resolves the matched set
+ * cheaply (id/niche/etc. columns only, and reading the base rows fresh rather
+ * than through the list page's TTL cache — see fetchFilteredRowsFresh), then
+ * pulls every column (including custom_data) only for those ids — so it never
+ * fetches `*` for the whole base table, which was slow enough to stall a push
+ * before the first row went out. Returned already sorted, in the same order as
+ * the list/export. */
+async function fetchFullFilteredCompanies(
+  filters: CompanyListFilters
+): Promise<FullCompanyRow[]> {
+  const matched = sortByLastUpdatedDesc(await fetchFilteredRowsFresh(filters));
+  const ids = matched.map((row) => row.id);
+  const byId = await fetchCompaniesByIds(ids);
+  return ids
+    .map((id) => byId.get(id))
+    .filter((row): row is FullCompanyRow => row != null);
+}
+
+function toExportRow(row: FullCompanyRow): CompanyExportRow {
+  return {
+    companyName: row.company_name,
+    domain: row.domain,
+    websiteUrl: row.website_url,
+    linkedinUrl: row.linkedin_url,
+    niche: row.niche,
+    industry: row.industry,
+    employeeCount: row.employee_count,
+    city: row.city,
+    state: row.state,
+    country: row.country,
+    phone: row.phone,
+    email: row.email,
+    description: row.description,
+    foundedYear: row.founded_year,
+    revenue: row.revenue,
+    client: row.client,
+    sources: normalizeSourceTokens(row.source),
+    qualityTier: row.quality_tier,
+    domainStatus: row.domain_status,
+    mxProvider: row.mx_provider,
+    securityGateway: row.security_gateway,
+    keywords: row.keywords ?? [],
+    technologies: row.technologies ?? [],
+    tags: row.tags ?? [],
+    lastUpdated: row.last_updated,
+    customData: filterCustomData(row.custom_data),
+  };
+}
+
+/** Full-record export: same filtered set as getAllFilteredCompanies but with
+ * every native column and all enrichment (custom_data) keys retained. */
+export async function getAllFilteredCompaniesForExport(
+  filters: CompanyListFilters
+): Promise<CompanyExportRow[]> {
+  return (await fetchFullFilteredCompanies(filters)).map(toExportRow);
+}
+
+/** The full Clay webhook payload for one company: every native column plus each
+ * enrichment (custom_data) key flattened to the top level. Enrichment is spread
+ * first so native columns stay authoritative on any key collision. Keys are
+ * snake_case to preserve the existing Clay field mapping; custom_data keys are
+ * already snake_case, so they map cleanly too. Matches the CSV export's field
+ * set and custom_data filtering. */
+function toClayPayload(row: FullCompanyRow): Record<string, unknown> {
+  return {
+    ...toWebhookCustomData(row.custom_data),
+    company_id: row.id,
+    company_name: row.company_name,
+    domain: row.domain,
+    website_url: row.website_url,
+    linkedin_url: row.linkedin_url,
+    industry: row.industry,
+    employee_count: row.employee_count,
+    city: row.city,
+    state: row.state,
+    country: row.country,
+    phone: row.phone,
+    email: row.email,
+    description: row.description,
+    founded_year: row.founded_year,
+    revenue: row.revenue,
+    niche: row.niche,
+    client: row.client,
+    source: row.source,
+    tags: row.tags,
+    quality_tier: row.quality_tier,
+    domain_status: row.domain_status,
+    mx_provider: row.mx_provider,
+    security_gateway: row.security_gateway,
+    keywords: row.keywords,
+    technologies: row.technologies,
+    last_updated: row.last_updated,
+  };
+}
+
+/** Clay push records for the current filtered view — the same set (and order)
+ * as getAllFilteredCompanies, each carrying the full flattened webhook payload. */
+export async function getCompaniesForClay(
+  filters: CompanyListFilters
+): Promise<ClayPushRecord[]> {
+  const rows = await fetchFullFilteredCompanies(filters);
+  return rows.map((row) => ({
+    id: row.id,
+    displayName: row.company_name,
+    payload: toClayPayload(row),
+  }));
+}
+
 /** Facet counts reflect the currently active filters, not the whole table —
  * e.g. narrowing to an Industry with 6k companies should make the Source
  * dropdown show source counts within that 6k, not the global total. Each
@@ -366,6 +580,7 @@ export interface CompanyDetail {
   state: string | null;
   country: string | null;
   phone: string | null;
+  email: string | null;
   description: string | null;
   foundedYear: number | null;
   revenue: number | null;
@@ -405,6 +620,7 @@ export async function getCompanyDetail(id: string): Promise<CompanyDetail | null
     state: data.state,
     country: data.country,
     phone: data.phone,
+    email: data.email,
     description: data.description,
     foundedYear: data.founded_year,
     revenue: data.revenue,

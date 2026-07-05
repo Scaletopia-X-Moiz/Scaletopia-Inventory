@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterCustomData } from "@/lib/data/custom-data";
+import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
 
 describe("filterCustomData", () => {
   it("drops the fixed blocklist regardless of value", () => {
@@ -60,5 +60,40 @@ describe("filterCustomData", () => {
   it("handles null/undefined input", () => {
     expect(filterCustomData(null)).toEqual({});
     expect(filterCustomData(undefined)).toEqual({});
+  });
+});
+
+describe("toWebhookCustomData", () => {
+  it("strips only pushed_to_clay and pushed_to_clay_at", () => {
+    const result = toWebhookCustomData({
+      pushed_to_clay: true,
+      pushed_to_clay_at: "2026-01-01",
+      followers: 329,
+    });
+    expect(result).toEqual({ followers: 329 });
+  });
+
+  it("keeps every other key, including nulls, empty strings, empty arrays, and *_at fields", () => {
+    const result = toWebhookCustomData({
+      specialties: null,
+      tagline: "",
+      competitors: [],
+      founded_at: "2010-01-01",
+      pushed_to_emailbison: true,
+      followers: 329,
+    });
+    expect(result).toEqual({
+      specialties: null,
+      tagline: "",
+      competitors: [],
+      founded_at: "2010-01-01",
+      pushed_to_emailbison: true,
+      followers: 329,
+    });
+  });
+
+  it("handles null/undefined input", () => {
+    expect(toWebhookCustomData(null)).toEqual({});
+    expect(toWebhookCustomData(undefined)).toEqual({});
   });
 });

@@ -163,6 +163,26 @@ describe("applyColumnMap", () => {
     expect(result[0].company_name).toBe("Acme");
   });
 
+  it("normalizes a colon-separated company email list to comma-separated", () => {
+    const emailRows = [
+      { Domain: "acme.com", Emails: "care@acme.com:support@acme.com:hello@acme.com" },
+    ];
+    const result = applyColumnMap(emailRows, { Domain: "domain", Emails: "email" });
+    expect(result[0].email).toBe("care@acme.com, support@acme.com, hello@acme.com");
+  });
+
+  it("leaves a single company email untouched", () => {
+    const emailRows = [{ Domain: "acme.com", Emails: "hello@acme.com" }];
+    const result = applyColumnMap(emailRows, { Domain: "domain", Emails: "email" });
+    expect(result[0].email).toBe("hello@acme.com");
+  });
+
+  it("normalizes semicolon- and comma-separated company emails too", () => {
+    const emailRows = [{ Domain: "acme.com", Emails: "a@acme.com; b@acme.com , c@acme.com" }];
+    const result = applyColumnMap(emailRows, { Domain: "domain", Emails: "email" });
+    expect(result[0].email).toBe("a@acme.com, b@acme.com, c@acme.com");
+  });
+
   it("keeps rows that have only one identity field present", () => {
     const sparseRows = [{ Email: "x@y.com", LinkedInURL: "https://linkedin.com/in/x" }];
     const result = applyColumnMap(sparseRows, {

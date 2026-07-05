@@ -82,10 +82,29 @@ async function fetchAllRows(
   table: "companies" | "people",
   columns: string
 ): Promise<Record<string, unknown>[]> {
+  // `.range()` alone gives Postgres no guaranteed row order, so separate
+  // paginated queries can return rows in different physical order (e.g.
+  // under concurrent writes) and silently skip or duplicate rows across
+  // pages even though the total `count` still checks out. Ordering by `id`
+  // makes pagination deterministic and gapless.
   const first = await supabaseAdmin
     .from(table)
     .select(columns, { count: "exact" })
+    .order("id", { ascending: true })
     .range(0, KEY_PAGE_SIZE - 1);
+
+  // A failed page here previously fell through silently (`if (r.data)`),
+  // so a transient timeout/rate-limit on the existing-keys fetch would
+  // quietly drop rows from the dedupe set — causing already-imported
+  // records to be misclassified as new and either duplicate-inserted
+  // (columns with no unique constraint, e.g. linkedin_url) or rejected
+  // with a 23505 unique-violation (columns with one, e.g. domain). Throw
+  // instead so a partial fetch aborts the push rather than corrupting it.
+  if (first.error) {
+    throw new Error(
+      `Failed to fetch existing ${table} rows (page 0): ${formatError(first.error)}`
+    );
+  }
 
   const rows: Record<string, unknown>[] = first.data
     ? [...(first.data as unknown as Record<string, unknown>[])]
@@ -106,12 +125,25 @@ async function fetchAllRows(
         supabaseAdmin
           .from(table)
           .select(columns)
+          .order("id", { ascending: true })
           .range(from, from + KEY_PAGE_SIZE - 1)
       )
     );
     for (const r of results) {
+      if (r.error) {
+        throw new Error(
+          `Failed to fetch existing ${table} rows: ${formatError(r.error)}`
+        );
+      }
       if (r.data) rows.push(...(r.data as unknown as Record<string, unknown>[]));
     }
+  }
+
+  if (rows.length !== total) {
+    throw new Error(
+      `Fetched ${rows.length} of ${total} existing ${table} rows — pagination ` +
+        `returned fewer rows than expected, aborting rather than pushing with an incomplete dedupe set`
+    );
   }
 
   return rows;
@@ -130,6 +162,22 @@ async function fetchExistingCompanies(
     if (row.linkedin_url) existingKeys.add(`linkedin:${row.linkedin_url}`);
   }
   return existingKeys;
+}
+
+/**
+ * Map company domain -> companies.id, used to link imported people records
+ * to their employer via the real `people.company_id` foreign key (the
+ * relation the rest of the app — company detail people-counts, the people
+ * drawer — actually reads). Without this, imported people only ever get a
+ * loose `domain`/`company_name` text copy with no queryable relation.
+ */
+async function fetchCompanyIdByDomain(): Promise<Map<string, string>> {
+  const rows = await fetchAllRows("companies", "id,domain");
+  const map = new Map<string, string>();
+  for (const row of rows) {
+    if (row.domain && row.id) map.set(row.domain as string, row.id as string);
+  }
+  return map;
 }
 
 async function fetchExistingPeople(
@@ -238,7 +286,7 @@ async function bulkUpdate(
 
       const stringFields = [
         "company_name", "website_url", "linkedin_url", "industry",
-        "city", "state", "country", "phone", "description", "revenue",
+        "city", "state", "country", "phone", "email", "description", "revenue",
       ] as const;
       for (const f of stringFields) {
         if (typeof r[f] === "string" && r[f] !== "") enrichment[f] = r[f];
@@ -282,7 +330,7 @@ async function bulkUpdate(
             const enrichment: Record<string, unknown> = {};
             const stringFields = [
               "company_name", "website_url", "linkedin_url", "industry",
-              "city", "state", "country", "phone", "description", "revenue",
+              "city", "state", "country", "phone", "email", "description", "revenue",
             ] as const;
             for (const f of stringFields) {
               if (typeof rec[f] === "string" && rec[f] !== "") enrichment[f] = rec[f];
@@ -330,6 +378,7 @@ async function bulkUpdate(
       const payload: Record<string, unknown> = {
         linkedin_url: r.linkedin_url ?? null,
         email: r.email ?? null,
+        company_id: r.company_id ?? null,
         tags,
         source: sourceKey,
         last_updated: now,
@@ -355,9 +404,14 @@ async function bulkUpdate(
               typeof rec.linkedin_url === "string" ? rec.linkedin_url : null;
             const email =
               typeof rec.email === "string" ? rec.email : null;
-            const query = supabaseAdmin
-              .from("people")
-              .update({ tags, source: sourceKey, last_updated: now });
+            const query = supabaseAdmin.from("people").update({
+              tags,
+              source: sourceKey,
+              last_updated: now,
+              // Only overwrite company_id when we actually resolved one for
+              // this row; a lookup miss shouldn't unlink an existing match.
+              ...(rec.company_id ? { company_id: rec.company_id } : {}),
+            });
 
             if (linkedin) {
               return query.eq("linkedin_url", linkedin);
@@ -481,6 +535,14 @@ export async function pushRecords(
     targetTable === "companies"
       ? await fetchExistingCompanies(deduped)
       : await fetchExistingPeople(deduped);
+
+  if (targetTable === "people") {
+    const companyIdByDomain = await fetchCompanyIdByDomain();
+    for (const rec of deduped) {
+      const domain = typeof rec.domain === "string" ? rec.domain : null;
+      rec.company_id = domain ? companyIdByDomain.get(domain) ?? null : null;
+    }
+  }
 
   onProgress({ phase: "partitioning", done: dedupedCount, total: dedupedCount });
 

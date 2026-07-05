@@ -96,6 +96,17 @@ function mapRow(
           .split(",")
           .map((s) => s.trim())
           .filter((s) => s !== "");
+      } else if (supabaseField === "email") {
+        // A single company `email` column stores every address for the
+        // company. Some providers (e.g. Store Leads) pack multiple
+        // addresses into one cell separated by colons/semicolons; normalize
+        // any such list to a clean comma-separated string. A normal single
+        // email has no separators and passes through unchanged.
+        out[supabaseField] = val
+          .split(/[:;,]+/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .join(", ");
       } else {
         out[supabaseField] = val;
       }

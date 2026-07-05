@@ -47,6 +47,10 @@ CREATE TABLE IF NOT EXISTS clay_push_runs (
 
 CREATE INDEX IF NOT EXISTS clay_push_runs_started_at_idx ON clay_push_runs (started_at DESC);
 
+-- Single text column holding ALL email addresses for a company (comma-separated
+-- when a provider supplies more than one). Not a Postgres array by design.
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS email text;
+
 -- RPC: bulk company updates (appends source, overwrites tags, merges enrichment fields)
 -- Enrichment fields use COALESCE so only non-null incoming values overwrite existing data.
 -- custom_data is merged (||) so new keys are added without wiping existing provider data.
@@ -74,6 +78,7 @@ BEGIN
         state         = COALESCE(rec->>'state',         state),
         country       = COALESCE(rec->>'country',       country),
         phone         = COALESCE(rec->>'phone',         phone),
+        email         = COALESCE(rec->>'email',         email),
         description   = COALESCE(rec->>'description',   description),
         revenue       = COALESCE(rec->>'revenue',       revenue),
         employee_count = COALESCE(
@@ -126,6 +131,7 @@ BEGIN
         state         = COALESCE(rec->>'state',         state),
         country       = COALESCE(rec->>'country',       country),
         phone         = COALESCE(rec->>'phone',         phone),
+        email         = COALESCE(rec->>'email',         email),
         description   = COALESCE(rec->>'description',   description),
         revenue       = COALESCE(rec->>'revenue',       revenue),
         employee_count = COALESCE(
@@ -193,6 +199,10 @@ BEGIN
   FOR rec IN SELECT * FROM jsonb_array_elements(updates) LOOP
     IF (rec->>'linkedin_url') IS NOT NULL OR (rec->>'email') IS NOT NULL THEN
       UPDATE people SET
+        -- Only overwrite company_id when this row resolved to one; a lookup
+        -- miss (no matching company for the row's domain) must not unlink
+        -- an existing match.
+        company_id = COALESCE((rec->>'company_id')::uuid, company_id),
         tags = ARRAY(SELECT jsonb_array_elements_text(rec->'tags')),
         source = CASE
           WHEN source IS NULL THEN rec->>'source'

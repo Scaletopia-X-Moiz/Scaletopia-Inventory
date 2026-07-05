@@ -2,6 +2,15 @@ import Link from "next/link";
 import { cn } from "@/lib/utils";
 import type { PersonListRow } from "@/lib/data/people";
 
+function formatLastUpdated(value: string | null): string {
+  if (!value) return "—";
+  return new Date(value).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+}
+
 const HEADERS = [
   "Full Name",
   "LinkedIn URL",
@@ -9,6 +18,7 @@ const HEADERS = [
   "Company",
   "Company Domain",
   "Company LinkedIn URL",
+  "Last Updated",
 ];
 
 export function PeopleTable({ rows }: { rows: PersonListRow[] }) {
@@ -68,6 +78,9 @@ export function PeopleTable({ rows }: { rows: PersonListRow[] }) {
               </td>
               <PersonCell href={`/people/${row.id}`}>{row.domain ?? "—"}</PersonCell>
               <ExternalLinkCell url={row.companyLinkedinUrl} />
+              <PersonCell href={`/people/${row.id}`} mono>
+                {formatLastUpdated(row.lastUpdated)}
+              </PersonCell>
             </tr>
           ))}
         </tbody>

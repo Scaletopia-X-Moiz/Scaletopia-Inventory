@@ -22,3 +22,6 @@ yarn-error.log*
 
 # typescript
 *.tsbuildinfo
+
+# local test data (large CSV/XLSX exports, kept out of git)
+/testcsv/

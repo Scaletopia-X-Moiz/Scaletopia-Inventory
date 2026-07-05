@@ -110,6 +110,7 @@ export default async function CompanyDetailPage({
               </CardHeader>
               <CardContent className="flex flex-col">
                 <RecordField label="Phone">{company.phone ?? "—"}</RecordField>
+                <RecordField label="Email">{company.email ?? "—"}</RecordField>
                 <RecordField label="Location">{location || "—"}</RecordField>
                 <RecordField label="Last updated">
                   {company.lastUpdated

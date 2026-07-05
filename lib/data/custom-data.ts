@@ -38,3 +38,23 @@ export function filterCustomData(
   }
   return result;
 }
+
+const WEBHOOK_BLOCKED_KEYS = new Set(["pushed_to_clay", "pushed_to_clay_at"]);
+
+/** Prepares custom_data for the Clay webhook payload. This is deliberately NOT
+ * `filterCustomData`: that function drops housekeeping keys, empty values, and
+ * any key ending in `_at` for UI display purposes, which also silently strips
+ * real enrichment data (e.g. `founded_at`) from what gets sent to Clay. Clay
+ * should receive every stored key verbatim except the two that only track our
+ * own push bookkeeping. */
+export function toWebhookCustomData(
+  raw: Record<string, unknown> | null | undefined
+): Record<string, unknown> {
+  if (!raw) return {};
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (WEBHOOK_BLOCKED_KEYS.has(key)) continue;
+    result[key] = value;
+  }
+  return result;
+}
