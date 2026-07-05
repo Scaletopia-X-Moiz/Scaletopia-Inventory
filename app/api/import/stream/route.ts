@@ -97,7 +97,9 @@ export async function POST(request: NextRequest) {
     return new Response("CSV has no data rows", { status: 400 });
   }
 
-  const mappedRecords = applyColumnMap(rows, meta.columnMap);
+  // BUG D: pass the target so people rows with only a company_name (no personal
+  // identity) are filtered out instead of inserted as nameless people.
+  const mappedRecords = applyColumnMap(rows, meta.columnMap, meta.targetTable);
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -112,7 +114,6 @@ export async function POST(request: NextRequest) {
             targetTable: meta.targetTable,
             sourceKey: meta.sourceKey,
             tags: meta.tags,
-            columnMap: meta.columnMap,
           },
           onProgress
         );

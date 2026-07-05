@@ -192,6 +192,42 @@ describe("applyColumnMap", () => {
     expect(result).toHaveLength(1);
     expect(result[0].linkedin_url).toBe("https://linkedin.com/in/x");
   });
+
+  // BUG D: the non-empty filter is target-aware.
+  it("people target: drops a row with only a company_name (no personal identity)", () => {
+    const rowsWithOnlyCompany = [
+      { Company: "Acme", Title: "Engineer" }, // no full_name/first_name/linkedin/email
+    ];
+    const result = applyColumnMap(
+      rowsWithOnlyCompany,
+      { Company: "company_name", Title: "job_title" },
+      "people"
+    );
+    expect(result).toHaveLength(0);
+  });
+
+  it("people target: keeps a row with a personal identity field", () => {
+    const peopleRows: Record<string, string>[] = [
+      { Company: "Acme", First: "Jane" }, // has first_name → a real person
+      { Company: "Beta", Email: "bob@beta.com" }, // has email
+      { Company: "Gamma" }, // company only → dropped
+    ];
+    const result = applyColumnMap(
+      peopleRows,
+      { Company: "company_name", First: "first_name", Email: "email" },
+      "people"
+    );
+    expect(result).toHaveLength(2);
+    expect(result[0].first_name).toBe("Jane");
+    expect(result[1].email).toBe("bob@beta.com");
+  });
+
+  it("companies target: still keeps a row identified only by company_name", () => {
+    const companyRows = [{ Company: "Acme" }];
+    const result = applyColumnMap(companyRows, { Company: "company_name" }, "companies");
+    expect(result).toHaveLength(1);
+    expect(result[0].company_name).toBe("Acme");
+  });
 });
 
 // ─── fixture: apollo companies ───────────────────────────────────────────────

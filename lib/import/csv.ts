@@ -68,12 +68,20 @@ export function parseCSV(text: string): { headers: string[]; rows: Record<string
   return { headers, rows };
 }
 
-// A mapped record is only worth keeping if at least one of these fields ends
-// up populated. This is the single source of truth for "is this row
-// effectively empty" — reused both server-side (to decide what actually gets
-// inserted/updated) and client-side (to avoid uploading rows that would be
-// discarded anyway).
+// A mapped record is only worth keeping if at least one of its target's
+// identity fields ends up populated. This is the single source of truth for
+// "is this row effectively empty" — reused both server-side (to decide what
+// actually gets inserted/updated) and client-side (to avoid uploading rows
+// that would be discarded anyway).
+//
+// BUG D: the check must be target-aware. A company can legitimately be
+// identified by domain / linkedin_url / company_name. A PERSON, however,
+// requires an actual personal identity — `company_name` alone is NOT enough,
+// otherwise a people import of a row carrying only an employer name (no
+// full_name/first_name/linkedin_url/email) would be inserted as a nameless
+// person. So people use their own set that deliberately excludes company_name.
 export const IDENTITY_FIELDS = ["domain", "linkedin_url", "company_name", "full_name", "first_name"] as const;
+export const PERSON_IDENTITY_FIELDS = ["full_name", "first_name", "linkedin_url", "email"] as const;
 
 // Postgres array columns — incoming CSV values are comma-separated strings and
 // must be split into string arrays before insert/update.
@@ -115,15 +123,25 @@ function mapRow(
   return out;
 }
 
-function isMappedRecordNonEmpty(record: Record<string, unknown>): boolean {
-  return IDENTITY_FIELDS.some((f) => record[f] != null && record[f] !== "");
+// `targetTable` defaults to "companies" so existing company-oriented callers
+// (and tests) keep their behavior; people imports must pass "people" to get the
+// stricter person-identity check.
+function isMappedRecordNonEmpty(
+  record: Record<string, unknown>,
+  targetTable: "companies" | "people" = "companies"
+): boolean {
+  const fields = targetTable === "people" ? PERSON_IDENTITY_FIELDS : IDENTITY_FIELDS;
+  return fields.some((f) => record[f] != null && record[f] !== "");
 }
 
 export function applyColumnMap(
   rows: Record<string, string>[],
-  columnMap: Record<string, string>
+  columnMap: Record<string, string>,
+  targetTable: "companies" | "people" = "companies"
 ): Record<string, unknown>[] {
-  return rows.map((row) => mapRow(row, columnMap)).filter(isMappedRecordNonEmpty);
+  return rows
+    .map((row) => mapRow(row, columnMap))
+    .filter((rec) => isMappedRecordNonEmpty(rec, targetTable));
 }
 
 /**
@@ -135,9 +153,12 @@ export function applyColumnMap(
  */
 export function filterMappedNonEmptyRows(
   rows: Record<string, string>[],
-  columnMap: Record<string, string>
+  columnMap: Record<string, string>,
+  targetTable: "companies" | "people" = "companies"
 ): Record<string, string>[] {
-  return rows.filter((row) => isMappedRecordNonEmpty(mapRow(row, columnMap)));
+  return rows.filter((row) =>
+    isMappedRecordNonEmpty(mapRow(row, columnMap), targetTable)
+  );
 }
 
 function csvField(value: string): string {

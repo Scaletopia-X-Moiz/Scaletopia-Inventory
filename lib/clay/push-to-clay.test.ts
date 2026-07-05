@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import { runCompaniesClayPush, isValidWebhookUrl, FAILED_PREVIEW } from "@/lib/clay/push-to-clay";
+import {
+  runCompaniesClayPush,
+  isValidWebhookUrl,
+  postWithRetry,
+  FAILED_PREVIEW,
+  RATE_LIMIT_MAX_DELAY_MS,
+} from "@/lib/clay/push-to-clay";
 
 const TEST_PREFIX = "__test-clay-push__";
 const WEBHOOK_URL = "https://example.com/test-clay-webhook";
@@ -48,6 +54,64 @@ describe("isValidWebhookUrl", () => {
     expect(isValidWebhookUrl("not a url")).toBe(false);
     expect(isValidWebhookUrl("")).toBe(false);
     expect(isValidWebhookUrl(undefined)).toBe(false);
+  });
+});
+
+describe("postWithRetry 429 Retry-After handling", () => {
+  /** Replace the real setTimeout with one that records the requested delay and
+   * fires the callback immediately, so we can assert what the retry *would*
+   * have waited without actually sleeping. */
+  function captureRetryDelays() {
+    const delays: number[] = [];
+    const spy = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockImplementation(((fn: (...args: unknown[]) => void, delay?: number) => {
+        delays.push(delay ?? 0);
+        fn();
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout);
+    return { delays, restore: () => spy.mockRestore() };
+  }
+
+  function headers(retryAfter: string): Response["headers"] {
+    return { get: (h: string) => (h.toLowerCase() === "retry-after" ? retryAfter : null) } as
+      unknown as Response["headers"];
+  }
+
+  it("clamps an absurd numeric Retry-After to RATE_LIMIT_MAX_DELAY_MS", async () => {
+    const { delays, restore } = captureRetryDelays();
+    let call = 0;
+    const fetchImpl = vi.fn(async () => {
+      call++;
+      // 100000 seconds -> 100_000_000ms, which must never be honored verbatim.
+      if (call === 1) return { ok: false, status: 429, headers: headers("100000") } as Response;
+      return { ok: true } as Response;
+    }) as unknown as typeof fetch;
+
+    const result = await postWithRetry(fetchImpl, WEBHOOK_URL, { hello: "world" });
+    restore();
+
+    expect(result.ok).toBe(true);
+    expect(delays.length).toBeGreaterThanOrEqual(1);
+    expect(Math.max(...delays)).toBeLessThanOrEqual(RATE_LIMIT_MAX_DELAY_MS);
+  });
+
+  it("clamps a far-future Retry-After date to RATE_LIMIT_MAX_DELAY_MS", async () => {
+    const { delays, restore } = captureRetryDelays();
+    const farFuture = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toUTCString();
+    let call = 0;
+    const fetchImpl = vi.fn(async () => {
+      call++;
+      if (call === 1) return { ok: false, status: 429, headers: headers(farFuture) } as Response;
+      return { ok: true } as Response;
+    }) as unknown as typeof fetch;
+
+    const result = await postWithRetry(fetchImpl, WEBHOOK_URL, { hello: "world" });
+    restore();
+
+    expect(result.ok).toBe(true);
+    expect(delays.length).toBeGreaterThanOrEqual(1);
+    expect(Math.max(...delays)).toBeLessThanOrEqual(RATE_LIMIT_MAX_DELAY_MS);
   });
 });
 

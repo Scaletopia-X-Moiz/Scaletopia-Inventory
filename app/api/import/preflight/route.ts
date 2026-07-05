@@ -1,14 +1,18 @@
 import "server-only";
 import type { NextRequest } from "next/server";
 import { preflightRecords } from "@/lib/import/push";
-import { normalizeDomain, normalizeLinkedInUrl, scrubJunkDomain } from "@/lib/import/normalize";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   let body: {
-    domains: string[];
-    linkedins: string[];
+    // BUG B: the client now sends one identity record per mapped row (each
+    // carrying that row's domain/website/linkedin/email together) rather than
+    // two flat `domains`/`linkedins` arrays. This lets preflight dedupe and
+    // partition over the SAME unit (one record per row) that the real push
+    // uses, so a row with both a domain and a linkedin is counted once, not
+    // twice.
+    records: Record<string, unknown>[];
     rowCount: number;
     targetTable: "companies" | "people";
   };
@@ -19,39 +23,18 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { domains, linkedins, rowCount, targetTable } = body;
+  const { records, rowCount, targetTable } = body;
 
-  if (!Array.isArray(domains) || !Array.isArray(linkedins) || typeof rowCount !== "number" || !targetTable) {
+  if (!Array.isArray(records) || typeof rowCount !== "number" || !targetTable) {
     return Response.json(
-      { error: "domains, linkedins, rowCount, and targetTable are required" },
+      { error: "records, rowCount, and targetTable are required" },
       { status: 400 }
     );
   }
 
-  // Normalize and dedupe domains
-  const normalizedDomains = [
-    ...new Set(
-      domains
-        .map((d) => scrubJunkDomain(normalizeDomain(d)))
-        .filter((d): d is string => d !== null)
-    ),
-  ];
-
-  // Normalize and dedupe linkedins
-  const normalizedLinkedins = [
-    ...new Set(
-      linkedins
-        .map((l) => normalizeLinkedInUrl(l))
-        .filter((l): l is string => l !== null)
-    ),
-  ];
-
-  // Build minimal record objects for Supabase lookup
-  const records: Record<string, unknown>[] = [
-    ...normalizedDomains.map((d) => ({ domain: d })),
-    ...normalizedLinkedins.map((l) => ({ linkedin_url: l })),
-  ];
-
+  // `preflightRecords` normalizes domain/linkedin (deriving domain from
+  // website_url when needed) and dedupes/partitions exactly like `pushRecords`,
+  // so the records pass straight through untouched.
   if (records.length === 0) {
     return Response.json({
       inputCount: rowCount,

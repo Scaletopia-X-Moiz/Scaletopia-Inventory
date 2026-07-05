@@ -817,19 +817,30 @@ function StepSummary({
     setPreflightLoading(true);
     setPreflightErr(null);
 
-    // Extract identity fields client-side so we only send small arrays, not the full CSV text
+    // BUG B: send ONE identity record per mapped row (each carrying that row's
+    // domain/website/linkedin/email together) instead of two flat domain and
+    // linkedin arrays. The old flat-array approach turned a single company row
+    // that had both a domain and a linkedin into TWO separate records, so the
+    // preflight dedupe/partition counted it twice and the preview numbers came
+    // out ~2x. One record per row makes preflight count the same unit that the
+    // real push (`pushRecords`) does. Only identity-relevant fields are sent to
+    // keep the payload small.
     const { rows } = parseCSV(csv.allText);
-    const mapped = applyColumnMap(rows, columnMap);
+    const mapped = applyColumnMap(rows, columnMap, meta.targetTable);
     setEmptyRowCount(rows.length - mapped.length);
-    const domains = mapped.map((r) => r.domain).filter((d): d is string => typeof d === "string" && !!d);
-    const linkedins = mapped.map((r) => r.linkedin_url).filter((l): l is string => typeof l === "string" && !!l);
+    const identityRecords = mapped.map((r) => {
+      const rec: Record<string, string> = {};
+      for (const f of ["domain", "website_url", "linkedin_url", "email"] as const) {
+        if (typeof r[f] === "string" && r[f]) rec[f] = r[f] as string;
+      }
+      return rec;
+    });
 
     fetch("/api/import/preflight", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        domains,
-        linkedins,
+        records: identityRecords,
         rowCount: mapped.length,
         targetTable: meta.targetTable,
       }),
@@ -1382,7 +1393,9 @@ export default function ImportPage() {
     // populated identity field after mapping) so we don't waste upload
     // payload size on rows that can never survive `applyColumnMap`.
     const { headers, rows } = parseCSV(csvData.allText);
-    const nonEmptyRows = filterMappedNonEmptyRows(rows, columnMap);
+    // BUG D: pass the target so people rows with only a company_name are treated
+    // as empty here too (kept consistent with the server's applyColumnMap).
+    const nonEmptyRows = filterMappedNonEmptyRows(rows, columnMap, finalMeta.targetTable);
     const filteredText = serializeCSV(headers, nonEmptyRows);
     const byteLength = new TextEncoder().encode(filteredText).length;
 

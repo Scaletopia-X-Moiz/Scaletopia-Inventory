@@ -221,12 +221,24 @@ describe("dedupeCompanies", () => {
     expect(result).toHaveLength(1);
   });
 
-  it("franchise expansion collision: same linkedin, different domains both kept", () => {
-    // Two franchise locations share a LinkedIn but have different domains —
-    // they should both pass through (domain-keyed, so neither collides)
+  it("same linkedin, different domains: deduped to one (linkedin has no unique constraint)", () => {
+    // BUG C: two rows share a LinkedIn but have different domains. Even though
+    // the domains differ, the shared linkedin makes the second a duplicate —
+    // otherwise both get inserted and collide on linkedin_url (no DB unique
+    // constraint there). The first record wins.
     const records = [
       { domain: "acme-nyc.com", linkedin_url: "https://www.linkedin.com/company/acme/" },
       { domain: "acme-la.com", linkedin_url: "https://www.linkedin.com/company/acme/" },
+    ];
+    const result = dedupeCompanies(records);
+    expect(result).toHaveLength(1);
+    expect(result[0].domain).toBe("acme-nyc.com");
+  });
+
+  it("different domains and different linkedins are both kept", () => {
+    const records = [
+      { domain: "acme.com", linkedin_url: "https://www.linkedin.com/company/acme/" },
+      { domain: "beta.com", linkedin_url: "https://www.linkedin.com/company/beta/" },
     ];
     const result = dedupeCompanies(records);
     expect(result).toHaveLength(2);

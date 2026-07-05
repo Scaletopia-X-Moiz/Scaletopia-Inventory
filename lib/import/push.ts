@@ -13,7 +13,9 @@ export interface PushOptions {
   targetTable: "companies" | "people";
   sourceKey: string;
   tags: [string, string, string];
-  columnMap: Record<string, string>;
+  // BUG F: `columnMap` was removed — mapping already happens in the route via
+  // `applyColumnMap` before records reach `pushRecords`, so it was dead weight
+  // here.
 }
 
 export interface PushProgress {
@@ -413,10 +415,22 @@ async function bulkUpdate(
               ...(rec.company_id ? { company_id: rec.company_id } : {}),
             });
 
+            // BUG A: mirror the SQL RPC's deterministic precedence — prefer
+            // linkedin_url as the identity and only fall back to email when the
+            // record has no linkedin. This one-record-updates-one-row intent
+            // means a record with a linkedin never matches unrelated people by
+            // a shared email.
             if (linkedin) {
               return query.eq("linkedin_url", linkedin);
             } else if (email) {
-              return query.ilike("email", email);
+              // People emails are stored verbatim (not lowercased on insert),
+              // so match case-insensitively like the SQL path (lower(email) =
+              // lower(...)). `.ilike` is case-insensitive but treats `%`/`_` as
+              // wildcards — and `_` is a legal email char — so escape those
+              // metacharacters to get a case-insensitive EXACT match rather
+              // than an accidental over-match.
+              const escapedEmail = email.replace(/([\\%_])/g, "\\$1");
+              return query.ilike("email", escapedEmail);
             }
             return Promise.resolve({ error: new Error("no key") });
           })
@@ -500,115 +514,161 @@ export async function pushRecords(
   const { records, targetTable, sourceKey, tags } = options;
   const inputCount = records.length;
 
-  onProgress({ phase: "normalizing", done: 0, total: inputCount });
+  // BUG E: track running counts in the outer scope so that if this push throws
+  // partway (or the serverless function is killed at `maxDuration`), the catch
+  // block below can still write an `import_history` row reflecting whatever
+  // inserts/updates actually landed, instead of the partial work being
+  // completely invisible. This is a CONTAINED fix — it records what happened,
+  // it does NOT attempt resumability/checkpointing.
+  let dedupedCount = 0;
+  let inserted = 0;
+  let updated = 0;
+  let failedRecords: Record<string, unknown>[] = [];
 
-  const normalized = records.map((rec) => {
-    const out = { ...rec };
+  try {
+    onProgress({ phase: "normalizing", done: 0, total: inputCount });
 
-    const rawDomain = out.domain as string | null | undefined;
-    const rawLinkedin = out.linkedin_url as string | null | undefined;
-    const rawWebsite = out.website_url as string | null | undefined;
+    const normalized = records.map((rec) => {
+      const out = { ...rec };
 
-    const normalizedDomain = scrubJunkDomain(normalizeDomain(rawDomain));
-    const normalizedLinkedin = normalizeLinkedInUrl(rawLinkedin);
+      const rawDomain = out.domain as string | null | undefined;
+      const rawLinkedin = out.linkedin_url as string | null | undefined;
+      const rawWebsite = out.website_url as string | null | undefined;
 
-    // If no explicit domain, try to derive from website_url
-    const derivedDomain =
-      normalizedDomain ?? scrubJunkDomain(normalizeDomain(rawWebsite));
+      const normalizedDomain = scrubJunkDomain(normalizeDomain(rawDomain));
+      const normalizedLinkedin = normalizeLinkedInUrl(rawLinkedin);
 
-    out.domain = derivedDomain;
-    out.linkedin_url = normalizedLinkedin;
+      // If no explicit domain, try to derive from website_url
+      const derivedDomain =
+        normalizedDomain ?? scrubJunkDomain(normalizeDomain(rawWebsite));
 
-    return out;
-  });
+      out.domain = derivedDomain;
+      out.linkedin_url = normalizedLinkedin;
 
-  const deduped =
-    targetTable === "companies"
-      ? dedupeCompanies(normalized)
-      : dedupePeople(normalized);
+      return out;
+    });
 
-  const dedupedCount = deduped.length;
+    const deduped =
+      targetTable === "companies"
+        ? dedupeCompanies(normalized)
+        : dedupePeople(normalized);
 
-  onProgress({ phase: "preflight", done: 0, total: dedupedCount });
+    dedupedCount = deduped.length;
 
-  const existingKeys =
-    targetTable === "companies"
-      ? await fetchExistingCompanies(deduped)
-      : await fetchExistingPeople(deduped);
+    onProgress({ phase: "preflight", done: 0, total: dedupedCount });
 
-  if (targetTable === "people") {
-    const companyIdByDomain = await fetchCompanyIdByDomain();
+    const existingKeys =
+      targetTable === "companies"
+        ? await fetchExistingCompanies(deduped)
+        : await fetchExistingPeople(deduped);
+
+    if (targetTable === "people") {
+      const companyIdByDomain = await fetchCompanyIdByDomain();
+      for (const rec of deduped) {
+        const domain = typeof rec.domain === "string" ? rec.domain : null;
+        rec.company_id = domain ? companyIdByDomain.get(domain) ?? null : null;
+      }
+    }
+
+    onProgress({ phase: "partitioning", done: dedupedCount, total: dedupedCount });
+
+    const toInsert: Record<string, unknown>[] = [];
+    const toUpdate: Record<string, unknown>[] = [];
+
     for (const rec of deduped) {
-      const domain = typeof rec.domain === "string" ? rec.domain : null;
-      rec.company_id = domain ? companyIdByDomain.get(domain) ?? null : null;
+      if (recordExistsKey(rec, existingKeys)) {
+        toUpdate.push(rec);
+      } else {
+        toInsert.push(rec);
+      }
     }
-  }
 
-  onProgress({ phase: "partitioning", done: dedupedCount, total: dedupedCount });
+    onProgress({ phase: "inserting", done: 0, total: toInsert.length });
 
-  const toInsert: Record<string, unknown>[] = [];
-  const toUpdate: Record<string, unknown>[] = [];
-
-  for (const rec of deduped) {
-    if (recordExistsKey(rec, existingKeys)) {
-      toUpdate.push(rec);
-    } else {
-      toInsert.push(rec);
-    }
-  }
-
-  onProgress({ phase: "inserting", done: 0, total: toInsert.length });
-
-  const { inserted, failed: insertFailed } = await bulkInsert(
-    toInsert,
-    targetTable,
-    sourceKey,
-    tags,
-    (done, total) => onProgress({ phase: "inserting", done, total })
-  );
-
-  onProgress({ phase: "updating", done: 0, total: toUpdate.length });
-
-  const { updated, failed: updateFailed } = await bulkUpdate(
-    toUpdate,
-    targetTable,
-    sourceKey,
-    tags,
-    (done, total) => onProgress({ phase: "updating", done, total })
-  );
-
-  const failedRecords = [...insertFailed, ...updateFailed];
-  const failedCount = failedRecords.length;
-
-  onProgress({ phase: "done", done: dedupedCount, total: dedupedCount });
-
-  let historyId: string | null = null;
-  const { data: historyData } = await supabaseAdmin
-    .from("import_history")
-    .insert({
-      source_key: sourceKey,
-      target_table: targetTable,
+    const { inserted: ins, failed: insertFailed } = await bulkInsert(
+      toInsert,
+      targetTable,
+      sourceKey,
       tags,
-      input_count: inputCount,
-      deduped_count: dedupedCount,
-      inserted_count: inserted,
-      updated_count: updated,
-      failed_count: failedCount,
-      failed_records: failedRecords,
-      completed_at: new Date().toISOString(),
-    })
-    .select("id")
-    .single();
+      (done, total) => onProgress({ phase: "inserting", done, total })
+    );
+    inserted = ins;
+    failedRecords = [...insertFailed];
 
-  if (historyData) historyId = historyData.id;
+    onProgress({ phase: "updating", done: 0, total: toUpdate.length });
 
-  return {
-    inputCount,
-    dedupedCount,
-    insertedCount: inserted,
-    updatedCount: updated,
-    failedCount,
-    failedRecords,
-    historyId,
-  };
+    const { updated: upd, failed: updateFailed } = await bulkUpdate(
+      toUpdate,
+      targetTable,
+      sourceKey,
+      tags,
+      (done, total) => onProgress({ phase: "updating", done, total })
+    );
+    updated = upd;
+    failedRecords = [...failedRecords, ...updateFailed];
+
+    const failedCount = failedRecords.length;
+
+    onProgress({ phase: "done", done: dedupedCount, total: dedupedCount });
+
+    let historyId: string | null = null;
+    const { data: historyData } = await supabaseAdmin
+      .from("import_history")
+      .insert({
+        source_key: sourceKey,
+        target_table: targetTable,
+        tags,
+        input_count: inputCount,
+        deduped_count: dedupedCount,
+        inserted_count: inserted,
+        updated_count: updated,
+        failed_count: failedCount,
+        failed_records: failedRecords,
+        completed_at: new Date().toISOString(),
+      })
+      .select("id")
+      .single();
+
+    if (historyData) historyId = historyData.id;
+
+    return {
+      inputCount,
+      dedupedCount,
+      insertedCount: inserted,
+      updatedCount: updated,
+      failedCount,
+      failedRecords,
+      historyId,
+    };
+  } catch (err) {
+    // BUG E: best-effort partial-history write on failure. `import_history` has
+    // no status/error column, so the error is recorded as a synthetic entry in
+    // the existing `failed_records` jsonb and counted in `failed_count`. This
+    // makes a timed-out/errored run (and any rows that DID land) visible in
+    // history instead of vanishing. We still re-throw so the caller surfaces
+    // the error to the client. If this history write itself fails, swallow it —
+    // the original error is what matters.
+    const errorMarker = {
+      _import_error: formatError(err),
+      _partial: true,
+    };
+    const partialFailed = [...failedRecords, errorMarker];
+    try {
+      await supabaseAdmin.from("import_history").insert({
+        source_key: sourceKey,
+        target_table: targetTable,
+        tags,
+        input_count: inputCount,
+        deduped_count: dedupedCount,
+        inserted_count: inserted,
+        updated_count: updated,
+        failed_count: partialFailed.length,
+        failed_records: partialFailed,
+        completed_at: new Date().toISOString(),
+      });
+    } catch {
+      // Swallow — surfacing the original push error takes priority.
+    }
+    throw err;
+  }
 }

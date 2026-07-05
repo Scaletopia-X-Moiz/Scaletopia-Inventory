@@ -186,18 +186,17 @@ export function dedupeCompanies(
     const linkedin =
       typeof rec.linkedin_url === "string" ? rec.linkedin_url : null;
 
-    if (domain) {
-      if (seenDomain.has(domain)) continue;
-      seenDomain.add(domain);
-      if (linkedin) seenLinkedin.add(linkedin);
-      result.push(rec);
-    } else if (linkedin) {
-      if (seenLinkedin.has(linkedin)) continue;
-      seenLinkedin.add(linkedin);
-      result.push(rec);
-    } else {
-      result.push(rec);
-    }
+    // BUG C: a record is a duplicate if EITHER its domain or its linkedin has
+    // already been seen. The old code only checked `seenDomain` when a domain
+    // was present, so two rows sharing a linkedin but with different domains
+    // both survived — and since linkedin_url has no unique constraint, both got
+    // inserted. Records with neither key are always kept (nothing to dedupe on).
+    if (domain && seenDomain.has(domain)) continue;
+    if (linkedin && seenLinkedin.has(linkedin)) continue;
+
+    if (domain) seenDomain.add(domain);
+    if (linkedin) seenLinkedin.add(linkedin);
+    result.push(rec);
   }
 
   return result;

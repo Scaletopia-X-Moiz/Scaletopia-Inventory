@@ -190,6 +190,15 @@ VALUES
 ON CONFLICT (source_key) DO NOTHING;
 
 -- RPC: bulk people updates
+--
+-- BUG A FIX (must be re-run manually in the Supabase SQL editor — this file is
+-- applied by hand, not by an automatic migration runner). The old WHERE matched
+-- linkedin OR email in a single statement, so one incoming record carrying BOTH
+-- a linkedin and an email would overwrite every person sharing EITHER value —
+-- e.g. a generic/shared email (info@acme.com) used by several contacts got all
+-- their rows clobbered from one import record. The match is now deterministic
+-- and single-row-intended: linkedin_url is the identity, and email is only used
+-- as a fallback when the record has no linkedin (see CASE in the WHERE below).
 CREATE OR REPLACE FUNCTION import_bulk_update_people(
   updates jsonb
 ) RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$
@@ -234,8 +243,15 @@ BEGIN
           ELSE custom_data
         END
       WHERE
-        (rec->>'linkedin_url' IS NOT NULL AND linkedin_url = rec->>'linkedin_url')
-        OR (rec->>'email' IS NOT NULL AND lower(email) = lower(rec->>'email'));
+        -- Deterministic precedence: prefer linkedin_url as the identity and
+        -- only fall back to email when linkedin is absent from the record. This
+        -- guarantees a record with a linkedin can never match unrelated people
+        -- by a shared email.
+        CASE
+          WHEN rec->>'linkedin_url' IS NOT NULL THEN linkedin_url = rec->>'linkedin_url'
+          WHEN rec->>'email' IS NOT NULL THEN lower(email) = lower(rec->>'email')
+          ELSE false
+        END;
     END IF;
   END LOOP;
 END;

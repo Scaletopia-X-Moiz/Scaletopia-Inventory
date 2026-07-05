@@ -57,7 +57,7 @@ describe("preflightRecords", () => {
 
     // Use pushRecords to insert the record
     const setup = await pushRecords(
-      { records: [{ domain, company_name: "Preflight Domain Co" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: TAGS, columnMap: {} },
+      { records: [{ domain, company_name: "Preflight Domain Co" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: TAGS },
       noopProgress
     );
     expect(setup.insertedCount + setup.updatedCount).toBe(1);
@@ -76,7 +76,7 @@ describe("preflightRecords", () => {
     const linkedin = testLinkedin("preflight-linkedin");
 
     await pushRecords(
-      { records: [{ linkedin_url: linkedin, company_name: "Preflight LinkedIn Co" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: TAGS, columnMap: {} },
+      { records: [{ linkedin_url: linkedin, company_name: "Preflight LinkedIn Co" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: TAGS },
       noopProgress
     );
 
@@ -104,7 +104,7 @@ describe("pushRecords — insert", () => {
     ];
 
     const result = await pushRecords(
-      { records, targetTable: "companies", sourceKey: SOURCE_KEY, tags: TAGS, columnMap: {} },
+      { records, targetTable: "companies", sourceKey: SOURCE_KEY, tags: TAGS },
       noopProgress
     );
 
@@ -120,7 +120,7 @@ describe("pushRecords — insert", () => {
     ];
 
     const result = await pushRecords(
-      { records, targetTable: "companies", sourceKey: SOURCE_KEY, tags: TAGS, columnMap: {} },
+      { records, targetTable: "companies", sourceKey: SOURCE_KEY, tags: TAGS },
       noopProgress
     );
 
@@ -141,7 +141,6 @@ describe("pushRecords — idempotency", () => {
       targetTable: "companies" as const,
       sourceKey: SOURCE_KEY,
       tags: TAGS,
-      columnMap: {},
     };
 
     const first = await pushRecords(opts, noopProgress);
@@ -161,14 +160,14 @@ describe("pushRecords — update behaviour", () => {
     // First push to insert the record
     const oldTags: [string, string, string] = ["old-client", "old-niche", "2020-01-01"];
     await pushRecords(
-      { records: [{ domain, company_name: "Update Tags Co" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: oldTags, columnMap: {} },
+      { records: [{ domain, company_name: "Update Tags Co" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: oldTags },
       noopProgress
     );
 
     // Second push with new tags — should update
     const newTags: [string, string, string] = ["new-client", "new-niche", "2026-06-01"];
     const updateResult = await pushRecords(
-      { records: [{ domain, company_name: "Update Tags Co" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: newTags, columnMap: {} },
+      { records: [{ domain, company_name: "Update Tags Co" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: newTags },
       noopProgress
     );
 
@@ -190,7 +189,7 @@ describe("pushRecords — progress events", () => {
     const domain = testDomain("progress-existing");
 
     await pushRecords(
-      { records: [{ domain, company_name: "Progress Existing Co" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: TAGS, columnMap: {} },
+      { records: [{ domain, company_name: "Progress Existing Co" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: TAGS },
       noopProgress
     );
 
@@ -205,7 +204,6 @@ describe("pushRecords — progress events", () => {
         targetTable: "companies",
         sourceKey: SOURCE_KEY,
         tags: TAGS,
-        columnMap: {},
       },
       (p) => phases.push(p.phase)
     );
@@ -232,7 +230,6 @@ describe("pushRecords — import_history", () => {
         targetTable: "companies",
         sourceKey: historySource,
         tags: historyTags,
-        columnMap: {},
       },
       noopProgress
     );

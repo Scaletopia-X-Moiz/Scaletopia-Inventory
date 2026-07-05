@@ -18,7 +18,7 @@ export const FAILED_PREVIEW = 20;
  * case of a request that never gets rate-limited. */
 export const RATE_LIMIT_MAX_RETRIES = 5;
 const RATE_LIMIT_BASE_DELAY_MS = 500;
-const RATE_LIMIT_MAX_DELAY_MS = 8_000;
+export const RATE_LIMIT_MAX_DELAY_MS = 8_000;
 
 export interface ClayPushProgress {
   phase: "resolving" | "pushing" | "done";
@@ -83,7 +83,9 @@ function rateLimitBackoffMs(attempt: number): number {
   return exp + Math.random() * 250; // jitter so a burst doesn't retry in lockstep
 }
 
-async function postWithRetry(
+/** Exported for tests: exercises the 429/transient retry logic in isolation
+ * (no DB round-trip), so the `Retry-After` clamp can be asserted directly. */
+export async function postWithRetry(
   fetchImpl: typeof fetch,
   webhookUrl: string,
   payload: Record<string, unknown>
@@ -104,7 +106,17 @@ async function postWithRetry(
       if (resp.status === 429) {
         if (rateLimitAttempt >= RATE_LIMIT_MAX_RETRIES) return { ok: false, status: 429 };
         const retryAfterMs = parseRetryAfterMs(resp.headers?.get?.("Retry-After") ?? null);
-        await new Promise((r) => setTimeout(r, retryAfterMs ?? rateLimitBackoffMs(rateLimitAttempt)));
+        // Clamp the honored `Retry-After` to RATE_LIMIT_MAX_DELAY_MS. This runs
+        // inside a serverless invocation, so a hostile or misconfigured Clay
+        // endpoint returning a far-future date (or a huge seconds value) would
+        // otherwise block the whole push — and the user's SSE progress stream —
+        // until `maxDuration` kills it. A null/negative parse still falls
+        // through to the exponential backoff below.
+        const delayMs =
+          retryAfterMs != null
+            ? Math.min(retryAfterMs, RATE_LIMIT_MAX_DELAY_MS)
+            : rateLimitBackoffMs(rateLimitAttempt);
+        await new Promise((r) => setTimeout(r, delayMs));
         rateLimitAttempt++;
         continue;
       }
