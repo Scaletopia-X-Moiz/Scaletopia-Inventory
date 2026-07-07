@@ -8,22 +8,23 @@ import { EMPLOYEE_BUCKETS, employeeBucketOf } from "@/lib/data/employee-size";
 import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
 import { sortByLastUpdatedDesc } from "@/lib/data/sort";
 import type { ClayPushRecord } from "@/lib/clay/types";
+import { matchesIncludeExclude, type IncludeExclude } from "@/lib/data/include-exclude";
 
 export type SingleSelectFilter = "any" | "not_empty" | "empty";
 
 export interface CompanyListFilters {
   search?: string;
-  niche?: string[];
-  source?: string[];
-  industry?: string[];
+  niche?: IncludeExclude;
+  source?: IncludeExclude;
+  industry?: IncludeExclude;
   employeeBucket?: string[];
-  country?: string[];
+  country?: IncludeExclude;
   employeeMin?: number;
   employeeMax?: number;
   email?: SingleSelectFilter;
   phone?: SingleSelectFilter;
-  emailStatus?: string[];
-  phoneType?: string[];
+  emailStatus?: IncludeExclude;
+  phoneType?: IncludeExclude;
 }
 
 export interface CompanyListRow {
@@ -170,25 +171,21 @@ async function fetchBaseRowsUncached(filters: BaseFilters): Promise<RawCompanyRo
 const fetchBaseRows = withTtlCache(fetchBaseRowsUncached, 3_600_000, "companies:base");
 
 function matchesNiche(row: RawCompanyRow, filters: CompanyListFilters): boolean {
-  return !filters.niche?.length || (row.niche != null && filters.niche.includes(row.niche));
+  return matchesIncludeExclude(row.niche != null ? [row.niche] : [], filters.niche);
 }
 
 function matchesCountry(row: RawCompanyRow, filters: CompanyListFilters): boolean {
-  if (!filters.country?.length) return true;
   const country = normalizeCountry(row.country);
-  return Boolean(country && filters.country.includes(country.id));
+  return matchesIncludeExclude(country ? [country.id] : [], filters.country);
 }
 
 function matchesIndustry(row: RawCompanyRow, filters: CompanyListFilters): boolean {
-  if (!filters.industry?.length) return true;
   const industry = normalizeIndustry(row.industry);
-  return Boolean(industry && filters.industry.includes(industry.id));
+  return matchesIncludeExclude(industry ? [industry.id] : [], filters.industry);
 }
 
 function matchesSource(row: RawCompanyRow, filters: CompanyListFilters): boolean {
-  if (!filters.source?.length) return true;
-  const tokens = normalizeSourceTokens(row.source);
-  return tokens.some((t) => filters.source!.includes(t));
+  return matchesIncludeExclude(normalizeSourceTokens(row.source), filters.source);
 }
 
 function matchesEmailPresence(row: RawCompanyRow, filters: CompanyListFilters): boolean {
@@ -204,13 +201,11 @@ function matchesPhonePresence(row: RawCompanyRow, filters: CompanyListFilters): 
 }
 
 function matchesEmailStatus(row: RawCompanyRow, filters: CompanyListFilters): boolean {
-  if (!filters.emailStatus?.length) return true;
-  return Boolean(row.email_status && filters.emailStatus.includes(row.email_status));
+  return matchesIncludeExclude(row.email_status != null ? [row.email_status] : [], filters.emailStatus);
 }
 
 function matchesPhoneType(row: RawCompanyRow, filters: CompanyListFilters): boolean {
-  if (!filters.phoneType?.length) return true;
-  return Boolean(row.phone_type && filters.phoneType.includes(row.phone_type));
+  return matchesIncludeExclude(row.phone_type != null ? [row.phone_type] : [], filters.phoneType);
 }
 
 /** Routes through the cached fetchBaseRows (keyed on the base filter subset),
@@ -402,7 +397,12 @@ export interface CompanyExportRow {
   state: string | null;
   country: string | null;
   phone: string | null;
+  phoneType: string | null;
+  phoneStatus: string | null;
+  phoneVerifiedAt: string | null;
   email: string | null;
+  emailStatus: string | null;
+  emailVerifiedAt: string | null;
   description: string | null;
   foundedYear: number | null;
   revenue: number | null;
@@ -485,7 +485,12 @@ function toExportRow(row: FullCompanyRow): CompanyExportRow {
     state: row.state,
     country: row.country,
     phone: row.phone,
+    phoneType: row.phone_type,
+    phoneStatus: row.phone_status,
+    phoneVerifiedAt: row.phone_verified_at,
     email: row.email,
+    emailStatus: row.email_status,
+    emailVerifiedAt: row.email_verified_at,
     description: row.description,
     foundedYear: row.founded_year,
     revenue: row.revenue,
@@ -499,7 +504,7 @@ function toExportRow(row: FullCompanyRow): CompanyExportRow {
     technologies: row.technologies ?? [],
     tags: row.tags ?? [],
     lastUpdated: row.last_updated,
-    customData: filterCustomData(row.custom_data),
+    customData: toWebhookCustomData(row.custom_data),
   };
 }
 

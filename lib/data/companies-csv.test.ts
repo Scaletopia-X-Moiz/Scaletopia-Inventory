@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { exportCompaniesCsv } from "@/lib/data/companies-csv";
 import { getAllFilteredCompanies } from "@/lib/data/companies";
+import { includeOnly } from "@/lib/data/include-exclude";
 
 describe("exportCompaniesCsv", () => {
   it("has exactly the visible table columns, in order", async () => {
-    const csv = await exportCompaniesCsv({ source: ["aiark"] });
+    const csv = await exportCompaniesCsv({ source: includeOnly(["aiark"]) });
     const [header] = csv.split("\n");
     expect(header).toBe(
       "Company Name,Domain,Website URL,LinkedIn URL,Niche,Industry,Employees,City,State,Country,Phone,Source,Quality Tier,Last Updated"
@@ -20,7 +21,7 @@ describe("exportCompaniesCsv", () => {
   });
 
   it("flattens Source to a comma-joined string per row", async () => {
-    const csv = await exportCompaniesCsv({ source: ["aiark", "blitz"] });
+    const csv = await exportCompaniesCsv({ source: includeOnly(["aiark", "blitz"]) });
     const dataLines = csv.split("\n").slice(1);
     expect(dataLines.length).toBeGreaterThan(0);
     // raw delimited/variant source tokens (unambiguous: these never appear in

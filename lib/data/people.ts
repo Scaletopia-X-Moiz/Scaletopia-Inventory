@@ -9,20 +9,21 @@ import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
 import { nichesFromTags } from "@/lib/data/niche";
 import { sortByLastUpdatedDesc } from "@/lib/data/sort";
 import type { ClayPushRecord } from "@/lib/clay/types";
+import { matchesIncludeExclude, type IncludeExclude } from "@/lib/data/include-exclude";
 
 export type SingleSelectFilter = "any" | "not_empty" | "empty";
 
 export interface PersonListFilters {
   search?: string;
-  niche?: string[];
-  source?: string[];
-  country?: string[];
+  niche?: IncludeExclude;
+  source?: IncludeExclude;
+  country?: IncludeExclude;
   employeeBucket?: string[];
-  industry?: string[];
+  industry?: IncludeExclude;
   email?: SingleSelectFilter;
   phone?: SingleSelectFilter;
-  emailStatus?: string[];
-  phoneType?: string[];
+  emailStatus?: IncludeExclude;
+  phoneType?: IncludeExclude;
   jobTitle?: string;
   employeeMin?: number;
   employeeMax?: number;
@@ -232,34 +233,28 @@ function matchesJobTitle(row: RawPersonRow, filters: PersonListFilters): boolean
 }
 
 function matchesCountry(row: RawPersonRow, filters: PersonListFilters): boolean {
-  if (!filters.country?.length) return true;
   const country = normalizeCountry(row.country);
-  return Boolean(country && filters.country.includes(country.id));
+  return matchesIncludeExclude(country ? [country.id] : [], filters.country);
 }
 
 function matchesSource(row: RawPersonRow, filters: PersonListFilters): boolean {
-  if (!filters.source?.length) return true;
-  const tokens = normalizeSourceTokens(row.source);
-  return tokens.some((t) => filters.source!.includes(t));
+  return matchesIncludeExclude(normalizeSourceTokens(row.source), filters.source);
 }
 
 function matchesEmailStatus(row: RawPersonRow, filters: PersonListFilters): boolean {
-  if (!filters.emailStatus?.length) return true;
-  return Boolean(row.email_status && filters.emailStatus.includes(row.email_status));
+  return matchesIncludeExclude(row.email_status != null ? [row.email_status] : [], filters.emailStatus);
 }
 
 function matchesPhoneType(row: RawPersonRow, filters: PersonListFilters): boolean {
-  if (!filters.phoneType?.length) return true;
-  return Boolean(row.phone_type && filters.phoneType.includes(row.phone_type));
+  return matchesIncludeExclude(row.phone_type != null ? [row.phone_type] : [], filters.phoneType);
 }
 
 function matchesIndustry(
   company: LinkedCompanyJoinRow | undefined,
   filters: PersonListFilters
 ): boolean {
-  if (!filters.industry?.length) return true;
   const industry = normalizeIndustry(company?.industry);
-  return Boolean(industry && filters.industry.includes(industry.id));
+  return matchesIncludeExclude(industry ? [industry.id] : [], filters.industry);
 }
 
 function matchesEmployeeSize(
@@ -286,9 +281,8 @@ function matchesNiche(
   knownClients: ReadonlySet<string>,
   filters: PersonListFilters
 ): boolean {
-  if (!filters.niche?.length) return true;
   const niches = personNiches(row, company, knownClients);
-  return niches.some((n) => filters.niche!.includes(n));
+  return matchesIncludeExclude(niches, filters.niche);
 }
 
 async function fetchFilteredRowsUncached(
@@ -375,19 +369,26 @@ interface FullPersonRow extends RawPersonRow {
 }
 
 export interface PersonExportRow {
+  firstName: string | null;
+  lastName: string | null;
   fullName: string | null;
   jobTitle: string | null;
   email: string | null;
   emailStatus: string | null;
+  emailVerifiedAt: string | null;
   phone: string | null;
   phoneType: string | null;
+  phoneStatus: string | null;
+  phoneVerifiedAt: string | null;
   linkedinUrl: string | null;
+  linkedinUsername: string | null;
   companyName: string | null;
   domain: string | null;
   companyLinkedinUrl: string | null;
   city: string | null;
   state: string | null;
   country: string | null;
+  sourceId: string | null;
   sources: string[];
   tags: string[];
   lastUpdated: string | null;
@@ -449,23 +450,30 @@ async function fetchFullFilteredPeople(
 function toExportRow(row: FullPersonRow, companyData: CompanyJoinData): PersonExportRow {
   const company = row.company_id ? companyData.byId.get(row.company_id) : undefined;
   return {
+    firstName: row.first_name,
+    lastName: row.last_name,
     fullName: row.full_name,
     jobTitle: row.job_title,
     email: row.email,
     emailStatus: row.email_status,
+    emailVerifiedAt: row.email_verified_at,
     phone: row.phone,
     phoneType: row.phone_type,
+    phoneStatus: row.phone_status,
+    phoneVerifiedAt: row.phone_verified_at,
     linkedinUrl: row.linkedin_url,
+    linkedinUsername: row.linkedin_username,
     companyName: row.company_name,
     domain: row.domain,
     companyLinkedinUrl: company?.linkedin_url ?? null,
     city: row.city,
     state: row.state,
     country: row.country,
+    sourceId: row.source_id,
     sources: normalizeSourceTokens(row.source),
     tags: row.tags ?? [],
     lastUpdated: row.last_updated,
-    customData: filterCustomData(row.custom_data, PERSON_EXTRA_BLOCKED_KEYS),
+    customData: toWebhookCustomData(row.custom_data),
   };
 }
 

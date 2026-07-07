@@ -1,4 +1,5 @@
 import type { CompanyListFilters, SingleSelectFilter } from "@/lib/data/companies";
+import { parseIncludeExcludeParam } from "@/lib/data/include-exclude";
 
 function asSingleSelect(value: string | null): SingleSelectFilter | undefined {
   return value === "any" || value === "not_empty" || value === "empty" ? value : undefined;
@@ -11,17 +12,17 @@ export function parseCompanyFilters(searchParams: URLSearchParams): CompanyListF
   const empMax = searchParams.get("empmax");
   return {
     search: searchParams.get("q") ?? undefined,
-    niche: searchParams.getAll("niche"),
-    source: searchParams.getAll("source"),
-    industry: searchParams.getAll("industry"),
+    niche: parseIncludeExcludeParam(searchParams, "niche"),
+    source: parseIncludeExcludeParam(searchParams, "source"),
+    industry: parseIncludeExcludeParam(searchParams, "industry"),
     employeeBucket: searchParams.getAll("employee"),
-    country: searchParams.getAll("country"),
+    country: parseIncludeExcludeParam(searchParams, "country"),
     employeeMin: Number.isFinite(Number(empMin)) && empMin ? Number(empMin) : undefined,
     employeeMax: Number.isFinite(Number(empMax)) && empMax ? Number(empMax) : undefined,
     email: asSingleSelect(searchParams.get("email")),
     phone: asSingleSelect(searchParams.get("phone")),
-    emailStatus: searchParams.getAll("emailStatus"),
-    phoneType: searchParams.getAll("phoneType"),
+    emailStatus: parseIncludeExcludeParam(searchParams, "emailStatus"),
+    phoneType: parseIncludeExcludeParam(searchParams, "phoneType"),
   };
 }
 

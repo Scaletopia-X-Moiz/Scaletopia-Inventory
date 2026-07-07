@@ -5,6 +5,7 @@ import {
   getCompanyFilterOptions,
   getAllFilteredCompanies,
 } from "@/lib/data/companies";
+import { includeOnly } from "@/lib/data/include-exclude";
 
 describe("getCompanyFilterOptions", () => {
   it("returns normalized, deduped options for every filter dimension", async () => {
@@ -54,15 +55,27 @@ describe("getCompanies", () => {
     const options = await getCompanyFilterOptions();
     const niche = options.niches[0];
 
-    const result = await getCompanies({ niche: [niche.id] }, 1, 1000);
+    const result = await getCompanies({ niche: includeOnly([niche.id]) }, 1, 1000);
     expect(result.total).toBeGreaterThan(0);
     for (const row of result.rows) {
       expect(row.niche).toBe(niche.id);
     }
   });
 
+  it("niche exclude filter removes companies with that niche", async () => {
+    const options = await getCompanyFilterOptions();
+    const niche = options.niches[0];
+
+    const all = await getCompanies({}, 1, 1000);
+    const result = await getCompanies({ niche: { include: [], exclude: [niche.id] } }, 1, 1000);
+    expect(result.total).toBeLessThan(all.total);
+    for (const row of result.rows) {
+      expect(row.niche).not.toBe(niche.id);
+    }
+  });
+
   it("source filter matches normalized tokens regardless of raw variant", async () => {
-    const result = await getCompanies({ source: ["aiark"] }, 1, 1000);
+    const result = await getCompanies({ source: includeOnly(["aiark"]) }, 1, 1000);
     expect(result.total).toBeGreaterThan(0);
     for (const row of result.rows) {
       expect(row.sources).toContain("aiark");
@@ -80,7 +93,7 @@ describe("getCompanies", () => {
   });
 
   it("country filter collapses synonyms (US/United States/united states)", async () => {
-    const result = await getCompanies({ country: ["US"] }, 1, 1000);
+    const result = await getCompanies({ country: includeOnly(["US"]) }, 1, 1000);
     expect(result.total).toBeGreaterThan(0);
   });
 
@@ -89,7 +102,7 @@ describe("getCompanies", () => {
     const industry = options.industries.find((i) => i.count > 0);
     expect(industry).toBeDefined();
 
-    const result = await getCompanies({ industry: [industry!.id] }, 1, 1000);
+    const result = await getCompanies({ industry: includeOnly([industry!.id]) }, 1, 1000);
     expect(result.total).toBeGreaterThan(0);
     // Every returned row must normalize to the requested industry id
     for (const row of result.rows) {
@@ -97,14 +110,47 @@ describe("getCompanies", () => {
     }
   });
 
+  it("industry exclude filter removes companies in that industry", async () => {
+    const options = await getCompanyFilterOptions();
+    const industry = options.industries.find((i) => i.count > 0);
+    expect(industry).toBeDefined();
+
+    const all = await getCompanies({}, 1, 1000);
+    const result = await getCompanies(
+      { industry: { include: [], exclude: [industry!.id] } },
+      1,
+      1000
+    );
+    expect(result.total).toBeLessThan(all.total);
+    for (const row of result.rows) {
+      expect(row.industry?.trim().toLowerCase()).not.toBe(industry!.id);
+    }
+  });
+
   it("combines multiple filters with AND semantics", async () => {
-    const broad = await getCompanies({ source: ["aiark"] }, 1, 1000);
+    const broad = await getCompanies({ source: includeOnly(["aiark"]) }, 1, 1000);
     const narrowed = await getCompanies(
-      { source: ["aiark"], employeeBucket: ["1-10"] },
+      { source: includeOnly(["aiark"]), employeeBucket: ["1-10"] },
       1,
       1000
     );
     expect(narrowed.total).toBeLessThanOrEqual(broad.total);
+  });
+
+  it("include and exclude on the same facet compose (exclude wins for overlapping ids)", async () => {
+    const options = await getCompanyFilterOptions();
+    const [nicheA, nicheB] = options.niches;
+    expect(nicheB).toBeDefined();
+
+    const result = await getCompanies(
+      { niche: { include: [nicheA.id, nicheB.id], exclude: [nicheB.id] } },
+      1,
+      1000
+    );
+    expect(result.total).toBeGreaterThan(0);
+    for (const row of result.rows) {
+      expect(row.niche).toBe(nicheA.id);
+    }
   });
 });
 
@@ -112,7 +158,7 @@ describe("getCompanyDetail", () => {
   it("returns full detail with tags as-is and blocklisted custom_data stripped", async () => {
     // Use source filter to avoid picking up test-inserted records (which sort
     // to the top by last_updated and may be deleted before this assertion runs).
-    const list = await getCompanies({ source: ["aiark"] }, 1, 1);
+    const list = await getCompanies({ source: includeOnly(["aiark"]) }, 1, 1);
     const id = list.rows[0].id;
 
     const detail = await getCompanyDetail(id);

@@ -32,6 +32,14 @@ export function PeopleFilterSlip({ options }: { options: PersonFilterOptions }) 
     return searchParams.getAll(param);
   }
 
+  function getExcluded(param: string): string[] {
+    return searchParams.getAll(`${param}_exclude`);
+  }
+
+  function facetCount(param: string): number {
+    return getAll(param).length + getExcluded(param).length;
+  }
+
   function navigate(mutate: (params: URLSearchParams) => void) {
     const params = new URLSearchParams(searchParams.toString());
     mutate(params);
@@ -41,12 +49,31 @@ export function PeopleFilterSlip({ options }: { options: PersonFilterOptions }) 
     });
   }
 
-  function toggle(param: string, id: string) {
+  function removeValue(params: URLSearchParams, param: string, id: string) {
+    const current = params.getAll(param);
+    if (!current.includes(id)) return;
+    params.delete(param);
+    for (const value of current) if (value !== id) params.append(param, value);
+  }
+
+  function toggleInclude(param: string, id: string) {
     navigate((params) => {
+      removeValue(params, `${param}_exclude`, id);
       const current = params.getAll(param);
       params.delete(param);
       const next = current.includes(id) ? current.filter((v) => v !== id) : [...current, id];
       for (const value of next) params.append(param, value);
+    });
+  }
+
+  function toggleExclude(param: string, id: string) {
+    navigate((params) => {
+      removeValue(params, param, id);
+      const excludeParam = `${param}_exclude`;
+      const current = params.getAll(excludeParam);
+      params.delete(excludeParam);
+      const next = current.includes(id) ? current.filter((v) => v !== id) : [...current, id];
+      for (const value of next) params.append(excludeParam, value);
     });
   }
 
@@ -91,7 +118,7 @@ export function PeopleFilterSlip({ options }: { options: PersonFilterOptions }) 
     Boolean(searchParams.get("phone")) ||
     Boolean(searchParams.get("empmin")) ||
     Boolean(searchParams.get("empmax")) ||
-    MULTI_PARAMS.some((p) => searchParams.getAll(p).length > 0);
+    MULTI_PARAMS.some((p) => searchParams.getAll(p).length > 0 || searchParams.getAll(`${p}_exclude`).length > 0);
 
   const toOptions = (entries: { id: string; label: string; count: number }[]): ChipOption[] =>
     entries.map((e) => ({ id: e.id, label: e.label, count: e.count }));
@@ -128,28 +155,34 @@ export function PeopleFilterSlip({ options }: { options: PersonFilterOptions }) 
         />
       </div>
 
-      <FilterPopover label="Niche" count={getAll("niche").length}>
+      <FilterPopover label="Niche" count={facetCount("niche")}>
         <FilterChipGroup
           title="Niche"
           options={toOptions(options.niches)}
           selected={getAll("niche")}
-          onToggle={(id) => toggle("niche", id)}
+          excluded={getExcluded("niche")}
+          onToggle={(id) => toggleInclude("niche", id)}
+          onToggleExclude={(id) => toggleExclude("niche", id)}
         />
       </FilterPopover>
-      <FilterPopover label="Source" count={getAll("source").length}>
+      <FilterPopover label="Source" count={facetCount("source")}>
         <FilterChipGroup
           title="Source"
           options={toOptions(options.sources)}
           selected={getAll("source")}
-          onToggle={(id) => toggle("source", id)}
+          excluded={getExcluded("source")}
+          onToggle={(id) => toggleInclude("source", id)}
+          onToggleExclude={(id) => toggleExclude("source", id)}
         />
       </FilterPopover>
-      <FilterPopover label="Country" count={getAll("country").length}>
+      <FilterPopover label="Country" count={facetCount("country")}>
         <FilterChipGroup
           title="Country"
           options={toOptions(options.countries)}
           selected={getAll("country")}
-          onToggle={(id) => toggle("country", id)}
+          excluded={getExcluded("country")}
+          onToggle={(id) => toggleInclude("country", id)}
+          onToggleExclude={(id) => toggleExclude("country", id)}
         />
       </FilterPopover>
       <FilterPopover label="Employee size" count={getAll("employee").length + (searchParams.get("empmin") || searchParams.get("empmax") ? 1 : 0)}>
@@ -199,28 +232,34 @@ export function PeopleFilterSlip({ options }: { options: PersonFilterOptions }) 
           </div>
         </div>
       </FilterPopover>
-      <FilterPopover label="Industry" count={getAll("industry").length}>
+      <FilterPopover label="Industry" count={facetCount("industry")}>
         <FilterChipGroup
           title="Industry"
           options={toOptions(options.industries)}
           selected={getAll("industry")}
-          onToggle={(id) => toggle("industry", id)}
+          excluded={getExcluded("industry")}
+          onToggle={(id) => toggleInclude("industry", id)}
+          onToggleExclude={(id) => toggleExclude("industry", id)}
         />
       </FilterPopover>
-      <FilterPopover label="Email status" count={getAll("emailStatus").length}>
+      <FilterPopover label="Email status" count={facetCount("emailStatus")}>
         <FilterChipGroup
           title="Email status"
           options={toOptions(options.emailStatuses)}
           selected={getAll("emailStatus")}
-          onToggle={(id) => toggle("emailStatus", id)}
+          excluded={getExcluded("emailStatus")}
+          onToggle={(id) => toggleInclude("emailStatus", id)}
+          onToggleExclude={(id) => toggleExclude("emailStatus", id)}
         />
       </FilterPopover>
-      <FilterPopover label="Phone type" count={getAll("phoneType").length}>
+      <FilterPopover label="Phone type" count={facetCount("phoneType")}>
         <FilterChipGroup
           title="Phone type"
           options={toOptions(options.phoneTypes)}
           selected={getAll("phoneType")}
-          onToggle={(id) => toggle("phoneType", id)}
+          excluded={getExcluded("phoneType")}
+          onToggle={(id) => toggleInclude("phoneType", id)}
+          onToggleExclude={(id) => toggleExclude("phoneType", id)}
         />
       </FilterPopover>
       <FilterPopover label="Has contact info" count={presenceCount}>

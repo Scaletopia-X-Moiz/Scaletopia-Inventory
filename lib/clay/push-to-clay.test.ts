@@ -7,6 +7,7 @@ import {
   FAILED_PREVIEW,
   RATE_LIMIT_MAX_DELAY_MS,
 } from "@/lib/clay/push-to-clay";
+import { includeOnly } from "@/lib/data/include-exclude";
 
 const TEST_PREFIX = "__test-clay-push__";
 const WEBHOOK_URL = "https://example.com/test-clay-webhook";
@@ -125,7 +126,7 @@ describe("runCompaniesClayPush", () => {
     ]);
 
     const fetchImpl = okFetch();
-    const result = await runCompaniesClayPush({ niche: [niche] }, WEBHOOK_URL, { fetchImpl });
+    const result = await runCompaniesClayPush({ niche: includeOnly([niche]) }, WEBHOOK_URL, { fetchImpl });
 
     expect(result.total_matched).toBe(3);
     expect(result.pushed).toBe(3);
@@ -137,11 +138,11 @@ describe("runCompaniesClayPush", () => {
     const niche = uniqueNiche("repeat");
     await seedCompanies(niche, [{ slug: "a" }, { slug: "b" }]);
 
-    const first = await runCompaniesClayPush({ niche: [niche] }, WEBHOOK_URL, { fetchImpl: okFetch() });
+    const first = await runCompaniesClayPush({ niche: includeOnly([niche]) }, WEBHOOK_URL, { fetchImpl: okFetch() });
     expect(first.pushed).toBe(2);
 
     const secondFetch = okFetch();
-    const second = await runCompaniesClayPush({ niche: [niche] }, WEBHOOK_URL, { fetchImpl: secondFetch });
+    const second = await runCompaniesClayPush({ niche: includeOnly([niche]) }, WEBHOOK_URL, { fetchImpl: secondFetch });
 
     expect(second.total_matched).toBe(2);
     expect(second.pushed).toBe(2);
@@ -160,7 +161,7 @@ describe("runCompaniesClayPush", () => {
       return { ok: true } as Response;
     }) as unknown as typeof fetch;
 
-    const result = await runCompaniesClayPush({ niche: [niche] }, WEBHOOK_URL, { fetchImpl });
+    const result = await runCompaniesClayPush({ niche: includeOnly([niche]) }, WEBHOOK_URL, { fetchImpl });
 
     expect(result.total_matched).toBe(3);
     expect(result.pushed).toBe(2);
@@ -172,7 +173,7 @@ describe("runCompaniesClayPush", () => {
     const niche = uniqueNiche("empty");
     const fetchImpl = okFetch();
 
-    const result = await runCompaniesClayPush({ niche: [niche] }, WEBHOOK_URL, { fetchImpl });
+    const result = await runCompaniesClayPush({ niche: includeOnly([niche]) }, WEBHOOK_URL, { fetchImpl });
 
     expect(result).toEqual({
       total_matched: 0,
@@ -185,7 +186,7 @@ describe("runCompaniesClayPush", () => {
 
   it("rejects when the webhook URL is invalid", async () => {
     await expect(
-      runCompaniesClayPush({ niche: [uniqueNiche("bad-url")] }, "http://insecure.example.com")
+      runCompaniesClayPush({ niche: includeOnly([uniqueNiche("bad-url")]) }, "http://insecure.example.com")
     ).rejects.toThrow("valid https webhook URL");
   });
 
@@ -198,7 +199,7 @@ describe("runCompaniesClayPush", () => {
     );
 
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 400 }) as unknown as typeof fetch;
-    const result = await runCompaniesClayPush({ niche: [niche] }, WEBHOOK_URL, { fetchImpl });
+    const result = await runCompaniesClayPush({ niche: includeOnly([niche]) }, WEBHOOK_URL, { fetchImpl });
 
     expect(result.errors).toBe(count);
     expect(result.failed_companies).toHaveLength(FAILED_PREVIEW);

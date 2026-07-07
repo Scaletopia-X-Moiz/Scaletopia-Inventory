@@ -5,6 +5,7 @@ import {
   getPersonFilterOptions,
   getAllFilteredPeople,
 } from "@/lib/data/people";
+import { includeOnly } from "@/lib/data/include-exclude";
 
 describe("getPersonFilterOptions", () => {
   it("returns normalized, deduped options for every filter dimension", async () => {
@@ -50,7 +51,7 @@ describe("getPeople", () => {
   });
 
   it("source filter matches normalized tokens regardless of raw variant", async () => {
-    const result = await getPeople({ source: ["aiark"] }, 1, 1000);
+    const result = await getPeople({ source: includeOnly(["aiark"]) }, 1, 1000);
     expect(result.total).toBeGreaterThan(0);
     for (const row of result.rows) {
       expect(row.sources).toContain("aiark");
@@ -60,7 +61,7 @@ describe("getPeople", () => {
   it("country filter uses the person's own country, no join needed", async () => {
     const options = await getPersonFilterOptions();
     const country = options.countries[0];
-    const result = await getPeople({ country: [country.id] }, 1, 1000);
+    const result = await getPeople({ country: includeOnly([country.id]) }, 1, 1000);
     expect(result.total).toBe(country.count);
   });
 
@@ -83,15 +84,22 @@ describe("getPeople", () => {
   });
 
   it("email status filter matches exactly the requested statuses", async () => {
-    const result = await getPeople({ emailStatus: ["ok"] }, 1, 1000);
+    const result = await getPeople({ emailStatus: includeOnly(["ok"]) }, 1, 1000);
     expect(result.total).toBeGreaterThan(0);
     for (const row of result.rows) expect(row.emailStatus).toBe("ok");
+  });
+
+  it("email status exclude filter removes the requested status", async () => {
+    const all = await getPeople({}, 1, 1000);
+    const result = await getPeople({ emailStatus: { include: [], exclude: ["ok"] } }, 1, 1000);
+    expect(result.total).toBeLessThan(all.total);
+    for (const row of result.rows) expect(row.emailStatus).not.toBe("ok");
   });
 
   it("phone type filter matches exactly the requested types", async () => {
     const options = await getPersonFilterOptions();
     const type = options.phoneTypes[0];
-    const result = await getPeople({ phoneType: [type.id] }, 1, 1000);
+    const result = await getPeople({ phoneType: includeOnly([type.id]) }, 1, 1000);
     expect(result.total).toBe(type.count);
     for (const row of result.rows) expect(row.phoneType).toBe(type.id);
   });
@@ -116,20 +124,32 @@ describe("getPeople", () => {
     const options = await getPersonFilterOptions();
     const industry = options.industries.find((i) => i.count > 0);
     expect(industry).toBeDefined();
-    const byIndustry = await getPeople({ industry: [industry!.id] }, 1, 1000);
+    const byIndustry = await getPeople({ industry: includeOnly([industry!.id]) }, 1, 1000);
     expect(byIndustry.total).toBe(industry!.count);
   });
 
   it("niche filter uses linked company niche, falling back to tags", async () => {
     const options = await getPersonFilterOptions();
     const niche = options.niches[0];
-    const result = await getPeople({ niche: [niche.id] }, 1, 1000);
+    const result = await getPeople({ niche: includeOnly([niche.id]) }, 1, 1000);
     expect(result.total).toBe(niche.count);
   });
 
+  it("niche exclude filter removes people with that niche", async () => {
+    const options = await getPersonFilterOptions();
+    const niche = options.niches[0];
+    const all = await getPeople({}, 1, 1000);
+    const result = await getPeople({ niche: { include: [], exclude: [niche.id] } }, 1, 1000);
+    expect(result.total).toBe(all.total - niche.count);
+  });
+
   it("combines multiple filters with AND semantics", async () => {
-    const broad = await getPeople({ source: ["aiark"] }, 1, 1000);
-    const narrowed = await getPeople({ source: ["aiark"], email: "not_empty" }, 1, 1000);
+    const broad = await getPeople({ source: includeOnly(["aiark"]) }, 1, 1000);
+    const narrowed = await getPeople(
+      { source: includeOnly(["aiark"]), email: "not_empty" },
+      1,
+      1000
+    );
     expect(narrowed.total).toBeLessThanOrEqual(broad.total);
   });
 });
