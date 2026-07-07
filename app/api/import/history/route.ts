@@ -10,9 +10,15 @@ export async function GET(req: Request) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  // Excludes failed_records: it's an uncapped jsonb blob (one entry per
+  // failed row, full record) that can grow to megabytes per run. Pulling it
+  // for 50 rows on every history load was slow enough to hit the statement
+  // timeout; the detail is fetched lazily per-row instead (see [id]/route.ts).
   const { data: history, error: historyErr } = await supabaseAdmin
     .from("import_history")
-    .select("*")
+    .select(
+      "id, source_key, target_table, tags, input_count, deduped_count, inserted_count, updated_count, failed_count, started_at, completed_at"
+    )
     .order("completed_at", { ascending: false })
     .limit(50);
 

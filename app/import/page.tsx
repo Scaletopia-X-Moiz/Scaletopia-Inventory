@@ -13,6 +13,7 @@ import {
 } from "@/lib/import/providers";
 import { fuzzyMatchColumn } from "@/lib/import/normalize";
 import { parseCSV, applyColumnMap, filterMappedNonEmptyRows, serializeCSV } from "@/lib/import/csv";
+import { summarizeFailures } from "@/lib/import/failure-messages";
 import { Upload, History, CheckCircle, AlertCircle, Loader2, Download, ChevronRight, RefreshCw } from "lucide-react";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -37,6 +38,11 @@ interface WizardMeta {
   customSourceKey: string;
   targetTable: TargetTable;
   columnMappings: ColumnMapping[];
+  // "This file also contains company data" toggle (only meaningful when the
+  // effective target table is "people") plus the second column-map section
+  // it unlocks. When false, both of these are no-ops everywhere they're read.
+  companySyncEnabled: boolean;
+  companyColumnMappings: ColumnMapping[];
   client: string;
   niche: string;
   date: string;
@@ -70,7 +76,6 @@ interface HistoryRow {
   inserted_count: number;
   updated_count: number;
   failed_count: number;
-  failed_records: Record<string, unknown>[] | null;
   started_at: string;
   completed_at: string | null;
 }
@@ -149,7 +154,7 @@ function autoMapColumns(
 ): ColumnMapping[] {
   const candidates = targetTable === "companies" ? COMPANIES_FIELDS : PEOPLE_FIELDS;
 
-  return headers.map((header) => {
+  const mappings = headers.map((header) => {
     // Provider preset takes precedence
     if (providerMap[header]) {
       return { csvHeader: header, supabaseField: providerMap[header], score: 1.0 };
@@ -160,6 +165,33 @@ function autoMapColumns(
       supabaseField: match?.field ?? "ignore",
       score: match?.score ?? 0,
     };
+  });
+
+  // Resolve many-to-one collisions: fuzzy matching happily maps several headers
+  // to the same target (Store Leads' `domain`, `platform_domain`,
+  // `cluster_domains`, `domain_count` all score against `domain`), which then
+  // gets saved as a preset and silently corrupts that field on every future
+  // import. `custom_data` legitimately absorbs many columns; every other target
+  // is single-value, so keep only the strongest header per field — preferring an
+  // exact header==field name — and demote the rest to `ignore`.
+  const winnerByField = new Map<string, { header: string; score: number }>();
+  for (const m of mappings) {
+    const f = m.supabaseField;
+    if (f === "ignore" || f === "custom_data") continue;
+    const exact = m.csvHeader === f;
+    const current = winnerByField.get(f);
+    const currentExact = current ? current.header === f : false;
+    // Exact name beats any fuzzy score; otherwise higher score wins.
+    if (!current || (exact && !currentExact) || (exact === currentExact && m.score > current.score)) {
+      winnerByField.set(f, { header: m.csvHeader, score: m.score });
+    }
+  }
+  return mappings.map((m) => {
+    if (m.supabaseField === "ignore" || m.supabaseField === "custom_data") return m;
+    const winner = winnerByField.get(m.supabaseField);
+    return winner && winner.header !== m.csvHeader
+      ? { ...m, supabaseField: "ignore", score: 0 }
+      : m;
   });
 }
 
@@ -236,13 +268,20 @@ function TargetBadge({ table }: { table: TargetTable }) {
 function StepUpload({
   onNext,
 }: {
-  onNext: (csv: ParsedCSV, provider: ProviderPreset | null, customKey: string, targetTable: TargetTable) => void;
+  onNext: (
+    csv: ParsedCSV,
+    provider: ProviderPreset | null,
+    customKey: string,
+    targetTable: TargetTable,
+    companySyncEnabled: boolean
+  ) => void;
 }) {
   const [dragging, setDragging] = useState(false);
   const [csv, setCsv] = useState<ParsedCSV | null>(null);
   const [providerKey, setProviderKey] = useState("manual-csv");
   const [targetOverride, setTargetOverride] = useState<TargetTable | "">("");
   const [customProviders, setCustomProviders] = useState<ProviderPreset[]>([]);
+  const [companySync, setCompanySync] = useState(false);
 
   const [showAddForm, setShowAddForm] = useState(false);
   const [newName, setNewName] = useState("");
@@ -280,6 +319,14 @@ function StepUpload({
   const effectiveTable: TargetTable = tableIsLocked
     ? (selectedProvider?.targetTable ?? "companies")
     : (targetOverride || selectedProvider?.targetTable || "companies");
+
+  // Pre-check the sync toggle per the selected preset's default whenever the
+  // provider or effective table changes, but let the user override it freely
+  // afterwards (this effect only re-fires on those two changes).
+  useEffect(() => {
+    setCompanySync(effectiveTable === "people" ? (selectedProvider?.companySyncDefault ?? false) : false);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerKey, effectiveTable]);
 
   async function handleFile(file: File) {
     const text = await file.text();
@@ -455,6 +502,25 @@ function StepUpload({
         )}
       </div>
 
+      {/* Company data sync toggle (people imports only) */}
+      {effectiveTable === "people" && (
+        <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-rule bg-paper px-3 py-2.5">
+          <input
+            type="checkbox"
+            checked={companySync}
+            onChange={(e) => setCompanySync(e.target.checked)}
+            className="mt-0.5 h-4 w-4 shrink-0 rounded border-rule"
+          />
+          <span className="text-sm text-ink">
+            This file also contains company data — import companies too
+            <span className="mt-0.5 block text-xs text-ink-mute">
+              Extracts embedded company columns (e.g. domain, industry, revenue) into a
+              separate Companies import, linked to these people automatically.
+            </span>
+          </span>
+        </label>
+      )}
+
       {/* Drop zone */}
       <div
         onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
@@ -518,7 +584,16 @@ function StepUpload({
 
       <button
         disabled={!csv}
-        onClick={() => csv && onNext(csv, selectedProvider, selectedProvider?.sourceKey ?? "custom", effectiveTable)}
+        onClick={() =>
+          csv &&
+          onNext(
+            csv,
+            selectedProvider,
+            selectedProvider?.sourceKey ?? "custom",
+            effectiveTable,
+            effectiveTable === "people" && companySync
+          )
+        }
         className="self-end rounded-lg bg-stamp px-5 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-40 transition-opacity"
       >
         Next: Map Columns
@@ -534,11 +609,68 @@ function ScoreIndicator({ score }: { score: number }) {
   return <span className="inline-block h-2 w-2 rounded-full bg-rule" title="No match" />;
 }
 
+function MappingTable({
+  mappings,
+  sampleRow,
+  candidates,
+  onChange,
+}: {
+  mappings: ColumnMapping[];
+  sampleRow: Record<string, string> | undefined;
+  candidates: string[];
+  onChange: (csvHeader: string, field: string) => void;
+}) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-rule">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b border-rule bg-hover">
+            <th className="px-4 py-2.5 text-left text-xs font-medium text-ink-soft">CSV Column</th>
+            <th className="px-4 py-2.5 text-left text-xs font-medium text-ink-soft">Sample</th>
+            <th className="px-4 py-2.5 text-left text-xs font-medium text-ink-soft">Supabase Field</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-rule">
+          {mappings.map((m) => (
+            <tr key={m.csvHeader} className="bg-paper">
+              <td className="px-4 py-2.5">
+                <div className="flex items-center gap-2">
+                  <ScoreIndicator score={m.supabaseField === "ignore" ? 0 : m.score} />
+                  <span className="font-mono text-xs text-ink">{m.csvHeader}</span>
+                </div>
+              </td>
+              <td className="px-4 py-2.5">
+                <span className="text-xs text-ink-mute truncate block max-w-[140px]">
+                  {sampleRow?.[m.csvHeader] ?? "—"}
+                </span>
+              </td>
+              <td className="px-4 py-2.5">
+                <select
+                  value={m.supabaseField}
+                  onChange={(e) => onChange(m.csvHeader, e.target.value)}
+                  className="w-full rounded border border-rule bg-paper px-2 py-1 text-xs text-ink outline-none focus:border-stamp"
+                >
+                  <option value="ignore">— ignore —</option>
+                  {candidates.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function StepMapping({
   csv,
   initialMappings,
   targetTable,
   sourceKey,
+  companySyncEnabled,
+  initialCompanyMappings,
   onNext,
   onBack,
 }: {
@@ -546,10 +678,13 @@ function StepMapping({
   initialMappings: ColumnMapping[];
   targetTable: TargetTable;
   sourceKey: string;
-  onNext: (mappings: ColumnMapping[]) => void;
+  companySyncEnabled: boolean;
+  initialCompanyMappings: ColumnMapping[];
+  onNext: (mappings: ColumnMapping[], companyMappings: ColumnMapping[]) => void;
   onBack: () => void;
 }) {
   const [mappings, setMappings] = useState<ColumnMapping[]>(initialMappings);
+  const [companyMappings, setCompanyMappings] = useState<ColumnMapping[]>(initialCompanyMappings);
   const candidates = targetTable === "companies" ? COMPANIES_FIELDS : PEOPLE_FIELDS;
 
   useEffect(() => {
@@ -575,6 +710,12 @@ function StepMapping({
     );
   }
 
+  function setCompanyField(csvHeader: string, field: string) {
+    setCompanyMappings((prev) =>
+      prev.map((m) => (m.csvHeader === csvHeader ? { ...m, supabaseField: field } : m))
+    );
+  }
+
   async function saveAndNext() {
     const columnMap: Record<string, string> = {};
     for (const m of mappings) {
@@ -587,7 +728,7 @@ function StepMapping({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sourceKey, columnMap, targetTable }),
     }).catch(() => {});
-    onNext(mappings);
+    onNext(mappings, companyMappings);
   }
 
   return (
@@ -599,46 +740,37 @@ function StepMapping({
         </p>
       </div>
 
-      <div className="overflow-hidden rounded-lg border border-rule">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-rule bg-hover">
-              <th className="px-4 py-2.5 text-left text-xs font-medium text-ink-soft">CSV Column</th>
-              <th className="px-4 py-2.5 text-left text-xs font-medium text-ink-soft">Sample</th>
-              <th className="px-4 py-2.5 text-left text-xs font-medium text-ink-soft">Supabase Field</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-rule">
-            {mappings.map((m) => (
-              <tr key={m.csvHeader} className="bg-paper">
-                <td className="px-4 py-2.5">
-                  <div className="flex items-center gap-2">
-                    <ScoreIndicator score={m.supabaseField === "ignore" ? 0 : m.score} />
-                    <span className="font-mono text-xs text-ink">{m.csvHeader}</span>
-                  </div>
-                </td>
-                <td className="px-4 py-2.5">
-                  <span className="text-xs text-ink-mute truncate block max-w-[140px]">
-                    {csv.sampleRows[0]?.[m.csvHeader] ?? "—"}
-                  </span>
-                </td>
-                <td className="px-4 py-2.5">
-                  <select
-                    value={m.supabaseField}
-                    onChange={(e) => setField(m.csvHeader, e.target.value)}
-                    className="w-full rounded border border-rule bg-paper px-2 py-1 text-xs text-ink outline-none focus:border-stamp"
-                  >
-                    <option value="ignore">— ignore —</option>
-                    {candidates.map((c) => (
-                      <option key={c} value={c}>{c}</option>
-                    ))}
-                  </select>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="flex flex-col gap-3">
+        {companySyncEnabled && (
+          <p className="text-xs font-medium text-ink-soft uppercase tracking-wide">
+            {targetTable === "companies" ? "Company columns" : "People columns"}
+          </p>
+        )}
+        <MappingTable
+          mappings={mappings}
+          sampleRow={csv.sampleRows[0]}
+          candidates={candidates}
+          onChange={setField}
+        />
       </div>
+
+      {companySyncEnabled && (
+        <div className="flex flex-col gap-3">
+          <div>
+            <p className="text-xs font-medium text-ink-soft uppercase tracking-wide">Company columns</p>
+            <p className="mt-1 text-xs text-ink-mute">
+              This file also contains embedded company data. Map those columns here — they&apos;ll be
+              imported into Companies and linked to the people above automatically.
+            </p>
+          </div>
+          <MappingTable
+            mappings={companyMappings}
+            sampleRow={csv.sampleRows[0]}
+            candidates={COMPANIES_FIELDS}
+            onChange={setCompanyField}
+          />
+        </div>
+      )}
 
       <div className="flex justify-between">
         <button onClick={onBack} className="rounded-lg border border-rule px-4 py-2 text-sm text-ink-soft hover:bg-hover transition-colors">
@@ -790,6 +922,24 @@ interface PreflightResult {
   updateCount: number;
 }
 
+function PreflightStatGrid({ preflight }: { preflight: PreflightResult }) {
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {[
+        { label: "In file", value: preflight.inputCount, color: "text-ink" },
+        { label: "After dedupe", value: preflight.dedupedCount, color: "text-ink" },
+        { label: "To insert", value: preflight.insertCount, color: "text-green-600" },
+        { label: "To update", value: preflight.updateCount, color: "text-blue-600" },
+      ].map(({ label, value, color }) => (
+        <div key={label} className="rounded-lg border border-rule bg-paper px-4 py-3 text-center">
+          <p className={cn("text-2xl font-bold tabular-nums", color)}>{value.toLocaleString()}</p>
+          <p className="mt-0.5 text-xs text-ink-mute">{label}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function StepSummary({
   csv,
   meta,
@@ -802,6 +952,7 @@ function StepSummary({
   onBack: () => void;
 }) {
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
+  const [companyPreflight, setCompanyPreflight] = useState<PreflightResult | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(true);
   const [preflightErr, setPreflightErr] = useState<string | null>(null);
   const [emptyRowCount, setEmptyRowCount] = useState<number | null>(null);
@@ -811,6 +962,25 @@ function StepSummary({
     if (m.supabaseField && m.supabaseField !== "ignore") {
       columnMap[m.csvHeader] = m.supabaseField;
     }
+  }
+
+  const companyColumnMap: Record<string, string> = {};
+  if (meta.companySyncEnabled) {
+    for (const m of meta.companyColumnMappings) {
+      if (m.supabaseField && m.supabaseField !== "ignore") {
+        companyColumnMap[m.csvHeader] = m.supabaseField;
+      }
+    }
+  }
+
+  function toIdentityRecords(mapped: Record<string, unknown>[]) {
+    return mapped.map((r) => {
+      const rec: Record<string, string> = {};
+      for (const f of ["domain", "website_url", "linkedin_url", "email"] as const) {
+        if (typeof r[f] === "string" && r[f]) rec[f] = r[f] as string;
+      }
+      return rec;
+    });
   }
 
   const runPreflight = useCallback(() => {
@@ -828,15 +998,9 @@ function StepSummary({
     const { rows } = parseCSV(csv.allText);
     const mapped = applyColumnMap(rows, columnMap, meta.targetTable);
     setEmptyRowCount(rows.length - mapped.length);
-    const identityRecords = mapped.map((r) => {
-      const rec: Record<string, string> = {};
-      for (const f of ["domain", "website_url", "linkedin_url", "email"] as const) {
-        if (typeof r[f] === "string" && r[f]) rec[f] = r[f] as string;
-      }
-      return rec;
-    });
+    const identityRecords = toIdentityRecords(mapped);
 
-    fetch("/api/import/preflight", {
+    const primaryReq = fetch("/api/import/preflight", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -844,12 +1008,36 @@ function StepSummary({
         rowCount: mapped.length,
         targetTable: meta.targetTable,
       }),
-    })
-      .then(async (r) => {
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
-        setPreflight(data as PreflightResult);
-      })
+    }).then(async (r) => {
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
+      setPreflight(data as PreflightResult);
+    });
+
+    // When the "also contains company data" toggle is on, run a SECOND
+    // preflight against the embedded company columns from the SAME rows so
+    // the user sees both previews before confirming the (two-stage) push.
+    const companyReq = meta.companySyncEnabled
+      ? (() => {
+          const companyMapped = applyColumnMap(rows, companyColumnMap, "companies");
+          const companyIdentityRecords = toIdentityRecords(companyMapped);
+          return fetch("/api/import/preflight", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              records: companyIdentityRecords,
+              rowCount: companyMapped.length,
+              targetTable: "companies",
+            }),
+          }).then(async (r) => {
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
+            setCompanyPreflight(data as PreflightResult);
+          });
+        })()
+      : Promise.resolve();
+
+    Promise.all([primaryReq, companyReq])
       .catch((e) => setPreflightErr(e.message ?? "Preflight failed"))
       .finally(() => setPreflightLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -885,21 +1073,24 @@ function StepSummary({
             <RefreshCw size={12} /> Retry
           </button>
         </div>
-      ) : preflight ? (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {[
-            { label: "In file", value: preflight.inputCount, color: "text-ink" },
-            { label: "After dedupe", value: preflight.dedupedCount, color: "text-ink" },
-            { label: "To insert", value: preflight.insertCount, color: "text-green-600" },
-            { label: "To update", value: preflight.updateCount, color: "text-blue-600" },
-          ].map(({ label, value, color }) => (
-            <div key={label} className="rounded-lg border border-rule bg-paper px-4 py-3 text-center">
-              <p className={cn("text-2xl font-bold tabular-nums", color)}>{value.toLocaleString()}</p>
-              <p className="mt-0.5 text-xs text-ink-mute">{label}</p>
+      ) : (
+        <div className="flex flex-col gap-4">
+          {meta.companySyncEnabled && companyPreflight && (
+            <div className="flex flex-col gap-2">
+              <p className="text-xs font-medium text-ink-soft uppercase tracking-wide">Companies</p>
+              <PreflightStatGrid preflight={companyPreflight} />
             </div>
-          ))}
+          )}
+          {preflight && (
+            <div className="flex flex-col gap-2">
+              {meta.companySyncEnabled && (
+                <p className="text-xs font-medium text-ink-soft uppercase tracking-wide">People</p>
+              )}
+              <PreflightStatGrid preflight={preflight} />
+            </div>
+          )}
         </div>
-      ) : null}
+      )}
 
       {!preflightLoading && !preflightErr && emptyRowCount !== null && emptyRowCount > 0 && (
         <p className="text-xs text-ink-mute">
@@ -948,9 +1139,11 @@ const PHASE_LABELS: Record<string, string> = {
 function StepProgress({
   progress,
   uploadNote,
+  stageLabel,
 }: {
   progress: PushProgress | null;
   uploadNote?: string | null;
+  stageLabel?: string | null;
 }) {
   const phase = progress?.phase ?? "normalizing";
   const pct =
@@ -963,6 +1156,9 @@ function StepProgress({
       <div>
         <h3 className="text-base font-semibold text-ink">Importing…</h3>
         <p className="mt-1 text-sm text-ink-soft">Please keep this tab open.</p>
+        {stageLabel && (
+          <p className="mt-2 text-xs font-medium uppercase tracking-wide text-stamp">{stageLabel}</p>
+        )}
         {uploadNote && (
           <p className="mt-2 text-sm text-stamp">{uploadNote}</p>
         )}
@@ -1018,16 +1214,77 @@ function StepProgress({
   );
 }
 
+function ResultStatGrid({ result }: { result: PushResult }) {
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {[
+        { label: "Input", value: result.inputCount, color: "text-ink" },
+        { label: "Inserted", value: result.insertedCount, color: "text-green-600" },
+        { label: "Updated", value: result.updatedCount, color: "text-blue-600" },
+        { label: "Failed", value: result.failedCount, color: result.failedCount > 0 ? "text-red-500" : "text-ink-mute" },
+      ].map(({ label, value, color }) => (
+        <div key={label} className="rounded-lg border border-rule bg-paper px-4 py-3 text-center">
+          <p className={cn("text-2xl font-bold tabular-nums", color)}>{value.toLocaleString()}</p>
+          <p className="mt-0.5 text-xs text-ink-mute">{label}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// A handful of one-off failures (a bad row here or there) aren't worth
+// interrupting the user over — the download-CSV link already covers that.
+// This is for the case a meaningful chunk of the batch didn't make it in,
+// where the person importing needs to know *why* in plain language before
+// they decide whether to fix the file and re-run.
+const SIGNIFICANT_FAILURE_MIN_COUNT = 10;
+const SIGNIFICANT_FAILURE_MIN_RATIO = 0.1;
+
+function isSignificantFailure(failedCount: number, inputCount: number): boolean {
+  if (failedCount < SIGNIFICANT_FAILURE_MIN_COUNT) return false;
+  return failedCount / Math.max(inputCount, 1) >= SIGNIFICANT_FAILURE_MIN_RATIO;
+}
+
+function FailureSummaryBanner({ result }: { result: PushResult }) {
+  if (!isSignificantFailure(result.failedCount, result.inputCount)) return null;
+
+  const reasons = summarizeFailures(result.failedRecords);
+
+  return (
+    <div className="flex items-start gap-3 rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-3">
+      <AlertCircle size={18} className="mt-0.5 shrink-0 text-red-500" />
+      <div className="flex flex-col gap-1.5">
+        <p className="text-sm font-medium text-ink">
+          {result.failedCount.toLocaleString()} of {result.inputCount.toLocaleString()} records
+          didn&apos;t import.
+        </p>
+        <ul className="flex flex-col gap-0.5 text-sm text-ink-soft">
+          {reasons.map((r) => (
+            <li key={r.message}>
+              {r.message} <span className="text-ink-mute">({r.count.toLocaleString()} records)</span>
+            </li>
+          ))}
+        </ul>
+        <p className="text-xs text-ink-mute">
+          Download the failed records below, fix the issue in your file, and re-import them.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function StepReport({
   result,
+  companyResult,
   onReset,
 }: {
   result: PushResult;
+  // Present only for a two-stage (company-sync) import — when set, both
+  // stages' results are shown side by side instead of just `result`.
+  companyResult?: PushResult | null;
   onReset: () => void;
 }) {
-  function downloadFailed() {
-    downloadFailedCsv(result.failedRecords, "import_failed.csv");
-  }
+  const combinedInput = result.inputCount + (companyResult?.inputCount ?? 0);
 
   return (
     <div className="flex flex-col gap-6">
@@ -1035,33 +1292,48 @@ function StepReport({
         <CheckCircle size={24} className="text-green-500 shrink-0" />
         <div>
           <h3 className="text-base font-semibold text-ink">Import Complete</h3>
-          <p className="text-sm text-ink-soft">{result.inputCount.toLocaleString()} records processed.</p>
+          <p className="text-sm text-ink-soft">{combinedInput.toLocaleString()} records processed.</p>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {[
-          { label: "Input", value: result.inputCount, color: "text-ink" },
-          { label: "Inserted", value: result.insertedCount, color: "text-green-600" },
-          { label: "Updated", value: result.updatedCount, color: "text-blue-600" },
-          { label: "Failed", value: result.failedCount, color: result.failedCount > 0 ? "text-red-500" : "text-ink-mute" },
-        ].map(({ label, value, color }) => (
-          <div key={label} className="rounded-lg border border-rule bg-paper px-4 py-3 text-center">
-            <p className={cn("text-2xl font-bold tabular-nums", color)}>{value.toLocaleString()}</p>
-            <p className="mt-0.5 text-xs text-ink-mute">{label}</p>
-          </div>
-        ))}
-      </div>
-
-      {result.failedCount > 0 && (
-        <button
-          onClick={downloadFailed}
-          className="flex items-center gap-2 self-start rounded-lg border border-rule px-4 py-2 text-sm text-ink hover:bg-hover transition-colors"
-        >
-          <Download size={14} />
-          Download failed records ({result.failedCount})
-        </button>
+      {companyResult && (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs font-medium text-ink-soft uppercase tracking-wide">Companies</p>
+          <ResultStatGrid result={companyResult} />
+          <FailureSummaryBanner result={companyResult} />
+          {companyResult.failedCount > 0 && (
+            <button
+              onClick={() => downloadFailedCsv(companyResult.failedRecords, "import_failed_companies.csv")}
+              className="flex items-center gap-2 self-start rounded-lg border border-rule px-4 py-2 text-sm text-ink hover:bg-hover transition-colors"
+            >
+              <Download size={14} />
+              Download failed company records ({companyResult.failedCount})
+            </button>
+          )}
+        </div>
       )}
+
+      <div className="flex flex-col gap-2">
+        {companyResult && (
+          <p className="text-xs font-medium text-ink-soft uppercase tracking-wide">People</p>
+        )}
+        <ResultStatGrid result={result} />
+        <FailureSummaryBanner result={result} />
+        {result.failedCount > 0 && (
+          <button
+            onClick={() =>
+              downloadFailedCsv(
+                result.failedRecords,
+                companyResult ? "import_failed_people.csv" : "import_failed.csv"
+              )
+            }
+            className="flex items-center gap-2 self-start rounded-lg border border-rule px-4 py-2 text-sm text-ink hover:bg-hover transition-colors"
+          >
+            <Download size={14} />
+            Download failed records ({result.failedCount})
+          </button>
+        )}
+      </div>
 
       <button
         onClick={onReset}
@@ -1083,7 +1355,17 @@ function csvCellValue(v: unknown): string {
 
 function downloadFailedCsv(records: Record<string, unknown>[], filename = "failed_records.csv") {
   if (!records.length) return;
-  const headers = Object.keys(records[0]);
+  // Collect the union of keys across every row (rows can have different shapes —
+  // e.g. a synthetic `_import_error` marker), not just the first row's keys, so
+  // no column is silently dropped. Surface the diagnostic columns first so the
+  // reason a row failed is immediately visible instead of buried at the end.
+  const seen = new Set<string>();
+  for (const r of records) for (const k of Object.keys(r)) seen.add(k);
+  const priority = ["_failure_reason", "_import_error", "_partial"];
+  const headers = [
+    ...priority.filter((k) => seen.has(k)),
+    ...[...seen].filter((k) => !priority.includes(k)),
+  ];
   const lines = [
     headers.join(","),
     ...records.map((r) =>
@@ -1109,6 +1391,23 @@ function HistoryTab({ token }: { token: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [failedRecordsById, setFailedRecordsById] = useState<Record<string, Record<string, unknown>[]>>({});
+  const [failedRecordsLoading, setFailedRecordsLoading] = useState<string | null>(null);
+
+  function toggleExpanded(id: string) {
+    const next = expanded === id ? null : id;
+    setExpanded(next);
+    if (next && !failedRecordsById[next]) {
+      setFailedRecordsLoading(next);
+      fetch(`/api/import/history/${next}`, { headers: { "X-Import-Token": token } })
+        .then((r) => r.json())
+        .then((data: { failed_records?: Record<string, unknown>[] }) => {
+          setFailedRecordsById((prev) => ({ ...prev, [next]: data.failed_records ?? [] }));
+        })
+        .catch(() => setFailedRecordsById((prev) => ({ ...prev, [next]: [] })))
+        .finally(() => setFailedRecordsLoading(null));
+    }
+  }
 
   useEffect(() => {
     setLoading(true);
@@ -1166,7 +1465,8 @@ function HistoryTab({ token }: { token: string }) {
         <tbody className="divide-y divide-rule">
           {rows.map((row) => {
             const isExpanded = expanded === row.id;
-            const hasFailures = row.failed_count > 0 && (row.failed_records?.length ?? 0) > 0;
+            const hasFailures = row.failed_count > 0;
+            const rowFailedRecords = failedRecordsById[row.id];
             const absoluteDate = row.completed_at
               ? new Date(row.completed_at).toLocaleString()
               : new Date(row.started_at).toLocaleString();
@@ -1175,7 +1475,7 @@ function HistoryTab({ token }: { token: string }) {
             return (
               <React.Fragment key={row.id}>
                 <tr
-                  onClick={() => hasFailures && setExpanded(isExpanded ? null : row.id)}
+                  onClick={() => hasFailures && toggleExpanded(row.id)}
                   className={cn(
                     "bg-paper transition-colors",
                     hasFailures ? "cursor-pointer hover:bg-hover" : ""
@@ -1233,55 +1533,62 @@ function HistoryTab({ token }: { token: string }) {
                 {isExpanded && hasFailures && (
                   <tr className="bg-red-50/50">
                     <td colSpan={7} className="px-4 py-3">
-                      <div className="flex flex-col gap-3">
-                        <div className="flex items-center justify-between">
-                          <p className="text-xs font-medium text-red-700">
-                            {row.failed_count} failed record{row.failed_count !== 1 ? "s" : ""}
-                          </p>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              downloadFailedCsv(
-                                row.failed_records!,
-                                `failed_${row.source_key}_${row.id.slice(0, 8)}.csv`
-                              );
-                            }}
-                            className="flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 transition-colors"
-                          >
-                            <Download size={12} />
-                            Download failed records (.csv)
-                          </button>
+                      {failedRecordsLoading === row.id || !rowFailedRecords ? (
+                        <div className="flex items-center gap-2 py-2 text-xs text-red-600">
+                          <Loader2 size={14} className="animate-spin" />
+                          Loading failed records…
                         </div>
-                        <div className="overflow-x-auto rounded-lg border border-red-200">
-                          <table className="min-w-full text-xs">
-                            <thead>
-                              <tr className="border-b border-red-200 bg-red-50">
-                                {Object.keys(row.failed_records![0] ?? {}).map((h) => (
-                                  <th key={h} className="whitespace-nowrap px-3 py-2 text-left font-medium text-red-700">
-                                    {h}
-                                  </th>
-                                ))}
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-red-100">
-                              {row.failed_records!.slice(0, 20).map((rec, i) => (
-                                <tr key={i} className="bg-white">
-                                  {Object.keys(row.failed_records![0] ?? {}).map((h) => (
-                                    <td key={h} className="max-w-[200px] truncate whitespace-nowrap px-3 py-2 text-ink-mute">
-                                      {String(rec[h] ?? "") || <span className="text-rule">—</span>}
-                                    </td>
+                      ) : (
+                        <div className="flex flex-col gap-3">
+                          <div className="flex items-center justify-between">
+                            <p className="text-xs font-medium text-red-700">
+                              {row.failed_count} failed record{row.failed_count !== 1 ? "s" : ""}
+                            </p>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                downloadFailedCsv(
+                                  rowFailedRecords,
+                                  `failed_${row.source_key}_${row.id.slice(0, 8)}.csv`
+                                );
+                              }}
+                              className="flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 transition-colors"
+                            >
+                              <Download size={12} />
+                              Download failed records (.csv)
+                            </button>
+                          </div>
+                          <div className="overflow-x-auto rounded-lg border border-red-200">
+                            <table className="min-w-full text-xs">
+                              <thead>
+                                <tr className="border-b border-red-200 bg-red-50">
+                                  {Object.keys(rowFailedRecords[0] ?? {}).map((h) => (
+                                    <th key={h} className="whitespace-nowrap px-3 py-2 text-left font-medium text-red-700">
+                                      {h}
+                                    </th>
                                   ))}
                                 </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                          {row.failed_records!.length > 20 && (
-                            <p className="border-t border-red-100 px-3 py-2 text-xs text-red-500">
-                              Showing 20 of {row.failed_records!.length} — download for full list
-                            </p>
-                          )}
+                              </thead>
+                              <tbody className="divide-y divide-red-100">
+                                {rowFailedRecords.slice(0, 20).map((rec, i) => (
+                                  <tr key={i} className="bg-white">
+                                    {Object.keys(rowFailedRecords[0] ?? {}).map((h) => (
+                                      <td key={h} className="max-w-[200px] truncate whitespace-nowrap px-3 py-2 text-ink-mute">
+                                        {String(rec[h] ?? "") || <span className="text-rule">—</span>}
+                                      </td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                            {rowFailedRecords.length > 20 && (
+                              <p className="border-t border-red-100 px-3 py-2 text-xs text-red-500">
+                                Showing 20 of {rowFailedRecords.length} — download for full list
+                              </p>
+                            )}
+                          </div>
                         </div>
-                      </div>
+                      )}
                     </td>
                   </tr>
                 )}
@@ -1326,6 +1633,8 @@ export default function ImportPage() {
     customSourceKey: "manual-csv",
     targetTable: "companies",
     columnMappings: [],
+    companySyncEnabled: false,
+    companyColumnMappings: [],
     client: "",
     niche: "",
     date: new Date().toISOString().slice(0, 10),
@@ -1334,6 +1643,10 @@ export default function ImportPage() {
   const [progress, setProgress] = useState<PushProgress | null>(null);
   const [uploadNote, setUploadNote] = useState<string | null>(null);
   const [result, setResult] = useState<PushResult | null>(null);
+  // Only set for a two-stage (company-sync) import — the companies stage's
+  // result, shown alongside `result` (the people stage) in the final report.
+  const [companyResult, setCompanyResult] = useState<PushResult | null>(null);
+  const [stageLabel, setStageLabel] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
@@ -1353,6 +1666,8 @@ export default function ImportPage() {
       customSourceKey: "manual-csv",
       targetTable: "companies",
       columnMappings: [],
+      companySyncEnabled: false,
+      companyColumnMappings: [],
       client: "",
       niche: "",
       date: new Date().toISOString().slice(0, 10),
@@ -1360,12 +1675,155 @@ export default function ImportPage() {
     setProgress(null);
     setUploadNote(null);
     setResult(null);
+    setCompanyResult(null);
+    setStageLabel(null);
     setErrorMsg(null);
     setStep("upload");
   }, []);
 
+  // Runs ONE push (one target table, one column map) against the existing
+  // single-target `/api/import/stream` endpoint end-to-end: filters empty
+  // rows, uploads (direct or via storage relay for large files), and drains
+  // the SSE stream to its terminal `done`/`error` event. Used directly for a
+  // normal single-target import, and called TWICE in sequence (companies
+  // then people) for a company-sync import — see `runImport` below. Reused
+  // as-is between both call sites; the only difference between them is which
+  // `targetTable`/`columnMap`/`sourceKey` gets passed in.
+  async function pushTarget({
+    headers,
+    rows,
+    columnMap,
+    targetTable,
+    sourceKey,
+    tags,
+    token,
+  }: {
+    headers: string[];
+    rows: Record<string, string>[];
+    columnMap: Record<string, string>;
+    targetTable: TargetTable;
+    sourceKey: string;
+    tags: [string, string, string];
+    token: string;
+  }): Promise<PushResult> {
+    const metadata = { targetTable, sourceKey, tags, columnMap };
+
+    // Filter out rows that would be discarded server-side anyway (no
+    // populated identity field after mapping) so we don't waste upload
+    // payload size on rows that can never survive `applyColumnMap`.
+    // BUG D: pass the target so people rows with only a company_name are treated
+    // as empty here too (kept consistent with the server's applyColumnMap).
+    const nonEmptyRows = filterMappedNonEmptyRows(rows, columnMap, targetTable);
+    const filteredText = serializeCSV(headers, nonEmptyRows);
+    const byteLength = new TextEncoder().encode(filteredText).length;
+
+    let response: Response;
+
+    if (byteLength > DIRECT_UPLOAD_MAX_BYTES) {
+      setUploadNote(
+        "Large file detected — uploading via secure storage, this may take a bit longer."
+      );
+
+      try {
+        const signRes = await fetch("/api/import/storage-upload", {
+          method: "POST",
+          headers: { "X-Import-Token": token },
+        });
+
+        if (!signRes.ok) {
+          const text = await signRes.text();
+          throw new Error(text || `HTTP ${signRes.status}`);
+        }
+
+        const { path, signedUrl } = (await signRes.json()) as {
+          path: string;
+          token: string;
+          signedUrl: string;
+        };
+
+        // Mirrors the wire format used by supabase-js's
+        // `uploadToSignedUrl` (PUT with a multipart body containing an
+        // empty-named file field). We hit the signed URL directly with
+        // fetch instead of instantiating a Supabase client, since we have
+        // no anon/public key to give a browser-side client and the token
+        // embedded in the signed URL (already appended server-side by
+        // `createSignedUploadUrl`) is all the auth this endpoint needs.
+        const uploadBody = new FormData();
+        uploadBody.append("cacheControl", "3600");
+        uploadBody.append("", new Blob([filteredText], { type: "text/csv" }));
+
+        const uploadRes = await fetch(signedUrl, {
+          method: "PUT",
+          body: uploadBody,
+        });
+
+        if (!uploadRes.ok) {
+          const text = await uploadRes.text();
+          throw new Error(text || `Storage upload failed: HTTP ${uploadRes.status}`);
+        }
+
+        response = await fetch("/api/import/stream", {
+          method: "POST",
+          headers: { "X-Import-Token": token, "Content-Type": "application/json" },
+          body: JSON.stringify({ path, metadata: JSON.stringify(metadata) }),
+        });
+      } finally {
+        setUploadNote(null);
+      }
+    } else {
+      const formData = new FormData();
+      const blob = new Blob([filteredText], { type: "text/csv" });
+      formData.append("file", blob, "import.csv");
+      formData.append("metadata", JSON.stringify(metadata));
+
+      response = await fetch("/api/import/stream", {
+        method: "POST",
+        headers: { "X-Import-Token": token },
+        body: formData,
+      });
+    }
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `HTTP ${response.status}`);
+    }
+
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop()!;
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        let event: { phase: string; done?: number; total?: number; message?: string; result?: PushResult };
+        try {
+          event = JSON.parse(line.slice(6));
+        } catch {
+          continue;
+        }
+        if (event.phase === "error") {
+          throw new Error(event.message ?? "Unknown error");
+        }
+        if (event.phase === "done" && event.result) {
+          return event.result;
+        }
+        setProgress(event as PushProgress);
+      }
+    }
+
+    throw new Error("Import stream ended unexpectedly without a result");
+  }
+
   async function runImport(finalMeta: WizardMeta, csvData: ParsedCSV) {
     setStep("progress");
+    setCompanyResult(null);
+    setStageLabel(null);
 
     const token = (() => {
       try {
@@ -1375,130 +1833,70 @@ export default function ImportPage() {
       }
     })();
 
-    const columnMap: Record<string, string> = {};
+    const { headers, rows } = parseCSV(csvData.allText);
+    const tags = [finalMeta.client, finalMeta.niche, finalMeta.date] as [string, string, string];
+    const sourceKey = finalMeta.provider?.sourceKey ?? finalMeta.customSourceKey;
+
+    const personColumnMap: Record<string, string> = {};
     for (const m of finalMeta.columnMappings) {
       if (m.supabaseField && m.supabaseField !== "ignore") {
-        columnMap[m.csvHeader] = m.supabaseField;
+        personColumnMap[m.csvHeader] = m.supabaseField;
       }
     }
 
-    const metadata = {
-      targetTable: finalMeta.targetTable,
-      sourceKey: finalMeta.provider?.sourceKey ?? finalMeta.customSourceKey,
-      tags: [finalMeta.client, finalMeta.niche, finalMeta.date] as [string, string, string],
-      columnMap,
-    };
-
-    // Filter out rows that would be discarded server-side anyway (no
-    // populated identity field after mapping) so we don't waste upload
-    // payload size on rows that can never survive `applyColumnMap`.
-    const { headers, rows } = parseCSV(csvData.allText);
-    // BUG D: pass the target so people rows with only a company_name are treated
-    // as empty here too (kept consistent with the server's applyColumnMap).
-    const nonEmptyRows = filterMappedNonEmptyRows(rows, columnMap, finalMeta.targetTable);
-    const filteredText = serializeCSV(headers, nonEmptyRows);
-    const byteLength = new TextEncoder().encode(filteredText).length;
-
     try {
-      let response: Response;
-
-      if (byteLength > DIRECT_UPLOAD_MAX_BYTES) {
-        setUploadNote(
-          "Large file detected — uploading via secure storage, this may take a bit longer."
-        );
-
-        try {
-          const signRes = await fetch("/api/import/storage-upload", {
-            method: "POST",
-            headers: { "X-Import-Token": token },
-          });
-
-          if (!signRes.ok) {
-            const text = await signRes.text();
-            throw new Error(text || `HTTP ${signRes.status}`);
+      if (finalMeta.companySyncEnabled) {
+        // Two-stage push: companies MUST finish (fully committed to the DB)
+        // before people starts, since the people push's own domain-based
+        // company_id lookup (fetchCompanyIdByDomain in lib/import/push.ts)
+        // re-queries the companies table fresh at push time — no separate
+        // linking step needed as long as this ordering holds.
+        const companyColumnMap: Record<string, string> = {};
+        for (const m of finalMeta.companyColumnMappings) {
+          if (m.supabaseField && m.supabaseField !== "ignore") {
+            companyColumnMap[m.csvHeader] = m.supabaseField;
           }
-
-          const { path, signedUrl } = (await signRes.json()) as {
-            path: string;
-            token: string;
-            signedUrl: string;
-          };
-
-          // Mirrors the wire format used by supabase-js's
-          // `uploadToSignedUrl` (PUT with a multipart body containing an
-          // empty-named file field). We hit the signed URL directly with
-          // fetch instead of instantiating a Supabase client, since we have
-          // no anon/public key to give a browser-side client and the token
-          // embedded in the signed URL (already appended server-side by
-          // `createSignedUploadUrl`) is all the auth this endpoint needs.
-          const uploadBody = new FormData();
-          uploadBody.append("cacheControl", "3600");
-          uploadBody.append("", new Blob([filteredText], { type: "text/csv" }));
-
-          const uploadRes = await fetch(signedUrl, {
-            method: "PUT",
-            body: uploadBody,
-          });
-
-          if (!uploadRes.ok) {
-            const text = await uploadRes.text();
-            throw new Error(text || `Storage upload failed: HTTP ${uploadRes.status}`);
-          }
-
-          response = await fetch("/api/import/stream", {
-            method: "POST",
-            headers: { "X-Import-Token": token, "Content-Type": "application/json" },
-            body: JSON.stringify({ path, metadata: JSON.stringify(metadata) }),
-          });
-        } finally {
-          setUploadNote(null);
         }
-      } else {
-        const formData = new FormData();
-        const blob = new Blob([filteredText], { type: "text/csv" });
-        formData.append("file", blob, "import.csv");
-        formData.append("metadata", JSON.stringify(metadata));
 
-        response = await fetch("/api/import/stream", {
-          method: "POST",
-          headers: { "X-Import-Token": token },
-          body: formData,
+        setStageLabel("Stage 1 of 2: Companies");
+        setProgress(null);
+        const companiesResult = await pushTarget({
+          headers,
+          rows,
+          columnMap: companyColumnMap,
+          targetTable: "companies",
+          sourceKey,
+          tags,
+          token,
         });
-      }
+        setCompanyResult(companiesResult);
 
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || `HTTP ${response.status}`);
-      }
+        setStageLabel("Stage 2 of 2: People");
+        setProgress(null);
+        const peopleResult = await pushTarget({
+          headers,
+          rows,
+          columnMap: personColumnMap,
+          targetTable: "people",
+          sourceKey,
+          tags,
+          token,
+        });
 
-      const reader = response.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop()!;
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const event = JSON.parse(line.slice(6));
-            if (event.phase === "error") {
-              setErrorMsg(event.message ?? "Unknown error");
-              setStep("report");
-              return;
-            }
-            if (event.phase === "done" && event.result) {
-              setResult(event.result);
-              setStep("report");
-              return;
-            }
-            setProgress(event as PushProgress);
-          } catch {}
-        }
+        setResult(peopleResult);
+        setStep("report");
+      } else {
+        const singleResult = await pushTarget({
+          headers,
+          rows,
+          columnMap: personColumnMap,
+          targetTable: finalMeta.targetTable,
+          sourceKey,
+          tags,
+          token,
+        });
+        setResult(singleResult);
+        setStep("report");
       }
     } catch (e) {
       setErrorMsg(e instanceof Error ? e.message : "Unknown error");
@@ -1565,7 +1963,7 @@ export default function ImportPage() {
                 <div className="p-6">
                   {step === "upload" && (
                     <StepUpload
-                      onNext={(parsedCsv, provider, sourceKey, targetTable) => {
+                      onNext={(parsedCsv, provider, sourceKey, targetTable, companySyncEnabled) => {
                         setCsv(parsedCsv);
                         const providerMap =
                           provider && targetTable !== provider.targetTable
@@ -1576,12 +1974,17 @@ export default function ImportPage() {
                           providerMap,
                           targetTable
                         );
+                        const companyMappings = companySyncEnabled
+                          ? autoMapColumns(parsedCsv.headers, provider?.companyColumnMap ?? {}, "companies")
+                          : [];
                         setMeta((prev) => ({
                           ...prev,
                           provider,
                           customSourceKey: sourceKey,
                           targetTable,
                           columnMappings: mappings,
+                          companySyncEnabled,
+                          companyColumnMappings: companyMappings,
                         }));
                         setStep("mapping");
                       }}
@@ -1594,8 +1997,14 @@ export default function ImportPage() {
                       initialMappings={meta.columnMappings}
                       targetTable={meta.targetTable}
                       sourceKey={meta.provider?.sourceKey ?? meta.customSourceKey}
-                      onNext={(mappings) => {
-                        setMeta((prev) => ({ ...prev, columnMappings: mappings }));
+                      companySyncEnabled={meta.companySyncEnabled}
+                      initialCompanyMappings={meta.companyColumnMappings}
+                      onNext={(mappings, companyMappings) => {
+                        setMeta((prev) => ({
+                          ...prev,
+                          columnMappings: mappings,
+                          companyColumnMappings: companyMappings,
+                        }));
                         setStep("metadata");
                       }}
                       onBack={() => setStep("upload")}
@@ -1625,7 +2034,7 @@ export default function ImportPage() {
                   )}
 
                   {step === "progress" && (
-                    <StepProgress progress={progress} uploadNote={uploadNote} />
+                    <StepProgress progress={progress} uploadNote={uploadNote} stageLabel={stageLabel} />
                   )}
 
                   {step === "report" && (
@@ -1643,7 +2052,7 @@ export default function ImportPage() {
                         </button>
                       </div>
                     ) : result ? (
-                      <StepReport result={result} onReset={reset} />
+                      <StepReport result={result} companyResult={companyResult} onReset={reset} />
                     ) : null
                   )}
                 </div>

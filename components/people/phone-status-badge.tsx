@@ -2,11 +2,8 @@ import { Tooltip } from "radix-ui";
 import { cn } from "@/lib/utils";
 
 const STATUS_LABEL: Record<string, string> = {
-  ok: "OK",
-  catch_all: "Catch-all",
+  valid: "Valid",
   invalid: "Invalid",
-  unknown: "Unknown",
-  disposable: "Disposable",
 };
 
 function formatVerifiedAt(value: string | null): string {
@@ -17,23 +14,25 @@ function formatVerifiedAt(value: string | null): string {
   })}`;
 }
 
-/** Badge for `email_status` (people and companies share the same column
- * vocabulary). A record with an email but no status yet reads as "Not
+/** Badge for `phone_status` (people and companies share the same column
+ * vocabulary). A record with a phone but no status yet reads as "Not
  * verified" rather than rendering nothing — a blank cell is otherwise
  * indistinguishable from "still loading". Hovering shows the last-verified
- * timestamp so a stale "OK" from months ago is visibly stale. Self-contained
+ * timestamp so a stale "Valid" from months ago is visibly stale. Self-contained
  * Tooltip.Provider so this works wherever it's dropped in (table cell or
- * detail page) without the caller wiring one up. */
-export function EmailStatusBadge({
-  email,
+ * detail page) without the caller wiring one up. Falls back to showing the raw
+ * status muted gray for anything outside valid/invalid — ClearoutPhone's
+ * status set isn't confirmed closed. */
+export function PhoneStatusBadge({
+  phone,
   status,
   verifiedAt = null,
 }: {
-  email: string | null;
+  phone: string | null;
   status: string | null;
   verifiedAt?: string | null;
 }) {
-  if (!email) return null;
+  if (!phone) return null;
 
   const label = status ? (STATUS_LABEL[status] ?? status) : "Not verified";
 
@@ -44,11 +43,9 @@ export function EmailStatusBadge({
           <span
             className={cn(
               "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium",
-              status === "ok" && "bg-success/15 text-success",
-              status === "catch_all" && "bg-warning/15 text-warning",
+              status === "valid" && "bg-success/15 text-success",
               status === "invalid" && "bg-danger/15 text-danger",
-              status === "disposable" && "bg-danger/15 text-danger",
-              status === "unknown" && "bg-rule/50 text-ink-soft",
+              status && !STATUS_LABEL[status] && "bg-rule/50 text-ink-soft",
               !status && "bg-rule/50 text-ink-mute"
             )}
           >

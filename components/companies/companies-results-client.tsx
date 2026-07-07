@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import type { CompanyListResult } from "@/lib/data/companies";
 import { CompaniesTable } from "@/components/companies/companies-table";
 import { Pagination } from "@/components/companies/pagination";
 import { ExportButton } from "@/components/companies/export-button";
 import { PushToClayButton } from "@/components/companies/push-to-clay-button";
+import { ReverifyFilteredButton } from "@/components/shared/reverify-filtered-button";
 import { SkeletonTable } from "@/components/shared/skeleton-loaders";
 
 const cache = new Map<string, CompanyListResult>();
@@ -20,7 +21,7 @@ export function CompaniesResultsClient() {
   const [error, setError] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -50,9 +51,12 @@ export function CompaniesResultsClient() {
           setError(true);
         }
       });
-
-    return () => controller.abort();
   }, [paramsStr]);
+
+  useEffect(() => {
+    load();
+    return () => abortRef.current?.abort();
+  }, [load]);
 
   const exportHref = `/companies/export?${paramsStr}`;
 
@@ -78,6 +82,23 @@ export function CompaniesResultsClient() {
           {result.total.toLocaleString("en-US")} companies
         </h2>
         <div className="flex items-center gap-2">
+          <ReverifyFilteredButton
+            endpoint="/api/companies/reverify"
+            paramsStr={paramsStr}
+            total={result.total}
+            noun="companies"
+            fieldLabel="email"
+            onDone={load}
+          />
+          <ReverifyFilteredButton
+            endpoint="/api/companies/reverify-phone"
+            paramsStr={paramsStr}
+            total={result.total}
+            noun="companies"
+            fieldLabel="phone number"
+            providerName="ClearoutPhone"
+            onDone={load}
+          />
           <PushToClayButton paramsStr={paramsStr} total={result.total} />
           <ExportButton href={exportHref} />
         </div>

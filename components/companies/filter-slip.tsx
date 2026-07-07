@@ -5,9 +5,18 @@ import { useState, useTransition } from "react";
 import { Search } from "lucide-react";
 import { FilterChipGroup, type ChipOption } from "@/components/companies/filter-chip-group";
 import { FilterPopover } from "@/components/shared/filter-popover";
+import { SingleSelectGroup } from "@/components/people/single-select-group";
 import type { CompanyFilterOptions } from "@/lib/data/companies";
 
-const MULTI_PARAMS = ["niche", "source", "industry", "employee", "country"] as const;
+const MULTI_PARAMS = [
+  "niche",
+  "source",
+  "industry",
+  "employee",
+  "country",
+  "emailStatus",
+  "phoneType",
+] as const;
 const SINGLE_PARAMS = ["q", "empmin", "empmax"] as const;
 
 export function FilterSlip({ options }: { options: CompanyFilterOptions }) {
@@ -59,6 +68,13 @@ export function FilterSlip({ options }: { options: CompanyFilterOptions }) {
     });
   }
 
+  function setSingleSelect(param: string, id: string) {
+    navigate((params) => {
+      if (id === "any") params.delete(param);
+      else params.set(param, id);
+    });
+  }
+
   function clearAll() {
     setSearch("");
     setEmpMin("");
@@ -70,12 +86,17 @@ export function FilterSlip({ options }: { options: CompanyFilterOptions }) {
 
   const hasActiveFilters =
     Boolean(searchParams.get("q")) ||
+    Boolean(searchParams.get("email")) ||
+    Boolean(searchParams.get("phone")) ||
     Boolean(searchParams.get("empmin")) ||
     Boolean(searchParams.get("empmax")) ||
     MULTI_PARAMS.some((p) => searchParams.getAll(p).length > 0);
 
   const toOptions = (entries: { id: string; label: string; count: number }[]): ChipOption[] =>
     entries.map((e) => ({ id: e.id, label: e.label, count: e.count }));
+
+  const presenceCount =
+    (searchParams.get("email") ? 1 : 0) + (searchParams.get("phone") ? 1 : 0);
 
   return (
     <div className="flex flex-col gap-3">
@@ -172,6 +193,36 @@ export function FilterSlip({ options }: { options: CompanyFilterOptions }) {
             selected={getAll("country")}
             onToggle={(id) => toggle("country", id)}
           />
+        </FilterPopover>
+        <FilterPopover label="Email status" count={getAll("emailStatus").length}>
+          <FilterChipGroup
+            title="Email status"
+            options={toOptions(options.emailStatuses)}
+            selected={getAll("emailStatus")}
+            onToggle={(id) => toggle("emailStatus", id)}
+          />
+        </FilterPopover>
+        <FilterPopover label="Phone type" count={getAll("phoneType").length}>
+          <FilterChipGroup
+            title="Phone type"
+            options={toOptions(options.phoneTypes)}
+            selected={getAll("phoneType")}
+            onToggle={(id) => toggle("phoneType", id)}
+          />
+        </FilterPopover>
+        <FilterPopover label="Has contact info" count={presenceCount}>
+          <div className="flex flex-col gap-4">
+            <SingleSelectGroup
+              title="Email"
+              value={searchParams.get("email") ?? "any"}
+              onChange={(id) => setSingleSelect("email", id)}
+            />
+            <SingleSelectGroup
+              title="Phone"
+              value={searchParams.get("phone") ?? "any"}
+              onChange={(id) => setSingleSelect("phone", id)}
+            />
+          </div>
         </FilterPopover>
 
         <button

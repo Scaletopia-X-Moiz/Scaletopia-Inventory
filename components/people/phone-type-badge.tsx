@@ -2,6 +2,10 @@ const TYPE_LABEL: Record<string, string> = {
   mobile: "Mobile",
   toll_free: "Toll-free",
   landline: "Landline",
+  voip: "VoIP",
+  // ClearoutPhone returns this when carrier data can't distinguish the two —
+  // confirmed live, not in the original (mobile/toll_free/landline) set.
+  fixed_line_or_mobile: "Mobile/Landline",
 };
 
 export function PhoneTypeBadge({ phone, type }: { phone: string | null; type: string | null }) {

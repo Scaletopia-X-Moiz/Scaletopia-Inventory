@@ -9,6 +9,15 @@ export interface ProviderPreset {
   // companies, if targetTable is people). Presence of this field is what
   // unlocks the Companies/People toggle for a builtin provider in the UI.
   altColumnMap?: Record<string, string>;
+  // When the CURRENT effective target table is "people" (whether because
+  // targetTable is "people", or the user toggled to People for a
+  // companies-primary preset), this optional map extracts embedded company
+  // columns from the SAME rows, so one CSV populates both tables in a single
+  // linked push (see app/import/page.tsx "company sync" toggle).
+  companyColumnMap?: Record<string, string>;
+  // Pre-check the "this file also contains company data" toggle when this
+  // preset is selected and the effective table is People.
+  companySyncDefault?: boolean;
 }
 
 export const BUILTIN_PROVIDERS: ProviderPreset[] = [
@@ -76,8 +85,15 @@ export const BUILTIN_PROVIDERS: ProviderPreset[] = [
       "Company Product and Services": "ignore",
       "Company Description": "ignore",
       "Company SEO Description": "ignore",
-      "Company Website": "ignore",
+      // BUG: real AI Ark People.csv exports have "Company Domain" empty on
+      // every row (verified against testcsv/AI Ark People.csv); the actual
+      // bare domain (e.g. "teminc.com", no protocol) lives in "Company
+      // Website" instead. Map "Company Domain" first (so it wins if a future
+      // export ever populates it) and "Company Website" second as the
+      // fallback that actually has data today — mapRow's first-non-empty-wins
+      // scalar guard makes this ordering safe.
       "Company Domain": "domain",
+      "Company Website": "domain",
       "Company LinkedIn": "ignore",
       "Company X (Twitter)": "ignore",
       "Company Facebook": "ignore",
@@ -99,6 +115,127 @@ export const BUILTIN_PROVIDERS: ProviderPreset[] = [
       "Company AI Ark account ID": "ignore",
       "Company Last Updated": "ignore",
     },
+    // Extracts the same "Company *" headers that `altColumnMap` above
+    // deliberately ignores, but as COMPANY-table fields instead — this is
+    // what powers the "this file also contains company data" sync toggle.
+    // Fields with no dedicated companies column (funding history, social
+    // handles, growth metrics, internal IDs) fall through to custom_data so
+    // nothing is lost.
+    companyColumnMap: {
+      "Company Name": "company_name",
+      "Company Size": "employee_count",
+      "Company Total headcount growth (3 months)": "custom_data",
+      "Company Total headcount growth (6 months)": "custom_data",
+      "Company Total headcount growth (12 months)": "custom_data",
+      "Company Total headcount growth (24 months)": "custom_data",
+      "Company Industry": "industry",
+      "Company Product and Services": "custom_data",
+      "Company Description": "description",
+      "Company SEO Description": "custom_data",
+      // Same real-data gap as altColumnMap above: "Company Domain" is empty
+      // on every row of the actual export, "Company Website" holds the real
+      // bare domain. Domain first (wins if ever populated), Website second
+      // as the fallback that actually carries data today.
+      "Company Domain": "domain",
+      "Company Website": "domain",
+      "Company LinkedIn": "linkedin_url",
+      "Company X (Twitter)": "custom_data",
+      "Company Facebook": "custom_data",
+      "Company Instagram": "custom_data",
+      "Company Type": "custom_data",
+      "Company Number Of Locations": "custom_data",
+      "Company Location": "custom_data",
+      "Company Country": "country",
+      "Company State": "state",
+      "Company City": "city",
+      "Company Primary Phone": "phone",
+      "Company Email": "email",
+      "Company Founding Year": "founded_year",
+      "Company Annual Revenue": "revenue",
+      "Company Total Funding": "custom_data",
+      "Company Last Funding Type": "custom_data",
+      "Company Last Funding Amount": "custom_data",
+      "Company Last Funding Date": "custom_data",
+      "Company AI Ark account ID": "custom_data",
+      "Company Last Updated": "custom_data",
+    },
+    companySyncDefault: true,
+  },
+  {
+    sourceKey: "external-scraper",
+    displayName: "External Scraper",
+    targetTable: "people",
+    // Verified against a real "External Scraper People.csv" export. This
+    // file is a person+company join like AI Ark's People export, but its
+    // duplication style is different: rather than a single "Company *"
+    // prefix, several PERSON fields are simply repeated verbatim later in
+    // the row under a "_1"-suffixed header (e.g. "First Name" then
+    // "First Name_1"), and "Company Name" is likewise repeated as
+    // "Company Name_1" once the row reaches the actual company data block.
+    // Confirmed by inspecting a real row: "Company Name" (col 0, the
+    // person's employer name) and "Company Name_1" (in the company block)
+    // hold the identical string for a given row — so both are legitimate,
+    // but only one may be mapped per target to avoid the same
+    // exact-header-wins/first-non-empty-wins ordering hazard described in
+    // the AI Ark comment above. The "_1" columns are explicitly ignored
+    // here (not left to fuzzy-match) since they are pure duplicates of the
+    // earlier, correct columns.
+    columnMap: {
+      "Company Name": "company_name",
+      "Domain": "domain",
+      "First Name": "first_name",
+      "Last Name": "last_name",
+      "Job Title": "job_title",
+      "Person Linkedin Url": "linkedin_url",
+      "Mobile Phone": "phone",
+      "Other Phone": "custom_data",
+      "First Name_1": "ignore",
+      "Last Name_1": "ignore",
+      "Title": "ignore",
+      "Person Linkedin Url_1": "ignore",
+      "City": "city",
+      "State": "state",
+      "Country": "country",
+      "Email": "email",
+      "Company Name_1": "ignore",
+      "Website": "ignore",
+      "Industry": "ignore",
+      "# Employees": "ignore",
+      "Annual Revenue": "ignore",
+      "Total Funding": "ignore",
+      "Company Phone": "ignore",
+      "Company Linkedin Url": "ignore",
+      "Company Street": "ignore",
+      "Company City": "ignore",
+      "Company Postal Code": "ignore",
+      "Company State": "ignore",
+      "Company Country": "ignore",
+      "Company Founded Year": "ignore",
+    },
+    // Extracts the embedded company block for the sync toggle. "Company
+    // Name_1" (not the earlier "Company Name") is the identity choice here
+    // since it sits inside the actual company-data block alongside Website/
+    // Industry/# Employees/etc — the earlier "Company Name" belongs to the
+    // person side above and is left "ignore" here to avoid double-mapping.
+    companyColumnMap: {
+      "Company Name": "ignore",
+      "Domain": "domain",
+      "Company Name_1": "company_name",
+      "Website": "website_url",
+      "Industry": "industry",
+      "# Employees": "employee_count",
+      "Annual Revenue": "revenue",
+      "Total Funding": "custom_data",
+      "Company Phone": "phone",
+      "Company Linkedin Url": "linkedin_url",
+      "Company Street": "custom_data",
+      "Company City": "city",
+      "Company Postal Code": "custom_data",
+      "Company State": "state",
+      "Company Country": "country",
+      "Company Founded Year": "founded_year",
+    },
+    companySyncDefault: true,
   },
   {
     sourceKey: "apollo",
@@ -240,9 +377,69 @@ export const BUILTIN_PROVIDERS: ProviderPreset[] = [
       "phones": "phone",
       "technologies": "technologies",
       "estimated_yearly_sales": "revenue",
+      // `meta_keywords` is a clean comma-separated keyword list; `categories`
+      // is a rich but taxonomy-formatted field ("/Food & Drink/Food/Snack
+      // Foods:/...") so it is preserved in custom_data rather than split into
+      // keywords. Explicitly DO NOT map `platform_domain` / `cluster_domains` /
+      // `domain_count` etc. onto `domain` — they overwrite the real domain.
+      "meta_keywords": "keywords",
+      "categories": "custom_data",
+      "tiktok": "custom_data",
     },
     // Store Leads is storefront/e-commerce data, not person data, so this
     // is left thin; unlocking the toggle still allows manual mapping.
+    altColumnMap: {},
+  },
+  {
+    sourceKey: "leadfox",
+    displayName: "LeadFox",
+    targetTable: "companies",
+    // Verified against a real "MyLeadFox Company.csv" export. `Website` is a
+    // bare domain (no protocol, e.g. "audioelite.it"), so it maps to `domain`
+    // (the identity field) rather than `website_url`.
+    columnMap: {
+      "Website": "domain",
+      "Name": "company_name",
+      "Description": "description",
+      "Shop Category": "industry",
+      "Email": "email",
+      "Phone Number": "phone",
+      "City": "city",
+      "State": "state",
+      "Country": "country",
+      "Est. Monthly Sales": "revenue",
+      "Technology Used": "technologies",
+      "Keywords": "keywords",
+      "LinkedIn": "linkedin_url",
+      // Storefront/social metadata with no dedicated column — preserved
+      // rather than dropped.
+      "Est. Products Sold": "custom_data",
+      "Platform": "custom_data",
+      "Plan": "custom_data",
+      "Theme": "custom_data",
+      "Installed Apps": "custom_data",
+      "Est Monthly Page Views": "custom_data",
+      "Est Monthly Visits": "custom_data",
+      "Shipping Partners": "custom_data",
+      "Facebook": "custom_data",
+      "Instagram": "custom_data",
+      "Twitter": "custom_data",
+      "Twitter Followers": "custom_data",
+      "Twitter Posts": "custom_data",
+      "YouTube": "custom_data",
+      "YouTube Followers": "custom_data",
+      "Pinterest": "custom_data",
+      "Pinterest Followers": "custom_data",
+      "Pinterest Posts": "custom_data",
+      "Tiktok": "custom_data",
+      "Tiktok Followers": "custom_data",
+      "Lang": "custom_data",
+      // "Enrichment" is an internal LeadFox marker ("Enrich|<domain>"), not
+      // real data.
+      "Enrichment": "ignore",
+    },
+    // LeadFox is storefront/e-commerce data, not person data, so this is
+    // left thin; unlocking the toggle still allows manual mapping.
     altColumnMap: {},
   },
   {
@@ -359,10 +556,12 @@ export const BUILTIN_PROVIDERS: ProviderPreset[] = [
 
 export const CANONICAL_SOURCE_KEYS = [
   "aiark",
+  "external-scraper",
   "blitz",
   "apollo",
   "google-maps",
   "store-leads",
+  "leadfox",
   "builtwith",
   "clutch",
   "crunchbase",

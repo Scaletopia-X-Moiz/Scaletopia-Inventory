@@ -33,6 +33,24 @@ function resolveStore<T>(cacheKey?: string): Store<T> {
   return store as Store<T>;
 }
 
+/** Drop every entry under `cacheKey` so the next call recomputes from the DB,
+ * regardless of the TTL. For callers that write data out-of-band (e.g. a
+ * reverify updating one row's email_status directly via Supabase, bypassing
+ * this cache entirely) — without this, that write would stay invisible to
+ * every cached reader until the TTL naturally expires.
+ *
+ * Clears the existing Map in place rather than removing it from the registry.
+ * `withTtlCache`'s returned closure captures its Map reference once, when the
+ * wrapper is created (module load) — `registry.delete(cacheKey)` alone would
+ * only affect a *future* closure built from a fresh `resolveStore` call (e.g.
+ * after a dev-mode module re-evaluation), while the closure already live in
+ * this process keeps its direct reference to the old Map and would never see
+ * the deletion. Mutating that same object is what every existing closure
+ * actually observes on its next call. */
+export function invalidateTtlCache(cacheKey: string): void {
+  registry.get(cacheKey)?.clear();
+}
+
 export function withTtlCache<Args extends unknown[], T>(
   fn: (...args: Args) => Promise<T>,
   ttlMs: number,

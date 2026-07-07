@@ -8,8 +8,8 @@ import { RecordField } from "@/components/companies/record-field";
 import { TagChip } from "@/components/companies/tag-chip";
 import { SourceChip } from "@/components/companies/source-chip";
 import { EnrichmentList } from "@/components/companies/enrichment-list";
-import { EmailStatusBadge } from "@/components/people/email-status-badge";
-import { PhoneTypeBadge } from "@/components/people/phone-type-badge";
+import { ReverifyEmail } from "@/components/shared/reverify-email";
+import { ReverifyPhone } from "@/components/shared/reverify-phone";
 import { LinkedCompanyCard } from "@/components/people/linked-company-card";
 
 export const dynamic = "force-dynamic";
@@ -46,16 +46,21 @@ export default async function PersonDetailPage({
             </CardHeader>
             <CardContent className="flex flex-col">
               <RecordField label="Email">
-                <span className="inline-flex items-center gap-2">
-                  {person.email ?? "—"}
-                  <EmailStatusBadge email={person.email} status={person.emailStatus} />
-                </span>
+                <ReverifyEmail
+                  endpoint={`/api/people/${person.id}/reverify`}
+                  email={person.email}
+                  initialStatus={person.emailStatus}
+                  initialVerifiedAt={person.emailVerifiedAt}
+                />
               </RecordField>
               <RecordField label="Phone">
-                <span className="inline-flex items-center gap-2">
-                  {person.phone ?? "—"}
-                  <PhoneTypeBadge phone={person.phone} type={person.phoneType} />
-                </span>
+                <ReverifyPhone
+                  endpoint={`/api/people/${person.id}/reverify-phone`}
+                  phone={person.phone}
+                  initialStatus={person.phoneStatus}
+                  initialVerifiedAt={person.phoneVerifiedAt}
+                  initialType={person.phoneType}
+                />
               </RecordField>
               <RecordField label="Last updated">
                 {person.lastUpdated

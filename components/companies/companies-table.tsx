@@ -4,6 +4,8 @@ import { cn } from "@/lib/utils";
 import type { CompanyListRow } from "@/lib/data/companies";
 import { SourceChip } from "@/components/companies/source-chip";
 import { PeopleDrawerTrigger } from "@/components/companies/people-drawer-trigger";
+import { EmailStatusBadge } from "@/components/people/email-status-badge";
+import { PhoneStatusBadge } from "@/components/people/phone-status-badge";
 
 function formatLastUpdated(value: string | null): string {
   if (!value) return "—";
@@ -22,6 +24,8 @@ const HEADERS = [
   "Company Name",
   "Domain",
   "LinkedIn",
+  "Email",
+  "Phone",
   "Industry",
   "Employees",
   "People",
@@ -42,7 +46,7 @@ export function CompaniesTable({ rows }: { rows: CompanyListRow[] }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-rule">
       <Tooltip.Provider delayDuration={200}>
-      <table className="w-full min-w-[920px] border-collapse text-sm">
+      <table className="w-full min-w-[1180px] border-collapse text-sm">
         <thead>
           <tr className="border-b border-rule bg-card">
             {HEADERS.map((h) => (
@@ -105,6 +109,26 @@ export function CompaniesTable({ rows }: { rows: CompanyListRow[] }) {
                   </Link>
                 )}
               </td>
+              <CompanyCell href={`/companies/${row.id}`}>
+                <span className="inline-flex items-center gap-1.5">
+                  {row.email ?? "—"}
+                  <EmailStatusBadge
+                    email={row.email}
+                    status={row.emailStatus}
+                    verifiedAt={row.emailVerifiedAt}
+                  />
+                </span>
+              </CompanyCell>
+              <CompanyCell href={`/companies/${row.id}`} mono>
+                <span className="inline-flex items-center gap-1.5">
+                  {row.phone ?? "—"}
+                  <PhoneStatusBadge
+                    phone={row.phone}
+                    status={row.phoneStatus}
+                    verifiedAt={row.phoneVerifiedAt}
+                  />
+                </span>
+              </CompanyCell>
               <CompanyCell href={`/companies/${row.id}`}>{row.industry ?? "—"}</CompanyCell>
               <CompanyCell href={`/companies/${row.id}`} mono>
                 {row.employeeCount?.toLocaleString("en-US") ?? "—"}

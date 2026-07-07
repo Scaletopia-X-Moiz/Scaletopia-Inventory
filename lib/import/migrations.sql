@@ -29,6 +29,12 @@ CREATE TABLE IF NOT EXISTS import_history (
   completed_at timestamptz
 );
 
+-- The history tab lists the 50 most recent runs ordered by completed_at;
+-- without this index Postgres sorts the whole table (including the
+-- potentially large failed_records jsonb blobs) on every request, which can
+-- exceed the statement timeout as the table grows.
+CREATE INDEX IF NOT EXISTS import_history_completed_at_idx ON import_history (completed_at DESC);
+
 -- Clay push history: one row per "Push to Clay" run, updated in place as it progresses.
 -- webhook_host only (never the full URL) since Clay webhook URLs embed a bearer token in the path.
 CREATE TABLE IF NOT EXISTS clay_push_runs (
@@ -50,6 +56,17 @@ CREATE INDEX IF NOT EXISTS clay_push_runs_started_at_idx ON clay_push_runs (star
 -- Single text column holding ALL email addresses for a company (comma-separated
 -- when a provider supplies more than one). Not a Postgres array by design.
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS email text;
+
+-- MillionVerifier result for the company email (people already have this
+-- column). Same vocabulary as people.email_status: ok | catch_all | unknown |
+-- invalid | disposable. Written by the "Reverify email" buttons.
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS email_status text;
+
+-- Timestamp of the last successful MillionVerifier check, on both tables.
+-- NULL means "never verified" — the UI shows a distinct "Not verified" badge
+-- for that case rather than treating it the same as an already-checked email.
+ALTER TABLE people ADD COLUMN IF NOT EXISTS email_verified_at timestamptz;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS email_verified_at timestamptz;
 
 -- RPC: bulk company updates (appends source, overwrites tags, merges enrichment fields)
 -- Enrichment fields use COALESCE so only non-null incoming values overwrite existing data.
@@ -180,12 +197,14 @@ VALUES
   ('apollo', 'Apollo', 'companies', '{"Company":"company_name","Company Name":"company_name","Website":"website_url","Company LinkedIn Url":"linkedin_url","# Employees":"employee_count","Industry":"industry","City":"city","State":"state","Country":"country","Corporate Phone":"phone"}'),
   ('blitz', 'Blitz', 'companies', '{"Company Name":"company_name","Domain":"domain","LinkedIn":"linkedin_url","Website":"website_url","Industry":"industry","Employees":"employee_count","City":"city","State":"state","Country":"country","Phone":"phone"}'),
   ('google-maps', 'Google Maps', 'companies', '{"Title":"company_name","Website":"website_url","Phone":"phone","City":"city","State":"state","Country":"country"}'),
-  ('store-leads', 'Store Leads', 'companies', '{"Name":"company_name","Domain":"domain","LinkedIn":"linkedin_url","Website":"website_url","Industry":"industry","City":"city","State":"state","Country":"country","Phone":"phone"}'),
+  ('store-leads', 'Store Leads', 'companies', '{"domain":"domain","merchant_name":"company_name","linkedin_url":"linkedin_url","city":"city","state":"state","country_code":"country","description":"description","emails":"email","phones":"phone","employee_count":"employee_count","technologies":"technologies","estimated_yearly_sales":"revenue","meta_keywords":"keywords","categories":"custom_data","tiktok":"custom_data"}'),
+  ('leadfox', 'LeadFox', 'companies', '{"Website":"domain","Name":"company_name","Description":"description","Shop Category":"industry","Email":"email","Phone Number":"phone","City":"city","State":"state","Country":"country","Est. Monthly Sales":"revenue","Technology Used":"technologies","Keywords":"keywords","LinkedIn":"linkedin_url","Est. Products Sold":"custom_data","Platform":"custom_data","Plan":"custom_data","Theme":"custom_data","Installed Apps":"custom_data","Est Monthly Page Views":"custom_data","Est Monthly Visits":"custom_data","Shipping Partners":"custom_data","Facebook":"custom_data","Instagram":"custom_data","Twitter":"custom_data","Twitter Followers":"custom_data","Twitter Posts":"custom_data","YouTube":"custom_data","YouTube Followers":"custom_data","Pinterest":"custom_data","Pinterest Followers":"custom_data","Pinterest Posts":"custom_data","Tiktok":"custom_data","Tiktok Followers":"custom_data","Lang":"custom_data","Enrichment":"ignore"}'),
   ('builtwith', 'BuiltWith', 'companies', '{"Domain":"domain","Website":"website_url","Country":"country"}'),
   ('clutch', 'Clutch', 'companies', '{"Company":"company_name","Website":"website_url","Location":"city","Employees":"employee_count","Description":"description"}'),
   ('crunchbase', 'Crunchbase', 'companies', '{"Organization Name":"company_name","Website":"website_url","LinkedIn":"linkedin_url","Number of Employees":"employee_count","Industry":"industry","City":"city","Country":"country","Founded Year":"founded_year","Description":"description"}'),
   ('yelp', 'Yelp', 'companies', '{"Business Name":"company_name","Website":"website_url","Phone":"phone","City":"city","State":"state","Country":"country"}'),
   ('salesnav', 'Sales Navigator', 'people', '{"Full Name":"full_name","First Name":"first_name","Last Name":"last_name","Job Title":"job_title","Email":"email","LinkedIn Profile URL":"linkedin_url","Company":"company_name","City":"city","Country":"country"}'),
+  ('external-scraper', 'External Scraper', 'people', '{"Company Name":"company_name","Domain":"domain","First Name":"first_name","Last Name":"last_name","Job Title":"job_title","Person Linkedin Url":"linkedin_url","Mobile Phone":"phone","Other Phone":"custom_data","First Name_1":"ignore","Last Name_1":"ignore","Title":"ignore","Person Linkedin Url_1":"ignore","City":"city","State":"state","Country":"country","Email":"email","Company Name_1":"ignore","Website":"ignore","Industry":"ignore","# Employees":"ignore","Annual Revenue":"ignore","Total Funding":"ignore","Company Phone":"ignore","Company Linkedin Url":"ignore","Company Street":"ignore","Company City":"ignore","Company Postal Code":"ignore","Company State":"ignore","Company Country":"ignore","Company Founded Year":"ignore"}'),
   ('manual-csv', 'Manual CSV', 'companies', '{}')
 ON CONFLICT (source_key) DO NOTHING;
 
@@ -256,3 +275,16 @@ BEGIN
   END LOOP;
 END;
 $$;
+
+-- ClearoutPhone result for people/companies phone numbers, written by the
+-- "Reverify" phone buttons. `phone_status` is the verdict (valid | invalid |
+-- whatever else ClearoutPhone returns — pass-through, not a closed enum).
+-- `people.phone_type` already existed (mobile/landline/toll_free/voip line-type
+-- classification) and is intentionally left alone as a DIFFERENT concept from
+-- phone_status; companies had no phone_type column at all, so it's added here.
+ALTER TABLE people ADD COLUMN IF NOT EXISTS phone_status text;
+ALTER TABLE people ADD COLUMN IF NOT EXISTS phone_verified_at timestamptz;
+
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS phone_status text;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS phone_verified_at timestamptz;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS phone_type text;

@@ -1,6 +1,6 @@
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { fetchAllRows } from "@/lib/data/fetch-all-rows";
-import { withTtlCache } from "@/lib/data/cache-with-ttl";
+import { withTtlCache, invalidateTtlCache } from "@/lib/data/cache-with-ttl";
 import { normalizeSourceTokens, sourceLabel } from "@/lib/data/source";
 import { normalizeCountry } from "@/lib/data/country";
 import { normalizeIndustry } from "@/lib/data/industry";
@@ -8,6 +8,8 @@ import { EMPLOYEE_BUCKETS, employeeBucketOf } from "@/lib/data/employee-size";
 import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
 import { sortByLastUpdatedDesc } from "@/lib/data/sort";
 import type { ClayPushRecord } from "@/lib/clay/types";
+
+export type SingleSelectFilter = "any" | "not_empty" | "empty";
 
 export interface CompanyListFilters {
   search?: string;
@@ -18,6 +20,10 @@ export interface CompanyListFilters {
   country?: string[];
   employeeMin?: number;
   employeeMax?: number;
+  email?: SingleSelectFilter;
+  phone?: SingleSelectFilter;
+  emailStatus?: string[];
+  phoneType?: string[];
 }
 
 export interface CompanyListRow {
@@ -32,6 +38,12 @@ export interface CompanyListRow {
   state: string | null;
   country: string | null;
   phone: string | null;
+  phoneType: string | null;
+  phoneStatus: string | null;
+  phoneVerifiedAt: string | null;
+  email: string | null;
+  emailStatus: string | null;
+  emailVerifiedAt: string | null;
   niche: string | null;
   sources: string[];
   qualityTier: string | null;
@@ -62,6 +74,8 @@ export interface CompanyFilterOptions {
   industries: FilterOption[];
   countries: FilterOption[];
   employeeBuckets: { id: string; label: string }[];
+  emailStatuses: FilterOption[];
+  phoneTypes: FilterOption[];
 }
 
 interface RawCompanyRow {
@@ -76,6 +90,12 @@ interface RawCompanyRow {
   state: string | null;
   country: string | null;
   phone: string | null;
+  phone_type: string | null;
+  phone_status: string | null;
+  phone_verified_at: string | null;
+  email: string | null;
+  email_status: string | null;
+  email_verified_at: string | null;
   source: string | null;
   niche: string | null;
   quality_tier: string | null;
@@ -83,7 +103,7 @@ interface RawCompanyRow {
 }
 
 const LIST_COLUMNS =
-  "id,company_name,domain,website_url,linkedin_url,industry,employee_count,city,state,country,phone,source,niche,quality_tier,last_updated";
+  "id,company_name,domain,website_url,linkedin_url,industry,employee_count,city,state,country,phone,phone_type,phone_status,phone_verified_at,email,email_status,email_verified_at,source,niche,quality_tier,last_updated";
 
 function employeeBucketOrClause(bucketIds: string[]): string {
   const buckets = EMPLOYEE_BUCKETS.filter((b) => bucketIds.includes(b.id));
@@ -171,6 +191,28 @@ function matchesSource(row: RawCompanyRow, filters: CompanyListFilters): boolean
   return tokens.some((t) => filters.source!.includes(t));
 }
 
+function matchesEmailPresence(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+  if (filters.email === "not_empty" && !row.email) return false;
+  if (filters.email === "empty" && row.email) return false;
+  return true;
+}
+
+function matchesPhonePresence(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+  if (filters.phone === "not_empty" && !row.phone) return false;
+  if (filters.phone === "empty" && row.phone) return false;
+  return true;
+}
+
+function matchesEmailStatus(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+  if (!filters.emailStatus?.length) return true;
+  return Boolean(row.email_status && filters.emailStatus.includes(row.email_status));
+}
+
+function matchesPhoneType(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+  if (!filters.phoneType?.length) return true;
+  return Boolean(row.phone_type && filters.phoneType.includes(row.phone_type));
+}
+
 /** Routes through the cached fetchBaseRows (keyed on the base filter subset),
  * then applies niche/country/industry/source in-app. The base rows are
  * filter-independent of those four facets — they're stripped by toBaseFilters
@@ -188,7 +230,11 @@ function filterCompanyRows(rows: RawCompanyRow[], filters: CompanyListFilters): 
       matchesNiche(row, filters) &&
       matchesCountry(row, filters) &&
       matchesIndustry(row, filters) &&
-      matchesSource(row, filters)
+      matchesSource(row, filters) &&
+      matchesEmailPresence(row, filters) &&
+      matchesPhonePresence(row, filters) &&
+      matchesEmailStatus(row, filters) &&
+      matchesPhoneType(row, filters)
   );
 }
 
@@ -210,6 +256,17 @@ const fetchFilteredRows = withTtlCache(
   3_600_000,
   "companies:filtered"
 );
+
+/** Drops both cached table reads (fetchFilteredRows sits on top of
+ * fetchBaseRows, so both need clearing) so the next list request sees fresh
+ * data immediately, instead of waiting out the hour-long TTL. Called after a
+ * reverify writes email_status/email_verified_at directly via Supabase,
+ * bypassing this cache — without it, that write stays invisible here until
+ * the TTL expires (or the dev server restarts, which clears globalThis). */
+export function invalidateCompaniesListCache(): void {
+  invalidateTtlCache("companies:base");
+  invalidateTtlCache("companies:filtered");
+}
 
 /** Same filtering as fetchFilteredRows, but reads the base rows fresh instead
  * of through the hour-long TTL cache. The list page can tolerate that
@@ -236,6 +293,12 @@ function toListRow(row: RawCompanyRow): CompanyListRow {
     state: row.state,
     country: row.country,
     phone: row.phone,
+    phoneType: row.phone_type,
+    phoneStatus: row.phone_status,
+    phoneVerifiedAt: row.phone_verified_at,
+    email: row.email,
+    emailStatus: row.email_status,
+    emailVerifiedAt: row.email_verified_at,
     niche: row.niche,
     sources: normalizeSourceTokens(row.source),
     qualityTier: row.quality_tier,
@@ -314,7 +377,6 @@ export async function getAllFilteredCompanies(
 
 /** Every column the list query omits, plus the raw enrichment blob. */
 interface FullCompanyRow extends RawCompanyRow {
-  email: string | null;
   description: string | null;
   founded_year: number | null;
   revenue: number | null;
@@ -469,7 +531,12 @@ function toClayPayload(row: FullCompanyRow): Record<string, unknown> {
     state: row.state,
     country: row.country,
     phone: row.phone,
+    phone_type: row.phone_type,
+    phone_status: row.phone_status,
+    phone_verified_at: row.phone_verified_at,
     email: row.email,
+    email_status: row.email_status,
+    email_verified_at: row.email_verified_at,
     description: row.description,
     founded_year: row.founded_year,
     revenue: row.revenue,
@@ -515,24 +582,31 @@ export async function getCompanyFilterOptions(
   const sources = new Map<string, number>();
   const industries = new Map<string, { label: string; count: number }>();
   const countries = new Map<string, { label: string; count: number }>();
+  const emailStatuses = new Map<string, number>();
+  const phoneTypes = new Map<string, number>();
 
   for (const row of rows) {
+    const okCommon = matchesEmailPresence(row, filters) && matchesPhonePresence(row, filters);
+    if (!okCommon) continue;
+
     const okCountry = matchesCountry(row, filters);
     const okIndustry = matchesIndustry(row, filters);
     const okSource = matchesSource(row, filters);
     const okNiche = matchesNiche(row, filters);
+    const okEmailStatus = matchesEmailStatus(row, filters);
+    const okPhoneType = matchesPhoneType(row, filters);
 
-    if (okCountry && okIndustry && okSource && row.niche) {
+    if (okCountry && okIndustry && okSource && okEmailStatus && okPhoneType && row.niche) {
       niches.set(row.niche, (niches.get(row.niche) ?? 0) + 1);
     }
 
-    if (okNiche && okCountry && okIndustry) {
+    if (okNiche && okCountry && okIndustry && okEmailStatus && okPhoneType) {
       for (const token of normalizeSourceTokens(row.source)) {
         sources.set(token, (sources.get(token) ?? 0) + 1);
       }
     }
 
-    if (okNiche && okCountry && okSource) {
+    if (okNiche && okCountry && okSource && okEmailStatus && okPhoneType) {
       const industry = normalizeIndustry(row.industry);
       if (industry) {
         const existing = industries.get(industry.id);
@@ -540,11 +614,23 @@ export async function getCompanyFilterOptions(
       }
     }
 
-    if (okNiche && okIndustry && okSource) {
+    if (okNiche && okIndustry && okSource && okEmailStatus && okPhoneType) {
       const country = normalizeCountry(row.country);
       if (country) {
         const existing = countries.get(country.id);
         countries.set(country.id, { label: country.label, count: (existing?.count ?? 0) + 1 });
+      }
+    }
+
+    if (okNiche && okCountry && okIndustry && okSource && okPhoneType) {
+      if (row.email_status) {
+        emailStatuses.set(row.email_status, (emailStatuses.get(row.email_status) ?? 0) + 1);
+      }
+    }
+
+    if (okNiche && okCountry && okIndustry && okSource && okEmailStatus) {
+      if (row.phone_type) {
+        phoneTypes.set(row.phone_type, (phoneTypes.get(row.phone_type) ?? 0) + 1);
       }
     }
   }
@@ -565,6 +651,12 @@ export async function getCompanyFilterOptions(
       .map(([id, { label, count }]) => ({ id, label, count }))
       .sort(sortDesc),
     employeeBuckets: EMPLOYEE_BUCKETS.map((b) => ({ id: b.id, label: b.label })),
+    emailStatuses: Array.from(emailStatuses.entries())
+      .map(([id, count]) => ({ id, label: id, count }))
+      .sort(sortDesc),
+    phoneTypes: Array.from(phoneTypes.entries())
+      .map(([id, count]) => ({ id, label: id, count }))
+      .sort(sortDesc),
   };
 }
 
@@ -580,7 +672,12 @@ export interface CompanyDetail {
   state: string | null;
   country: string | null;
   phone: string | null;
+  phoneType: string | null;
+  phoneStatus: string | null;
+  phoneVerifiedAt: string | null;
   email: string | null;
+  emailStatus: string | null;
+  emailVerifiedAt: string | null;
   description: string | null;
   foundedYear: number | null;
   revenue: number | null;
@@ -620,7 +717,12 @@ export async function getCompanyDetail(id: string): Promise<CompanyDetail | null
     state: data.state,
     country: data.country,
     phone: data.phone,
+    phoneType: data.phone_type,
+    phoneStatus: data.phone_status,
+    phoneVerifiedAt: data.phone_verified_at,
     email: data.email,
+    emailStatus: data.email_status,
+    emailVerifiedAt: data.email_verified_at,
     description: data.description,
     foundedYear: data.founded_year,
     revenue: data.revenue,

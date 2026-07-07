@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import type { PersonListResult } from "@/lib/data/people";
 import { PeopleTable } from "@/components/people/people-table";
 import { Pagination } from "@/components/companies/pagination";
 import { ExportButton } from "@/components/people/export-button";
 import { PushToClayButton } from "@/components/people/push-to-clay-button";
+import { ReverifyFilteredButton } from "@/components/shared/reverify-filtered-button";
 import { SkeletonTable } from "@/components/shared/skeleton-loaders";
 
 const cache = new Map<string, PersonListResult>();
@@ -20,7 +21,7 @@ export function PeopleResultsClient() {
   const [error, setError] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -50,9 +51,12 @@ export function PeopleResultsClient() {
           setError(true);
         }
       });
-
-    return () => controller.abort();
   }, [paramsStr]);
+
+  useEffect(() => {
+    load();
+    return () => abortRef.current?.abort();
+  }, [load]);
 
   const exportHref = `/people/export?${paramsStr}`;
 
@@ -78,6 +82,23 @@ export function PeopleResultsClient() {
           {result.total.toLocaleString("en-US")} people
         </h2>
         <div className="flex items-center gap-2">
+          <ReverifyFilteredButton
+            endpoint="/api/people/reverify"
+            paramsStr={paramsStr}
+            total={result.total}
+            noun="people"
+            fieldLabel="email"
+            onDone={load}
+          />
+          <ReverifyFilteredButton
+            endpoint="/api/people/reverify-phone"
+            paramsStr={paramsStr}
+            total={result.total}
+            noun="people"
+            fieldLabel="phone number"
+            providerName="ClearoutPhone"
+            onDone={load}
+          />
           <PushToClayButton paramsStr={paramsStr} total={result.total} />
           <ExportButton href={exportHref} />
         </div>

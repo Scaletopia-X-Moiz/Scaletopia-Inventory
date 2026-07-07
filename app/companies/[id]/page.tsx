@@ -10,6 +10,8 @@ import { TagChip } from "@/components/companies/tag-chip";
 import { SourceChip } from "@/components/companies/source-chip";
 import { QualityBadge } from "@/components/companies/quality-badge";
 import { EnrichmentList } from "@/components/companies/enrichment-list";
+import { ReverifyEmail } from "@/components/shared/reverify-email";
+import { ReverifyPhone } from "@/components/shared/reverify-phone";
 
 export const dynamic = "force-dynamic";
 
@@ -109,8 +111,23 @@ export default async function CompanyDetailPage({
                 <CardTitle>Contact</CardTitle>
               </CardHeader>
               <CardContent className="flex flex-col">
-                <RecordField label="Phone">{company.phone ?? "—"}</RecordField>
-                <RecordField label="Email">{company.email ?? "—"}</RecordField>
+                <RecordField label="Phone">
+                  <ReverifyPhone
+                    endpoint={`/api/companies/${company.id}/reverify-phone`}
+                    phone={company.phone}
+                    initialStatus={company.phoneStatus}
+                    initialVerifiedAt={company.phoneVerifiedAt}
+                    initialType={company.phoneType}
+                  />
+                </RecordField>
+                <RecordField label="Email">
+                  <ReverifyEmail
+                    endpoint={`/api/companies/${company.id}/reverify`}
+                    email={company.email}
+                    initialStatus={company.emailStatus}
+                    initialVerifiedAt={company.emailVerifiedAt}
+                  />
+                </RecordField>
                 <RecordField label="Location">{location || "—"}</RecordField>
                 <RecordField label="Last updated">
                   {company.lastUpdated

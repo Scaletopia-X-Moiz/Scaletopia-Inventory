@@ -1,4 +1,8 @@
-import type { CompanyListFilters } from "@/lib/data/companies";
+import type { CompanyListFilters, SingleSelectFilter } from "@/lib/data/companies";
+
+function asSingleSelect(value: string | null): SingleSelectFilter | undefined {
+  return value === "any" || value === "not_empty" || value === "empty" ? value : undefined;
+}
 
 /** Shared between the Companies page (server-rendered searchParams) and the
  * CSV export route (URL query string) so both read filters identically. */
@@ -14,6 +18,10 @@ export function parseCompanyFilters(searchParams: URLSearchParams): CompanyListF
     country: searchParams.getAll("country"),
     employeeMin: Number.isFinite(Number(empMin)) && empMin ? Number(empMin) : undefined,
     employeeMax: Number.isFinite(Number(empMax)) && empMax ? Number(empMax) : undefined,
+    email: asSingleSelect(searchParams.get("email")),
+    phone: asSingleSelect(searchParams.get("phone")),
+    emailStatus: searchParams.getAll("emailStatus"),
+    phoneType: searchParams.getAll("phoneType"),
   };
 }
 

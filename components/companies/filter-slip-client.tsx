@@ -15,6 +15,8 @@ interface CompanyFilterOptions {
   industries: FilterOption[];
   countries: FilterOption[];
   employeeBuckets: { id: string; label: string }[];
+  emailStatuses: FilterOption[];
+  phoneTypes: FilterOption[];
   [key: string]: unknown;
 }
 
@@ -24,6 +26,8 @@ const EMPTY: CompanyFilterOptions = {
   industries: [],
   countries: [],
   employeeBuckets: [],
+  emailStatuses: [],
+  phoneTypes: [],
 };
 
 // Facet counts depend on the active filters (see getCompanyFilterOptions), so

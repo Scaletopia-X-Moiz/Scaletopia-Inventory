@@ -1,6 +1,6 @@
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { fetchAllRows } from "@/lib/data/fetch-all-rows";
-import { withTtlCache } from "@/lib/data/cache-with-ttl";
+import { withTtlCache, invalidateTtlCache } from "@/lib/data/cache-with-ttl";
 import { normalizeSourceTokens, sourceLabel } from "@/lib/data/source";
 import { normalizeCountry } from "@/lib/data/country";
 import { normalizeIndustry } from "@/lib/data/industry";
@@ -34,8 +34,11 @@ export interface PersonListRow {
   jobTitle: string | null;
   email: string | null;
   emailStatus: string | null;
+  emailVerifiedAt: string | null;
   phone: string | null;
   phoneType: string | null;
+  phoneStatus: string | null;
+  phoneVerifiedAt: string | null;
   linkedinUrl: string | null;
   companyId: string | null;
   companyName: string | null;
@@ -87,12 +90,15 @@ interface RawPersonRow {
   tags: string[] | null;
   last_updated: string | null;
   email_status: string | null;
+  email_verified_at: string | null;
   phone_type: string | null;
+  phone_status: string | null;
+  phone_verified_at: string | null;
   company_name: string | null;
 }
 
 const LIST_COLUMNS =
-  "id,company_id,full_name,job_title,email,phone,linkedin_url,domain,city,state,country,source,tags,last_updated,email_status,phone_type,company_name";
+  "id,company_id,full_name,job_title,email,phone,linkedin_url,domain,city,state,country,source,tags,last_updated,email_status,email_verified_at,phone_type,phone_status,phone_verified_at,company_name";
 
 interface LinkedCompanyJoinRow {
   niche: string | null;
@@ -196,6 +202,15 @@ async function fetchBaseRowsUncached(filters: BaseFilters): Promise<RawPersonRow
  * this synced-in-batches dataset. The stable cacheKey persists the store
  * across dev recompiles. */
 const fetchBaseRows = withTtlCache(fetchBaseRowsUncached, 3_600_000, "people:base");
+
+/** Drops the cached table read so the next list request sees fresh data
+ * immediately, instead of waiting out the hour-long TTL. Called after a
+ * reverify writes email_status/email_verified_at directly via Supabase,
+ * bypassing this cache — without it, that write stays invisible here until
+ * the TTL expires (or the dev server restarts, which clears globalThis). */
+export function invalidatePeopleListCache(): void {
+  invalidateTtlCache("people:base");
+}
 
 function matchesEmailPresence(row: RawPersonRow, filters: PersonListFilters): boolean {
   if (filters.email === "not_empty" && !row.email) return false;
@@ -307,8 +322,11 @@ function toListRow(row: RawPersonRow, companyData: CompanyJoinData): PersonListR
     jobTitle: row.job_title,
     email: row.email,
     emailStatus: row.email_status,
+    emailVerifiedAt: row.email_verified_at,
     phone: row.phone,
     phoneType: row.phone_type,
+    phoneStatus: row.phone_status,
+    phoneVerifiedAt: row.phone_verified_at,
     linkedinUrl: row.linkedin_url,
     companyId: row.company_id,
     companyName: row.company_name,
@@ -347,8 +365,12 @@ export async function getAllFilteredPeople(filters: PersonListFilters): Promise<
   return sortByLastUpdatedDesc(candidateRows).map((row) => toListRow(row, companyData));
 }
 
-/** The raw person row plus the enrichment blob the list query drops. */
+/** The raw person row plus the enrichment blob and identity columns the list query drops. */
 interface FullPersonRow extends RawPersonRow {
+  first_name: string | null;
+  last_name: string | null;
+  source_id: string | null;
+  linkedin_username: string | null;
   custom_data: Record<string, unknown> | null;
 }
 
@@ -467,13 +489,20 @@ function toClayPayload(row: FullPersonRow, companyData: CompanyJoinData): Record
   return {
     ...toWebhookCustomData(row.custom_data),
     person_id: row.id,
+    first_name: row.first_name,
+    last_name: row.last_name,
     full_name: row.full_name,
     job_title: row.job_title,
     email: row.email,
     email_status: row.email_status,
+    email_verified_at: row.email_verified_at,
     phone: row.phone,
     phone_type: row.phone_type,
+    phone_status: row.phone_status,
+    phone_verified_at: row.phone_verified_at,
     linkedin_url: row.linkedin_url,
+    linkedin_username: row.linkedin_username,
+    source_id: row.source_id,
     company_id: row.company_id,
     company_name: row.company_name,
     company_domain: row.domain,
@@ -648,8 +677,11 @@ export interface PersonDetail {
   jobTitle: string | null;
   email: string | null;
   emailStatus: string | null;
+  emailVerifiedAt: string | null;
   phone: string | null;
   phoneType: string | null;
+  phoneStatus: string | null;
+  phoneVerifiedAt: string | null;
   linkedinUrl: string | null;
   city: string | null;
   state: string | null;
@@ -706,8 +738,11 @@ export async function getPersonDetail(id: string): Promise<PersonDetail | null> 
     jobTitle: data.job_title,
     email: data.email,
     emailStatus: data.email_status,
+    emailVerifiedAt: data.email_verified_at,
     phone: data.phone,
     phoneType: data.phone_type,
+    phoneStatus: data.phone_status,
+    phoneVerifiedAt: data.phone_verified_at,
     linkedinUrl: data.linkedin_url,
     city: data.city,
     state: data.state,

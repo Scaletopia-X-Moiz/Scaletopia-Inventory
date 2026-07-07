@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 import type { PersonListRow } from "@/lib/data/people";
+import { EmailStatusBadge } from "@/components/people/email-status-badge";
+import { PhoneStatusBadge } from "@/components/people/phone-status-badge";
 
 function formatLastUpdated(value: string | null): string {
   if (!value) return "—";
@@ -15,6 +17,7 @@ const HEADERS = [
   "Full Name",
   "LinkedIn URL",
   "Email",
+  "Phone",
   "Company",
   "Company Domain",
   "Company LinkedIn URL",
@@ -32,7 +35,7 @@ export function PeopleTable({ rows }: { rows: PersonListRow[] }) {
 
   return (
     <div className="overflow-x-auto rounded-lg border border-rule">
-      <table className="w-full min-w-[960px] border-collapse text-sm">
+      <table className="w-full min-w-[1080px] border-collapse text-sm">
         <thead>
           <tr className="border-b border-rule bg-card">
             {HEADERS.map((h) => (
@@ -58,7 +61,26 @@ export function PeopleTable({ rows }: { rows: PersonListRow[] }) {
                 </Link>
               </td>
               <ExternalLinkCell url={row.linkedinUrl} />
-              <PersonCell href={`/people/${row.id}`}>{row.email ?? "—"}</PersonCell>
+              <PersonCell href={`/people/${row.id}`}>
+                <span className="inline-flex items-center gap-1.5">
+                  {row.email ?? "—"}
+                  <EmailStatusBadge
+                    email={row.email}
+                    status={row.emailStatus}
+                    verifiedAt={row.emailVerifiedAt}
+                  />
+                </span>
+              </PersonCell>
+              <PersonCell href={`/people/${row.id}`} mono>
+                <span className="inline-flex items-center gap-1.5">
+                  {row.phone ?? "—"}
+                  <PhoneStatusBadge
+                    phone={row.phone}
+                    status={row.phoneStatus}
+                    verifiedAt={row.phoneVerifiedAt}
+                  />
+                </span>
+              </PersonCell>
               <td className="p-0">
                 {row.companyId ? (
                   <Link
@@ -123,9 +145,9 @@ function ExternalLinkCell({ url }: { url: string | null }) {
         href={url}
         target="_blank"
         rel="noopener noreferrer"
-        className="block max-w-[260px] truncate whitespace-nowrap px-3 py-2.5 text-ink underline-offset-2 hover:underline"
+        className="block whitespace-nowrap px-3 py-2.5 text-ink underline-offset-2 hover:underline"
       >
-        {url}
+        LinkedIn ↗
       </a>
     </td>
   );
