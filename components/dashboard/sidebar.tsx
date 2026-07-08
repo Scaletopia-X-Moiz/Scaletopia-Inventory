@@ -3,9 +3,11 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { motion } from "framer-motion";
-import { Building2, ChevronRight, PieChart, Upload, Users } from "lucide-react";
+import { Activity, Building2, ChevronRight, LogOut, PieChart, Upload, UserCog, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ScaletopiaLogo } from "@/components/shared/scaletopia-logo";
+import { useSession } from "@/components/dashboard/session-context";
+import { logout } from "@/app/auth/actions";
 
 const DIRECTORY_ITEMS = [
   { href: "/companies", label: "Companies", icon: Building2 },
@@ -14,6 +16,11 @@ const DIRECTORY_ITEMS = [
 
 const DATA_ITEMS = [
   { href: "/import", label: "Import", icon: Upload },
+];
+
+const ADMIN_ITEMS = [
+  { href: "/activity", label: "Activity", icon: Activity },
+  { href: "/team", label: "Team", icon: UserCog },
 ];
 
 function isActive(pathname: string, href: string) {
@@ -70,6 +77,8 @@ function NavItem({
  * the mobile drawer (MobileNav) so they can never drift out of sync. */
 export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
+  const session = useSession();
+  const isAdmin = session?.role === "admin";
 
   return (
     <>
@@ -123,6 +132,42 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
           ))}
         </nav>
       </div>
+
+      {isAdmin && (
+        <div className="px-3 pt-3">
+          <p className="px-3 py-1 text-xs text-ink-mute">Admin</p>
+          <nav className="mt-1 flex flex-col gap-0.5">
+            {ADMIN_ITEMS.map((item) => (
+              <NavItem
+                key={item.label}
+                label={item.label}
+                icon={item.icon}
+                href={item.href}
+                active={isActive(pathname, item.href)}
+                caret
+                onClick={onNavigate}
+              />
+            ))}
+          </nav>
+        </div>
+      )}
+
+      {session && (
+        <div className="mt-auto border-t border-rule px-3 py-3">
+          <p className="truncate px-3 pb-2 text-xs text-ink-mute" title={session.email}>
+            {session.email}
+          </p>
+          <form action={logout}>
+            <button
+              type="submit"
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-sm text-ink-soft transition-colors hover:bg-hover hover:text-ink"
+            >
+              <LogOut size={16} className="text-ink-soft" />
+              <span>Sign out</span>
+            </button>
+          </form>
+        </div>
+      )}
     </>
   );
 }

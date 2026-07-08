@@ -1,0 +1,64 @@
+import { NextResponse, type NextRequest } from "next/server";
+import { createServerClient } from "@supabase/ssr";
+
+const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+
+// Paths reachable without a session: the login page and the invite/reset
+// acceptance routes.
+function isPublicPath(path: string) {
+  return path === "/login" || path.startsWith("/auth");
+}
+
+/**
+ * Runs before every non-static request. Refreshes the Supabase session cookie
+ * and redirects unauthenticated users to /login (or returns 401 for API
+ * routes). This is an optimistic gate — server components and route handlers
+ * still verify the session at the data source via the DAL.
+ */
+export async function proxy(request: NextRequest) {
+  let response = NextResponse.next({ request });
+
+  const supabase = createServerClient(url, anonKey, {
+    cookies: {
+      getAll() {
+        return request.cookies.getAll();
+      },
+      setAll(cookiesToSet) {
+        for (const { name, value } of cookiesToSet) {
+          request.cookies.set(name, value);
+        }
+        response = NextResponse.next({ request });
+        for (const { name, value, options } of cookiesToSet) {
+          response.cookies.set(name, value, options);
+        }
+      },
+    },
+  });
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  const path = request.nextUrl.pathname;
+
+  if (!user && !isPublicPath(path)) {
+    if (path.startsWith("/api")) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    const loginUrl = new URL("/login", request.url);
+    return NextResponse.redirect(loginUrl);
+  }
+
+  // Already signed in — keep users off the login page.
+  if (user && path === "/login") {
+    return NextResponse.redirect(new URL("/", request.url));
+  }
+
+  return response;
+}
+
+export const config = {
+  // Run on everything except Next internals and static asset files.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|icon.svg|.*\\.png$).*)"],
+};

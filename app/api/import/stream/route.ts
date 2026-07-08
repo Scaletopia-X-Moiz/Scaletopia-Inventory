@@ -3,11 +3,11 @@ import { pushRecords, type PushProgress, type PushResult } from "@/lib/import/pu
 import { parseCSV, applyColumnMap } from "@/lib/import/csv";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { IMPORT_BUCKET } from "@/lib/import/storage";
+import { getUser } from "@/lib/auth/dal";
+import { logActivity } from "@/lib/activity/log";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
-
-const IMPORT_TOKEN = "scaletopia-import-2026";
 
 type ImportMeta = {
   targetTable: "companies" | "people";
@@ -21,8 +21,8 @@ function sseEvent(data: unknown): Uint8Array {
 }
 
 export async function POST(request: NextRequest) {
-  const token = request.headers.get("X-Import-Token");
-  if (token !== IMPORT_TOKEN) {
+  const user = await getUser();
+  if (!user) {
     return new Response("Unauthorized", { status: 401 });
   }
 
@@ -116,6 +116,20 @@ export async function POST(request: NextRequest) {
             tags: meta.tags,
           },
           onProgress
+        );
+
+        await logActivity(
+          "import.run",
+          {
+            targetTable: meta.targetTable,
+            sourceKey: meta.sourceKey,
+            tags: meta.tags,
+            inputCount: result.inputCount,
+            insertedCount: result.insertedCount,
+            updatedCount: result.updatedCount,
+            failedCount: result.failedCount,
+          },
+          user
         );
 
         controller.enqueue(sseEvent({ phase: "done", result }));

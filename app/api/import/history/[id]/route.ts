@@ -1,12 +1,10 @@
 import { supabaseAdmin } from "@/lib/supabase/admin";
+import { getUser } from "@/lib/auth/dal";
 
 export const dynamic = "force-dynamic";
 
-const IMPORT_TOKEN = "scaletopia-import-2026";
-
-export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const token = req.headers.get("X-Import-Token");
-  if (token !== IMPORT_TOKEN) {
+export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  if (!(await getUser())) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 

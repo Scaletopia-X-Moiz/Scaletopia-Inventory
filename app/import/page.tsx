@@ -80,9 +80,6 @@ interface HistoryRow {
   completed_at: string | null;
 }
 
-const AUTH_KEY = "import_auth";
-const IMPORT_TOKEN = "scaletopia-import-2026";
-
 // ────────────────────────────────────────────────────────────────────────────
 // CSV parser (no external libs)
 // ────────────────────────────────────────────────────────────────────────────
@@ -193,59 +190,6 @@ function autoMapColumns(
       ? { ...m, supabaseField: "ignore", score: 0 }
       : m;
   });
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Auth gate
-// ────────────────────────────────────────────────────────────────────────────
-
-function AuthGate({ onAuth }: { onAuth: () => void }) {
-  const [user, setUser] = useState("");
-  const [pass, setPass] = useState("");
-  const [err, setErr] = useState(false);
-
-  function submit(e: React.FormEvent) {
-    e.preventDefault();
-    if (user === "admin" && pass === "admin") {
-      sessionStorage.setItem(AUTH_KEY, JSON.stringify({ authed: true, token: IMPORT_TOKEN }));
-      onAuth();
-    } else {
-      setErr(true);
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="w-full max-w-sm rounded-xl border border-rule bg-card p-8 shadow-xl">
-        <h2 className="mb-1 text-lg font-semibold text-ink">Import Access</h2>
-        <p className="mb-6 text-sm text-ink-soft">Enter credentials to continue.</p>
-        <form onSubmit={submit} className="flex flex-col gap-4">
-          <input
-            type="text"
-            placeholder="Username"
-            value={user}
-            onChange={(e) => { setUser(e.target.value); setErr(false); }}
-            className="rounded-lg border border-rule bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-stamp"
-            autoFocus
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            value={pass}
-            onChange={(e) => { setPass(e.target.value); setErr(false); }}
-            className="rounded-lg border border-rule bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-stamp"
-          />
-          {err && <p className="text-xs text-red-500">Invalid credentials.</p>}
-          <button
-            type="submit"
-            className="rounded-lg bg-stamp px-4 py-2 text-sm font-medium text-white hover:opacity-90 transition-opacity"
-          >
-            Continue
-          </button>
-        </form>
-      </div>
-    </div>
-  );
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1386,7 +1330,7 @@ function downloadFailedCsv(records: Record<string, unknown>[], filename = "faile
   URL.revokeObjectURL(url);
 }
 
-function HistoryTab({ token }: { token: string }) {
+function HistoryTab() {
   const [rows, setRows] = useState<HistoryRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1399,7 +1343,7 @@ function HistoryTab({ token }: { token: string }) {
     setExpanded(next);
     if (next && !failedRecordsById[next]) {
       setFailedRecordsLoading(next);
-      fetch(`/api/import/history/${next}`, { headers: { "X-Import-Token": token } })
+      fetch(`/api/import/history/${next}`)
         .then((r) => r.json())
         .then((data: { failed_records?: Record<string, unknown>[] }) => {
           setFailedRecordsById((prev) => ({ ...prev, [next]: data.failed_records ?? [] }));
@@ -1412,7 +1356,7 @@ function HistoryTab({ token }: { token: string }) {
   useEffect(() => {
     setLoading(true);
     setError(null);
-    fetch("/api/import/history", { headers: { "X-Import-Token": token } })
+    fetch("/api/import/history")
       .then(async (r) => {
         const data = await r.json();
         if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
@@ -1424,7 +1368,7 @@ function HistoryTab({ token }: { token: string }) {
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [token]);
+  }, []);
 
   if (loading) {
     return (
@@ -1623,7 +1567,6 @@ const STEP_LABELS: Record<Step, string> = {
 };
 
 export default function ImportPage() {
-  const [authed, setAuthed] = useState(false);
   const [activeTab, setActiveTab] = useState<"import" | "history">("import");
   const [step, setStep] = useState<Step>("upload");
 
@@ -1649,15 +1592,6 @@ export default function ImportPage() {
   const [stageLabel, setStageLabel] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  useEffect(() => {
-    try {
-      const stored = sessionStorage.getItem(AUTH_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (parsed?.authed && parsed?.token === IMPORT_TOKEN) setAuthed(true);
-      }
-    } catch {}
-  }, []);
 
   const reset = useCallback(() => {
     setCsv(null);
@@ -1696,7 +1630,6 @@ export default function ImportPage() {
     targetTable,
     sourceKey,
     tags,
-    token,
   }: {
     headers: string[];
     rows: Record<string, string>[];
@@ -1704,7 +1637,6 @@ export default function ImportPage() {
     targetTable: TargetTable;
     sourceKey: string;
     tags: [string, string, string];
-    token: string;
   }): Promise<PushResult> {
     const metadata = { targetTable, sourceKey, tags, columnMap };
 
@@ -1727,7 +1659,6 @@ export default function ImportPage() {
       try {
         const signRes = await fetch("/api/import/storage-upload", {
           method: "POST",
-          headers: { "X-Import-Token": token },
         });
 
         if (!signRes.ok) {
@@ -1764,7 +1695,7 @@ export default function ImportPage() {
 
         response = await fetch("/api/import/stream", {
           method: "POST",
-          headers: { "X-Import-Token": token, "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ path, metadata: JSON.stringify(metadata) }),
         });
       } finally {
@@ -1778,7 +1709,6 @@ export default function ImportPage() {
 
       response = await fetch("/api/import/stream", {
         method: "POST",
-        headers: { "X-Import-Token": token },
         body: formData,
       });
     }
@@ -1825,13 +1755,6 @@ export default function ImportPage() {
     setCompanyResult(null);
     setStageLabel(null);
 
-    const token = (() => {
-      try {
-        return JSON.parse(sessionStorage.getItem(AUTH_KEY) ?? "{}").token ?? "";
-      } catch {
-        return "";
-      }
-    })();
 
     const { headers, rows } = parseCSV(csvData.allText);
     const tags = [finalMeta.client, finalMeta.niche, finalMeta.date] as [string, string, string];
@@ -1867,7 +1790,6 @@ export default function ImportPage() {
           targetTable: "companies",
           sourceKey,
           tags,
-          token,
         });
         setCompanyResult(companiesResult);
 
@@ -1880,7 +1802,6 @@ export default function ImportPage() {
           targetTable: "people",
           sourceKey,
           tags,
-          token,
         });
 
         setResult(peopleResult);
@@ -1893,7 +1814,6 @@ export default function ImportPage() {
           targetTable: finalMeta.targetTable,
           sourceKey,
           tags,
-          token,
         });
         setResult(singleResult);
         setStep("report");
@@ -1908,7 +1828,6 @@ export default function ImportPage() {
 
   return (
     <>
-      {!authed && <AuthGate onAuth={() => setAuthed(true)} />}
       <AppShell>
         <Topbar section="Data" page="Import" />
 
@@ -1934,7 +1853,7 @@ export default function ImportPage() {
             </div>
 
             {activeTab === "history" ? (
-              <HistoryTab key={activeTab} token={IMPORT_TOKEN} />
+              <HistoryTab key={activeTab} />
             ) : (
               <div className="rounded-xl border border-rule bg-card overflow-hidden">
                 {/* Step breadcrumb */}

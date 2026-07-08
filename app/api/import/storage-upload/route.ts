@@ -1,11 +1,9 @@
-import type { NextRequest } from "next/server";
 import { randomUUID } from "crypto";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { IMPORT_BUCKET } from "@/lib/import/storage";
+import { getUser } from "@/lib/auth/dal";
 
 export const dynamic = "force-dynamic";
-
-const IMPORT_TOKEN = "scaletopia-import-2026";
 
 async function ensureBucket(): Promise<void> {
   const { data: bucket } = await supabaseAdmin.storage.getBucket(IMPORT_BUCKET);
@@ -20,9 +18,8 @@ async function ensureBucket(): Promise<void> {
   }
 }
 
-export async function POST(request: NextRequest) {
-  const token = request.headers.get("X-Import-Token");
-  if (token !== IMPORT_TOKEN) {
+export async function POST() {
+  if (!(await getUser())) {
     return new Response("Unauthorized", { status: 401 });
   }
 

@@ -1,4 +1,6 @@
 import { reverifyPhoneRecord } from "@/lib/verify/reverify-phone";
+import { getUser } from "@/lib/auth/dal";
+import { logActivity } from "@/lib/activity/log";
 
 export const dynamic = "force-dynamic";
 
@@ -7,6 +9,11 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+
+  const user = await getUser();
+  if (!user) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
 
   let outcome;
   try {
@@ -20,6 +27,12 @@ export async function POST(
       outcome.code === "not_found" ? 404 : outcome.code === "no_phone" ? 400 : 502;
     return Response.json({ error: outcome.message }, { status });
   }
+
+  await logActivity(
+    "verify.reverify_one",
+    { target: "companies", kind: "phone", id },
+    user
+  );
 
   return Response.json({
     phone: outcome.phone,
