@@ -7,9 +7,11 @@ import { ScaletopiaLogo } from "@/components/shared/scaletopia-logo";
 import { confirmInviteAccepted } from "@/app/auth/actions";
 
 /**
- * Landing page for invite / password-reset links. The Supabase browser client
- * detects the token in the URL and establishes a session automatically; the
- * invited user then chooses their password.
+ * Landing page for invite / password-reset links. Supabase's invite/recovery
+ * emails use the implicit flow (#access_token in the hash), but @supabase/ssr's
+ * browser client hardcodes flowType "pkce", which makes its automatic
+ * detectSessionInUrl reject implicit-style URLs outright. So we parse the
+ * hash ourselves and set the session directly, bypassing that flow-type check.
  */
 export default function SetPasswordPage() {
   const [ready, setReady] = useState(false);
@@ -21,9 +23,17 @@ export default function SetPasswordPage() {
 
   useEffect(() => {
     const supabase = createSupabaseBrowserClient();
-    // Give detectSessionInUrl a tick to consume the token, then confirm we
-    // have a session.
-    supabase.auth.getSession().then(({ data }) => {
+    const hashParams = new URLSearchParams(window.location.hash.slice(1));
+    const access_token = hashParams.get("access_token");
+    const refresh_token = hashParams.get("refresh_token");
+
+    if (!access_token || !refresh_token) {
+      setLinkValid(false);
+      setReady(true);
+      return;
+    }
+
+    supabase.auth.setSession({ access_token, refresh_token }).then(({ data }) => {
       setLinkValid(Boolean(data.session));
       setReady(true);
     });
