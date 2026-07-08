@@ -1,6 +1,5 @@
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { fetchAllRows } from "@/lib/data/fetch-all-rows";
-import { withTtlCache, invalidateTtlCache } from "@/lib/data/cache-with-ttl";
 import { normalizeSourceTokens, sourceLabel } from "@/lib/data/source";
 import { normalizeCountry } from "@/lib/data/country";
 import { normalizeIndustry } from "@/lib/data/industry";
@@ -163,14 +162,13 @@ async function fetchBaseRowsUncached(filters: BaseFilters): Promise<RawCompanyRo
   );
 }
 
-/** Cached the same way as the rest of this module's Supabase reads — see the
- * comment on fetchFilteredRows below. Keyed on the base filter subset only,
- * so requests that differ solely in niche/country/industry/source (which are
- * matched in-app) share the same cached fetch. The stable cacheKey lets this
- * store live on globalThis so the companies list *and* its filter facets share
- * one base fetch (see fetchFilteredRowsUncached below) and it survives dev
- * recompiles. */
-const fetchBaseRows = withTtlCache(fetchBaseRowsUncached, 3_600_000, "companies:base");
+/** Caching disabled for now — a per-process TTL cache (globalThis Map) was
+ * serving stale brand_name/email_status/etc. after writes on multi-instance
+ * deployments, since invalidateCompaniesListCache() only clears the instance
+ * that handled the write, not the one that serves the next read. Revisit with
+ * a shared cache (Redis, or a Next cacheHandler) if the full-table read here
+ * becomes a bottleneck again. */
+const fetchBaseRows = fetchBaseRowsUncached;
 
 function matchesNiche(row: RawCompanyRow, filters: CompanyListFilters): boolean {
   return matchesIncludeExclude(row.niche != null ? [row.niche] : [], filters.niche);
@@ -242,28 +240,16 @@ async function fetchFilteredRowsUncached(filters: CompanyListFilters): Promise<R
 
 /** The companies table is ~87k rows (and growing); fetching and re-filtering
  * all of it from Supabase on every request (this page is force-dynamic) is the
- * dominant cost on /companies — a full read is ~40 MB / several seconds. Data
- * here is synced in batches (see the "Synced ... UTC" stamp in the UI), not
- * edited live, so a cross-request cache trades a little staleness for skipping
- * that full-table round trip on every view. TTL matches the page's own
- * `revalidate = 3600`, since that's the staleness window already accepted at
- * the page level. */
-const fetchFilteredRows = withTtlCache(
-  fetchFilteredRowsUncached,
-  3_600_000,
-  "companies:filtered"
-);
+ * dominant cost on /companies — a full read is ~40 MB / several seconds.
+ * Caching is disabled for now (see fetchBaseRows above) since it was serving
+ * stale writes across instances; reintroduce with a shared cache if this
+ * full-table read becomes a bottleneck. */
+const fetchFilteredRows = fetchFilteredRowsUncached;
 
-/** Drops both cached table reads (fetchFilteredRows sits on top of
- * fetchBaseRows, so both need clearing) so the next list request sees fresh
- * data immediately, instead of waiting out the hour-long TTL. Called after a
- * reverify writes email_status/email_verified_at directly via Supabase,
- * bypassing this cache — without it, that write stays invisible here until
- * the TTL expires (or the dev server restarts, which clears globalThis). */
-export function invalidateCompaniesListCache(): void {
-  invalidateTtlCache("companies:base");
-  invalidateTtlCache("companies:filtered");
-}
+/** No-op now that fetchBaseRows/fetchFilteredRows read fresh every time — kept
+ * so callers (clean-names, reverify, reverify-phone) don't need touching if
+ * caching comes back. */
+export function invalidateCompaniesListCache(): void {}
 
 /** Same filtering as fetchFilteredRows, but reads the base rows fresh instead
  * of through the hour-long TTL cache. The list page can tolerate that
