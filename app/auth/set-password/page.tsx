@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { ScaletopiaLogo } from "@/components/shared/scaletopia-logo";
+import { confirmInviteAccepted } from "@/app/auth/actions";
 
 /**
  * Landing page for invite / password-reset links. The Supabase browser client
@@ -46,6 +47,13 @@ export default function SetPasswordPage() {
       setError(error.message);
       setSaving(false);
       return;
+    }
+    // Best-effort: record that the invite was accepted. Never blocks the
+    // redirect — logActivity itself swallows its own errors.
+    try {
+      await confirmInviteAccepted();
+    } catch {
+      // ignore — logging must never block onboarding
     }
     // Full reload so the server sees the fresh session cookie.
     window.location.href = "/";

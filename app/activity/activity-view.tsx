@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+import { Loader2 } from "lucide-react";
 import { timeAgo } from "@/lib/utils";
 
 export interface ActivityRow {
@@ -17,8 +19,11 @@ const ACTION_LABELS: Record<string, string> = {
   "clay.push": "Pushed to Clay",
   "verify.reverify": "Reverified (bulk)",
   "verify.reverify_one": "Reverified record",
+  "companies.clean_names": "Cleaned names (bulk)",
   "user.invite": "Invited user",
+  "user.invite_accepted": "Accepted invite",
   "user.role_change": "Changed role",
+  "user.remove": "Removed user",
 };
 
 function labelFor(action: string) {
@@ -49,11 +54,20 @@ function summarize(action: string, d: Record<string, unknown>): string {
     case "verify.reverify_one":
       push(`${d.target} ${d.kind}`);
       break;
+    case "companies.clean_names":
+      push(`${d.cleaned ?? 0} cleaned · ${d.skipped ?? 0} skipped · ${d.errors ?? 0} errors`);
+      break;
     case "user.invite":
       push(d.email);
       break;
     case "user.role_change":
       push(d.email && `${d.email} → ${d.role}`);
+      break;
+    case "user.remove":
+      push(d.email);
+      break;
+    case "user.invite_accepted":
+      push(d.email);
       break;
   }
   return parts.filter(Boolean).join(" · ");
@@ -66,7 +80,34 @@ function fmtAbsolute(iso: string) {
   });
 }
 
-export function ActivityView({ rows }: { rows: ActivityRow[] }) {
+export function ActivityView({
+  rows: initialRows,
+  initialHasMore,
+}: {
+  rows: ActivityRow[];
+  initialHasMore: boolean;
+}) {
+  const [rows, setRows] = useState(initialRows);
+  const [hasMore, setHasMore] = useState(initialHasMore);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function loadMore() {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/activity?offset=${rows.length}`);
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "Failed to load more activity.");
+      setRows((prev) => [...prev, ...body.rows]);
+      setHasMore(Boolean(body.hasMore));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load more activity.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   if (rows.length === 0) {
     return (
       <div className="rounded-xl border border-rule bg-card p-8 text-center text-sm text-ink-soft">
@@ -76,35 +117,51 @@ export function ActivityView({ rows }: { rows: ActivityRow[] }) {
   }
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-rule bg-card">
-      <table className="w-full min-w-[640px] text-sm">
-        <thead>
-          <tr className="border-b border-rule text-left text-xs text-ink-mute">
-            <th className="px-4 py-3 font-medium">Who</th>
-            <th className="px-4 py-3 font-medium">Action</th>
-            <th className="px-4 py-3 font-medium">Details</th>
-            <th className="px-4 py-3 font-medium">When</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.id} className="border-b border-rule/60 last:border-0">
-              <td className="px-4 py-3 text-ink">{r.user_email ?? "—"}</td>
-              <td className="px-4 py-3">
-                <span className="inline-flex items-center rounded bg-hover px-2 py-0.5 text-xs font-medium text-ink">
-                  {labelFor(r.action)}
-                </span>
-              </td>
-              <td className="px-4 py-3 text-ink-soft">
-                {summarize(r.action, r.details ?? {}) || "—"}
-              </td>
-              <td className="whitespace-nowrap px-4 py-3 text-ink-soft" title={fmtAbsolute(r.created_at)}>
-                {timeAgo(r.created_at)}
-              </td>
+    <div className="flex flex-col gap-4">
+      <div className="overflow-x-auto rounded-xl border border-rule bg-card">
+        <table className="w-full min-w-[640px] text-sm">
+          <thead>
+            <tr className="border-b border-rule text-left text-xs text-ink-mute">
+              <th className="px-4 py-3 font-medium">Who</th>
+              <th className="px-4 py-3 font-medium">Action</th>
+              <th className="px-4 py-3 font-medium">Details</th>
+              <th className="px-4 py-3 font-medium">When</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id} className="border-b border-rule/60 last:border-0">
+                <td className="px-4 py-3 text-ink">{r.user_email ?? "—"}</td>
+                <td className="px-4 py-3">
+                  <span className="inline-flex items-center rounded bg-hover px-2 py-0.5 text-xs font-medium text-ink">
+                    {labelFor(r.action)}
+                  </span>
+                </td>
+                <td className="px-4 py-3 text-ink-soft">
+                  {summarize(r.action, r.details ?? {}) || "—"}
+                </td>
+                <td className="whitespace-nowrap px-4 py-3 text-ink-soft" title={fmtAbsolute(r.created_at)}>
+                  {timeAgo(r.created_at)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {error && <p className="text-center text-xs text-red-500">{error}</p>}
+
+      {hasMore && (
+        <button
+          type="button"
+          onClick={loadMore}
+          disabled={loading}
+          className="flex items-center justify-center gap-2 self-center rounded-lg border border-rule bg-card px-4 py-2 text-sm font-medium text-ink transition-opacity hover:opacity-90 disabled:opacity-60"
+        >
+          {loading && <Loader2 size={15} className="animate-spin" />}
+          Load more
+        </button>
+      )}
     </div>
   );
 }

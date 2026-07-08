@@ -19,7 +19,13 @@ export async function POST(
   try {
     outcome = await reverifyRecord("people", id);
   } catch (err) {
-    return Response.json({ error: (err as Error).message }, { status: 500 });
+    const message = (err as Error).message;
+    await logActivity(
+      "verify.reverify_one",
+      { target: "people", kind: "email", id, error: message, failed: true },
+      user
+    );
+    return Response.json({ error: message }, { status: 500 });
   }
 
   if (!outcome.ok) {

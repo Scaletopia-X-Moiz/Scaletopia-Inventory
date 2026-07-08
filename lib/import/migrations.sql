@@ -288,3 +288,8 @@ ALTER TABLE people ADD COLUMN IF NOT EXISTS phone_verified_at timestamptz;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS phone_status text;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS phone_verified_at timestamptz;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS phone_type text;
+
+-- Cleaned/simplified brand name for companies, written by the "Clean Names"
+-- bulk action (OpenRouter / gemini-2.5-flash-lite). company_name stays the raw
+-- source; brand_name is nullable and only populated once a row is cleaned.
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS brand_name text;

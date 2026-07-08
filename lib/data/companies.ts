@@ -30,6 +30,7 @@ export interface CompanyListFilters {
 export interface CompanyListRow {
   id: string;
   companyName: string | null;
+  brandName: string | null;
   domain: string | null;
   websiteUrl: string | null;
   linkedinUrl: string | null;
@@ -82,6 +83,7 @@ export interface CompanyFilterOptions {
 interface RawCompanyRow {
   id: string;
   company_name: string | null;
+  brand_name: string | null;
   domain: string | null;
   website_url: string | null;
   linkedin_url: string | null;
@@ -104,7 +106,7 @@ interface RawCompanyRow {
 }
 
 const LIST_COLUMNS =
-  "id,company_name,domain,website_url,linkedin_url,industry,employee_count,city,state,country,phone,phone_type,phone_status,phone_verified_at,email,email_status,email_verified_at,source,niche,quality_tier,last_updated";
+  "id,company_name,brand_name,domain,website_url,linkedin_url,industry,employee_count,city,state,country,phone,phone_type,phone_status,phone_verified_at,email,email_status,email_verified_at,source,niche,quality_tier,last_updated";
 
 function employeeBucketOrClause(bucketIds: string[]): string {
   const buckets = EMPLOYEE_BUCKETS.filter((b) => bucketIds.includes(b.id));
@@ -279,6 +281,7 @@ function toListRow(row: RawCompanyRow): CompanyListRow {
   return {
     id: row.id,
     companyName: row.company_name,
+    brandName: row.brand_name,
     domain: row.domain,
     websiteUrl: row.website_url,
     linkedinUrl: row.linkedin_url,
@@ -387,6 +390,7 @@ interface FullCompanyRow extends RawCompanyRow {
 
 export interface CompanyExportRow {
   companyName: string | null;
+  brandName: string | null;
   domain: string | null;
   websiteUrl: string | null;
   linkedinUrl: string | null;
@@ -475,6 +479,7 @@ async function fetchFullFilteredCompanies(
 function toExportRow(row: FullCompanyRow): CompanyExportRow {
   return {
     companyName: row.company_name,
+    brandName: row.brand_name,
     domain: row.domain,
     websiteUrl: row.website_url,
     linkedinUrl: row.linkedin_url,
@@ -527,6 +532,7 @@ function toClayPayload(row: FullCompanyRow): Record<string, unknown> {
     ...toWebhookCustomData(row.custom_data),
     company_id: row.id,
     company_name: row.company_name,
+    brand_name: row.brand_name,
     domain: row.domain,
     website_url: row.website_url,
     linkedin_url: row.linkedin_url,

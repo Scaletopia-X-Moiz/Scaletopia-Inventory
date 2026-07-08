@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
-import { parsePersonFilters } from "@/lib/data/people-search-params";
-import { runPeopleClayPush, isValidWebhookUrl, type ClayPushProgress } from "@/lib/clay/push-to-clay";
+import { parseCompanyFilters } from "@/lib/data/companies-search-params";
+import { runCompaniesCleanNames, type CleanNamesProgress } from "@/lib/clean-names/clean-names";
 import { getUser } from "@/lib/auth/dal";
 import { logActivity } from "@/lib/activity/log";
 
@@ -17,40 +17,27 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Filters ride in the query string (identical parsing to export/results);
-  // the webhook target is supplied per-push in the JSON body.
-  const filters = parsePersonFilters(request.nextUrl.searchParams);
-
-  let webhookUrl: unknown;
-  try {
-    ({ webhookUrl } = await request.json());
-  } catch {
-    return Response.json({ error: "Invalid request body" }, { status: 400 });
-  }
-
-  if (!isValidWebhookUrl(webhookUrl)) {
-    return Response.json(
-      { error: "A valid https webhook URL is required" },
-      { status: 400 }
-    );
-  }
+  // Filters ride in the query string, identical to export/results/push-to-clay,
+  // so the cleaned set equals the on-screen filtered view.
+  const filters = parseCompanyFilters(request.nextUrl.searchParams);
 
   const stream = new ReadableStream({
     async start(controller) {
-      const lastProgress: { current: ClayPushProgress | null } = { current: null };
+      const lastProgress: { current: CleanNamesProgress | null } = { current: null };
       try {
-        const result = await runPeopleClayPush(filters, webhookUrl, {
-          onProgress: (p: ClayPushProgress) => {
+        const result = await runCompaniesCleanNames(filters, {
+          onProgress: (p: CleanNamesProgress) => {
             lastProgress.current = p;
             controller.enqueue(sseEvent({ type: "progress", ...p }));
           },
         });
         await logActivity(
-          "clay.push",
+          "companies.clean_names",
           {
-            target: "people",
+            target: "companies",
             totalMatched: result.total_matched,
-            pushed: result.pushed,
+            cleaned: result.cleaned,
+            skipped: result.skipped,
             errors: result.errors,
           },
           user
@@ -59,12 +46,12 @@ export async function POST(request: NextRequest) {
       } catch (err) {
         const message = (err as Error).message;
         await logActivity(
-          "clay.push",
+          "companies.clean_names",
           {
-            target: "people",
+            target: "companies",
             done: lastProgress.current?.done ?? 0,
             total: lastProgress.current?.total ?? 0,
-            pushed: lastProgress.current?.pushed ?? 0,
+            cleaned: lastProgress.current?.cleaned ?? 0,
             errors: lastProgress.current?.errors ?? 0,
             error: message,
             failed: true,

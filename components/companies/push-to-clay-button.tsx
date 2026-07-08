@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 import { AlertDialog } from "radix-ui";
-import { Loader2, Send } from "lucide-react";
+import { Loader2, Send, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
+import { runSse } from "@/components/shared/use-sse-run";
 
 const WEBHOOK_STORAGE_KEY = "clay-webhook-url";
 
@@ -21,6 +22,7 @@ type SseEvent =
   | { type: "error"; message: string };
 
 type Status = "idle" | "confirming" | "pushing";
+type Step = "checklist" | "webhook";
 
 function isValidHttps(url: string): boolean {
   try {
@@ -30,8 +32,116 @@ function isValidHttps(url: string): boolean {
   }
 }
 
+// ---------------------------------------------------------------------------
+// "Before you push" checklist — a non-blocking first screen offering to run
+// the reverify/clean-names bulk actions inline before continuing to the
+// webhook step. Each row drives the SSE endpoint directly via useSseRun
+// rather than reusing ReverifyFilteredButton/CleanNamesButton, since those
+// each own their own AlertDialog and nesting Radix dialogs breaks focus/
+// portal behavior.
+// ---------------------------------------------------------------------------
+
+type RunState = "idle" | "running" | "done";
+
+interface ChecklistDoneResult {
+  total_matched: number;
+  // Reverify results call this "verified"; clean-names calls it "cleaned".
+  // Both are read defensively below.
+  verified?: number;
+  cleaned?: number;
+  errors: number;
+}
+
+type ChecklistSseEvent =
+  | { type: "progress"; phase: string; done: number; total: number }
+  | { type: "done"; result: ChecklistDoneResult }
+  | { type: "error"; message: string };
+
+function ChecklistRunRow({
+  endpoint,
+  label,
+  paramsStr,
+}: {
+  endpoint: string;
+  label: string;
+  paramsStr: string;
+}) {
+  const [state, setState] = useState<RunState>("idle");
+  const [progressLabel, setProgressLabel] = useState<string | null>(null);
+
+  async function handleRun() {
+    if (state === "running") return;
+    setState("running");
+    setProgressLabel("Resolving…");
+
+    try {
+      await runSse<ChecklistSseEvent>(`${endpoint}?${paramsStr}`, { method: "POST" }, (event) => {
+        if (event.type === "progress") {
+          setProgressLabel(
+            event.phase === "resolving" ? "Resolving…" : `${event.done}/${event.total}…`
+          );
+          return;
+        }
+        if (event.type === "error") {
+          showToast(event.message, "error");
+          return;
+        }
+        if (event.type === "done") {
+          const done = event.result.verified ?? event.result.cleaned ?? 0;
+          const { errors } = event.result;
+          if (errors === 0) {
+            showToast(`${label}: done (${done}).`, "success");
+          } else if (done > 0) {
+            showToast(`${label}: ${done} done, ${errors} failed.`, "error");
+          } else {
+            showToast(`${label}: all ${errors} failed.`, "error");
+          }
+        }
+      });
+    } catch (error) {
+      showToast((error as Error).message || `${label} interrupted — try again.`, "error");
+      console.error(`${label} stream error:`, error);
+    } finally {
+      setProgressLabel(null);
+      setState("done");
+    }
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md border border-rule px-3 py-2">
+      <span className="text-xs font-medium text-ink">{label}</span>
+      <button
+        type="button"
+        onClick={handleRun}
+        disabled={state === "running"}
+        className={cn(
+          "inline-flex items-center gap-1.5 rounded-md border border-rule px-2.5 py-1 text-xs font-medium transition-smooth",
+          state === "running"
+            ? "cursor-not-allowed opacity-60"
+            : "text-ink hover:bg-hover focus-visible:ring-2 focus-visible:ring-stamp/50"
+        )}
+      >
+        {state === "running" ? (
+          <>
+            <Loader2 size={12} className="animate-spin" />
+            {progressLabel}
+          </>
+        ) : state === "done" ? (
+          <>
+            <Check size={12} />
+            Run again
+          </>
+        ) : (
+          "Run"
+        )}
+      </button>
+    </div>
+  );
+}
+
 export function PushToClayButton({ paramsStr, total }: { paramsStr: string; total: number }) {
   const [status, setStatus] = useState<Status>("idle");
+  const [step, setStep] = useState<Step>("checklist");
   const [webhookUrl, setWebhookUrl] = useState("");
   const [pushLabel, setPushLabel] = useState<string | null>(null);
 
@@ -48,12 +158,14 @@ export function PushToClayButton({ paramsStr, total }: { paramsStr: string; tota
     if (typeof window !== "undefined") {
       setWebhookUrl(window.localStorage.getItem(WEBHOOK_STORAGE_KEY) ?? "");
     }
+    setStep("checklist");
     setStatus("confirming");
   }
 
   function handleCancel() {
     if (busy) return;
     setStatus("idle");
+    setStep("checklist");
   }
 
   async function handleConfirm() {
@@ -67,43 +179,22 @@ export function PushToClayButton({ paramsStr, total }: { paramsStr: string; tota
     setPushLabel("Pushing…");
 
     try {
-      const response = await fetch(`/api/companies/push-to-clay?${paramsStr}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ webhookUrl: url }),
-      });
-
-      if (!response.ok || !response.body) {
-        const message =
-          (await response.json().catch(() => null))?.error ?? "Push failed";
-        throw new Error(message);
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const frames = buffer.split("\n\n");
-        buffer = frames.pop() ?? "";
-
-        for (const frame of frames) {
-          const line = frame.trim();
-          if (!line.startsWith("data: ")) continue;
-          const event: SseEvent = JSON.parse(line.slice("data: ".length));
-          handleSseEvent(event);
-        }
-      }
+      await runSse<SseEvent>(
+        `/api/companies/push-to-clay?${paramsStr}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ webhookUrl: url }),
+        },
+        handleSseEvent
+      );
     } catch (error) {
       showToast((error as Error).message || "Push interrupted — try again.", "error");
       console.error("Push to Clay stream error:", error);
     } finally {
       setPushLabel(null);
       setStatus("idle");
+      setStep("checklist");
     }
   }
 
@@ -161,59 +252,107 @@ export function PushToClayButton({ paramsStr, total }: { paramsStr: string; tota
 
       <AlertDialog.Portal>
         <AlertDialog.Overlay className="fixed inset-0 z-40 bg-black/60" />
-        <AlertDialog.Content className="fixed top-[28%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
-          <AlertDialog.Title className="text-sm font-semibold text-ink">
-            Push to Clay?
-          </AlertDialog.Title>
-          <AlertDialog.Description className="mt-2 text-sm text-ink-soft">
-            {total >= 1000 ? (
-              <span className="mb-1 block text-xs text-ink-mute">
-                This is a large push — confirm your filters.
-              </span>
-            ) : null}
-            <strong className="text-ink">{total.toLocaleString("en-US")}</strong> companies in the
-            current view will be pushed. Every matching company is sent, including any pushed
-            before.
-          </AlertDialog.Description>
+        {step === "checklist" ? (
+          <AlertDialog.Content className="fixed top-[24%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
+            <AlertDialog.Title className="text-sm font-semibold text-ink">
+              Before you push
+            </AlertDialog.Title>
+            <AlertDialog.Description className="mt-2 text-sm text-ink-soft">
+              Optional — run these on the current {total.toLocaleString("en-US")} companies
+              first. None of these block the push.
+            </AlertDialog.Description>
 
-          <label className="mt-4 block text-xs font-medium text-ink-soft">
-            Clay webhook URL
-            <input
-              type="url"
-              inputMode="url"
-              autoFocus
-              value={webhookUrl}
-              onChange={(e) => setWebhookUrl(e.target.value)}
-              placeholder="https://api.clay.com/v3/sources/webhook/…"
-              className="mt-1 w-full rounded-md border border-rule bg-transparent px-2.5 py-1.5 text-xs text-ink outline-none focus-visible:ring-2 focus-visible:ring-stamp/50"
-            />
-          </label>
-          {webhookUrl.trim() !== "" && !urlValid ? (
-            <p className="mt-1 text-xs text-danger">Enter a valid https:// URL.</p>
-          ) : null}
+            <div className="mt-4 flex flex-col gap-2">
+              <ChecklistRunRow
+                endpoint="/api/companies/reverify"
+                label="Reverify email"
+                paramsStr={paramsStr}
+              />
+              <ChecklistRunRow
+                endpoint="/api/companies/reverify-phone"
+                label="Reverify phone"
+                paramsStr={paramsStr}
+              />
+              <ChecklistRunRow
+                endpoint="/api/companies/clean-names"
+                label="Clean names"
+                paramsStr={paramsStr}
+              />
+            </div>
 
-          <div className="mt-5 flex justify-end gap-2">
-            <AlertDialog.Cancel asChild>
+            <div className="mt-5 flex justify-end gap-2">
+              <AlertDialog.Cancel asChild>
+                <button
+                  type="button"
+                  className="rounded-md border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-smooth hover:bg-hover focus-visible:ring-2 focus-visible:ring-stamp/50"
+                >
+                  Cancel
+                </button>
+              </AlertDialog.Cancel>
               <button
                 type="button"
-                className="rounded-md border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-smooth hover:bg-hover focus-visible:ring-2 focus-visible:ring-stamp/50"
+                onClick={() => setStep("webhook")}
+                className="rounded-md bg-stamp px-3 py-1.5 text-xs font-medium text-white transition-smooth hover:opacity-90 focus-visible:ring-2 focus-visible:ring-stamp/50"
               >
-                Cancel
+                Continue to push →
               </button>
-            </AlertDialog.Cancel>
-            <button
-              type="button"
-              onClick={handleConfirm}
-              disabled={!urlValid}
-              className={cn(
-                "rounded-md px-3 py-1.5 text-xs font-medium text-white transition-smooth focus-visible:ring-2 focus-visible:ring-stamp/50",
-                urlValid ? "bg-stamp hover:opacity-90" : "bg-stamp/40 cursor-not-allowed"
-              )}
-            >
-              Push {total.toLocaleString("en-US")}
-            </button>
-          </div>
-        </AlertDialog.Content>
+            </div>
+          </AlertDialog.Content>
+        ) : (
+          <AlertDialog.Content className="fixed top-[28%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
+            <AlertDialog.Title className="text-sm font-semibold text-ink">
+              Push to Clay?
+            </AlertDialog.Title>
+            <AlertDialog.Description className="mt-2 text-sm text-ink-soft">
+              {total >= 1000 ? (
+                <span className="mb-1 block text-xs text-ink-mute">
+                  This is a large push — confirm your filters.
+                </span>
+              ) : null}
+              <strong className="text-ink">{total.toLocaleString("en-US")}</strong> companies in
+              the current view will be pushed. Every matching company is sent, including any
+              pushed before.
+            </AlertDialog.Description>
+
+            <label className="mt-4 block text-xs font-medium text-ink-soft">
+              Clay webhook URL
+              <input
+                type="url"
+                inputMode="url"
+                autoFocus
+                value={webhookUrl}
+                onChange={(e) => setWebhookUrl(e.target.value)}
+                placeholder="https://api.clay.com/v3/sources/webhook/…"
+                className="mt-1 w-full rounded-md border border-rule bg-transparent px-2.5 py-1.5 text-xs text-ink outline-none focus-visible:ring-2 focus-visible:ring-stamp/50"
+              />
+            </label>
+            {webhookUrl.trim() !== "" && !urlValid ? (
+              <p className="mt-1 text-xs text-danger">Enter a valid https:// URL.</p>
+            ) : null}
+
+            <div className="mt-5 flex justify-end gap-2">
+              <AlertDialog.Cancel asChild>
+                <button
+                  type="button"
+                  className="rounded-md border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-smooth hover:bg-hover focus-visible:ring-2 focus-visible:ring-stamp/50"
+                >
+                  Cancel
+                </button>
+              </AlertDialog.Cancel>
+              <button
+                type="button"
+                onClick={handleConfirm}
+                disabled={!urlValid}
+                className={cn(
+                  "rounded-md px-3 py-1.5 text-xs font-medium text-white transition-smooth focus-visible:ring-2 focus-visible:ring-stamp/50",
+                  urlValid ? "bg-stamp hover:opacity-90" : "bg-stamp/40 cursor-not-allowed"
+                )}
+              >
+                Push {total.toLocaleString("en-US")}
+              </button>
+            </div>
+          </AlertDialog.Content>
+        )}
       </AlertDialog.Portal>
     </AlertDialog.Root>
   );

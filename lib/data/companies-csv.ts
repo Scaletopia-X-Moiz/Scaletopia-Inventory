@@ -4,6 +4,7 @@ import { buildCsv, stringifyCsvValue } from "@/lib/data/csv";
 
 const FIXED_HEADERS = [
   "Company Name",
+  "Brand Name",
   "Domain",
   "Website URL",
   "LinkedIn URL",
@@ -38,6 +39,7 @@ const FIXED_HEADERS = [
 function toRecord(row: CompanyExportRow): Record<string, string> {
   const record: Record<string, string> = {
     "Company Name": row.companyName ?? "",
+    "Brand Name": row.brandName ?? "",
     Domain: row.domain ?? "",
     "Website URL": row.websiteUrl ?? "",
     "LinkedIn URL": row.linkedinUrl ?? "",

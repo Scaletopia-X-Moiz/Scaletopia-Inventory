@@ -14,3 +14,15 @@ export async function logout() {
   }
   redirect("/login");
 }
+
+/**
+ * Called from the set-password page right after `supabase.auth.updateUser`
+ * succeeds client-side. The invite/reset link already established a session
+ * (cookies are set via the browser client), so `getUser()` here resolves the
+ * user who just accepted the invite.
+ */
+export async function confirmInviteAccepted(): Promise<void> {
+  const user = await getUser();
+  if (!user) return;
+  await logActivity("user.invite_accepted", { email: user.email }, user);
+}

@@ -37,10 +37,13 @@ export async function POST(request: NextRequest) {
 
   const stream = new ReadableStream({
     async start(controller) {
+      const lastProgress: { current: ClayPushProgress | null } = { current: null };
       try {
         const result = await runCompaniesClayPush(filters, webhookUrl, {
-          onProgress: (p: ClayPushProgress) =>
-            controller.enqueue(sseEvent({ type: "progress", ...p })),
+          onProgress: (p: ClayPushProgress) => {
+            lastProgress.current = p;
+            controller.enqueue(sseEvent({ type: "progress", ...p }));
+          },
         });
         await logActivity(
           "clay.push",
@@ -54,7 +57,21 @@ export async function POST(request: NextRequest) {
         );
         controller.enqueue(sseEvent({ type: "done", result }));
       } catch (err) {
-        controller.enqueue(sseEvent({ type: "error", message: (err as Error).message }));
+        const message = (err as Error).message;
+        await logActivity(
+          "clay.push",
+          {
+            target: "companies",
+            done: lastProgress.current?.done ?? 0,
+            total: lastProgress.current?.total ?? 0,
+            pushed: lastProgress.current?.pushed ?? 0,
+            errors: lastProgress.current?.errors ?? 0,
+            error: message,
+            failed: true,
+          },
+          user
+        );
+        controller.enqueue(sseEvent({ type: "error", message }));
       } finally {
         controller.close();
       }

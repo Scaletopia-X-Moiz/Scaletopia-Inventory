@@ -10,13 +10,15 @@ export const metadata = { title: "Activity · Scaletopia Inventory" };
 export default async function ActivityPage() {
   await requireAdmin();
 
+  const PAGE_SIZE = 200;
   const { data } = await supabaseAdmin
     .from("activity_log")
     .select("id, user_email, action, details, created_at")
     .order("created_at", { ascending: false })
-    .limit(200);
+    .limit(PAGE_SIZE);
 
   const rows = (data ?? []) as ActivityRow[];
+  const initialHasMore = rows.length === PAGE_SIZE;
 
   return (
     <AppShell>
@@ -25,9 +27,9 @@ export default async function ActivityPage() {
         <div className="mx-auto max-w-5xl">
           <h1 className="mb-1 text-xl font-semibold text-ink">Activity log</h1>
           <p className="mb-6 text-sm text-ink-soft">
-            Who did what, most recent first. Shows the latest 200 events.
+            Who did what, most recent first.
           </p>
-          <ActivityView rows={rows} />
+          <ActivityView rows={rows} initialHasMore={initialHasMore} />
         </div>
       </main>
     </AppShell>

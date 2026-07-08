@@ -5,6 +5,7 @@ import { AlertDialog } from "radix-ui";
 import { Loader2, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
+import { runSse } from "@/components/shared/use-sse-run";
 
 interface ReverifyDoneResult {
   total_matched: number;
@@ -85,30 +86,7 @@ export function ReverifyFilteredButton({
     setLabel("Resolving…");
 
     try {
-      const response = await fetch(`${endpoint}?${paramsStr}`, { method: "POST" });
-      if (!response.ok || !response.body) {
-        const message = (await response.json().catch(() => null))?.error ?? "Reverify failed";
-        throw new Error(message);
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const frames = buffer.split("\n\n");
-        buffer = frames.pop() ?? "";
-
-        for (const frame of frames) {
-          const line = frame.trim();
-          if (!line.startsWith("data: ")) continue;
-          handleSseEvent(JSON.parse(line.slice("data: ".length)) as SseEvent);
-        }
-      }
+      await runSse<SseEvent>(`${endpoint}?${paramsStr}`, { method: "POST" }, handleSseEvent);
     } catch (error) {
       showToast((error as Error).message || "Reverify interrupted — try again.", "error");
       console.error("Reverify stream error:", error);

@@ -103,8 +103,10 @@ export async function POST(request: NextRequest) {
 
   const stream = new ReadableStream({
     async start(controller) {
+      const lastProgress: { current: PushProgress | null } = { current: null };
       try {
         const onProgress = (progress: PushProgress) => {
+          lastProgress.current = progress;
           controller.enqueue(sseEvent(progress));
         };
 
@@ -135,6 +137,19 @@ export async function POST(request: NextRequest) {
         controller.enqueue(sseEvent({ phase: "done", result }));
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
+        await logActivity(
+          "import.run",
+          {
+            targetTable: meta.targetTable,
+            sourceKey: meta.sourceKey,
+            tags: meta.tags,
+            done: lastProgress.current?.done ?? 0,
+            total: lastProgress.current?.total ?? mappedRecords.length,
+            error: message,
+            failed: true,
+          },
+          user
+        );
         controller.enqueue(sseEvent({ phase: "error", message }));
       } finally {
         if (storagePath) {

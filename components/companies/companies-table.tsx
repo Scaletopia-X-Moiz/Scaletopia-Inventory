@@ -22,6 +22,7 @@ function locationOf(row: CompanyListRow): string {
 
 const HEADERS = [
   "Company Name",
+  "Brand Name",
   "Domain",
   "LinkedIn",
   "Email",
@@ -46,7 +47,7 @@ export function CompaniesTable({ rows }: { rows: CompanyListRow[] }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-rule">
       <Tooltip.Provider delayDuration={200}>
-      <table className="w-full min-w-[1180px] border-collapse text-sm">
+      <table className="w-full min-w-[1340px] border-collapse text-sm">
         <thead>
           <tr className="border-b border-rule bg-card">
             {HEADERS.map((h) => (
@@ -71,6 +72,7 @@ export function CompaniesTable({ rows }: { rows: CompanyListRow[] }) {
                   {row.companyName ?? "—"}
                 </Link>
               </td>
+              <CompanyCell href={`/companies/${row.id}`}>{row.brandName ?? "—"}</CompanyCell>
               <td className="p-0">
                 {row.domain ? (
                   <a

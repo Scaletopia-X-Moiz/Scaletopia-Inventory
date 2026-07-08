@@ -23,10 +23,13 @@ export async function POST(request: NextRequest) {
 
   const stream = new ReadableStream({
     async start(controller) {
+      const lastProgress: { current: ReverifyProgress | null } = { current: null };
       try {
         const result = await runPeopleReverify(filters, {
-          onProgress: (p: ReverifyProgress) =>
-            controller.enqueue(sseEvent({ type: "progress", ...p })),
+          onProgress: (p: ReverifyProgress) => {
+            lastProgress.current = p;
+            controller.enqueue(sseEvent({ type: "progress", ...p }));
+          },
         });
         await logActivity(
           "verify.reverify",
@@ -35,7 +38,22 @@ export async function POST(request: NextRequest) {
         );
         controller.enqueue(sseEvent({ type: "done", result }));
       } catch (err) {
-        controller.enqueue(sseEvent({ type: "error", message: (err as Error).message }));
+        const message = (err as Error).message;
+        await logActivity(
+          "verify.reverify",
+          {
+            target: "people",
+            kind: "phone",
+            done: lastProgress.current?.done ?? 0,
+            total: lastProgress.current?.total ?? 0,
+            verified: lastProgress.current?.verified ?? 0,
+            errors: lastProgress.current?.errors ?? 0,
+            error: message,
+            failed: true,
+          },
+          user
+        );
+        controller.enqueue(sseEvent({ type: "error", message }));
       } finally {
         controller.close();
       }
