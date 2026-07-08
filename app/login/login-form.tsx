@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useEffect } from "react";
 import { Loader2 } from "lucide-react";
 import { login, type LoginState } from "./actions";
 
@@ -9,6 +9,13 @@ export function LoginForm() {
     login,
     undefined
   );
+
+  // Warm the server-side caches (dashboard + people/companies full-table scans)
+  // while the user is signing in, so the first authenticated page loads without
+  // waiting on a cold DB scan. Fire-and-forget: failures are irrelevant here.
+  useEffect(() => {
+    fetch("/api/warm").catch(() => {});
+  }, []);
 
   return (
     <form action={action} className="flex flex-col gap-4">
