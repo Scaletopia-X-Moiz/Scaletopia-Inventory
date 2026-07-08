@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { IBM_Plex_Mono, Inter } from "next/font/google";
 import { InlineScript } from "@/components/shared/inline-script";
 import { ToastContainer } from "@/components/shared/toast";
+import { SessionProvider } from "@/components/dashboard/session-context";
+import { getUser } from "@/lib/auth/dal";
 import "./globals.css";
 
 const inter = Inter({
@@ -21,11 +23,14 @@ export const metadata: Metadata = {
   description: "Internal data visibility for Scaletopia's company and people store.",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const user = await getUser();
+  const session = user ? { email: user.email, role: user.role } : null;
+
   return (
     <html
       lang="en"
@@ -39,7 +44,7 @@ export default function RootLayout({
         />
       </head>
       <body className="min-h-full bg-paper text-ink flex flex-col">
-        {children}
+        <SessionProvider value={session}>{children}</SessionProvider>
         <ToastContainer />
       </body>
     </html>
