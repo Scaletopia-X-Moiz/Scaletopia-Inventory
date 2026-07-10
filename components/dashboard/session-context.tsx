@@ -4,7 +4,7 @@ import { createContext, useContext } from "react";
 
 export interface SessionInfo {
   email: string;
-  role: "admin" | "member";
+  role: "admin" | "member" | "dev";
 }
 
 const SessionContext = createContext<SessionInfo | null>(null);

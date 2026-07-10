@@ -7,7 +7,7 @@ import { inviteUser, setRole, removeUser, type InviteState } from "./actions";
 export interface Member {
   id: string;
   email: string | null;
-  role: "admin" | "member";
+  role: "admin" | "member" | "dev";
   created_at: string;
 }
 
@@ -86,6 +86,7 @@ export function TeamView({
                         className="rounded-md border border-rule bg-paper px-2 py-1 text-sm text-ink outline-none focus:border-stamp disabled:opacity-60"
                       >
                         <option value="member">Member</option>
+                        <option value="dev">Dev</option>
                         <option value="admin">Admin</option>
                       </select>
                     </form>

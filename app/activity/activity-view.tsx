@@ -24,6 +24,11 @@ const ACTION_LABELS: Record<string, string> = {
   "user.invite_accepted": "Accepted invite",
   "user.role_change": "Changed role",
   "user.remove": "Removed user",
+  "ticket.create": "Filed ticket",
+  "ticket.update": "Edited ticket",
+  "ticket.status_change": "Changed ticket status",
+  "ticket.note_update": "Updated ticket note",
+  "ticket.delete": "Deleted ticket",
 };
 
 function labelFor(action: string) {
@@ -68,6 +73,22 @@ function summarize(action: string, d: Record<string, unknown>): string {
       break;
     case "user.invite_accepted":
       push(d.email);
+      break;
+    case "ticket.create":
+      push(d.title);
+      break;
+    case "ticket.update":
+      push(d.title);
+      break;
+    case "ticket.status_change":
+      push(`#${d.ticket_id}`);
+      push(`${d.from} → ${d.to}`);
+      break;
+    case "ticket.note_update":
+      push(`#${d.ticket_id}`);
+      break;
+    case "ticket.delete":
+      push(d.title);
       break;
   }
   return parts.filter(Boolean).join(" · ");

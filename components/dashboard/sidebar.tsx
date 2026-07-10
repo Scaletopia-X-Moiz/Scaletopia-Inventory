@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { motion } from "framer-motion";
-import { Activity, Building2, ChevronRight, LogOut, PieChart, Upload, UserCog, Users } from "lucide-react";
+import { Activity, Building2, ChevronRight, LogOut, PieChart, Ticket, Upload, UserCog, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ScaletopiaLogo } from "@/components/shared/scaletopia-logo";
 import { useSession } from "@/components/dashboard/session-context";
@@ -16,6 +16,12 @@ const DIRECTORY_ITEMS = [
 
 const DATA_ITEMS = [
   { href: "/import", label: "Import", icon: Upload },
+];
+
+// Visible to every authenticated role — members see only their own tickets,
+// admin/dev see and manage all of them (see /tickets and lib/data/tickets.ts).
+const WORK_ITEMS = [
+  { href: "/tickets", label: "Tickets", icon: Ticket },
 ];
 
 const ADMIN_ITEMS = [
@@ -78,7 +84,7 @@ function NavItem({
 export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   const session = useSession();
-  const isAdmin = session?.role === "admin";
+  const isAdminOrDev = session?.role === "admin" || session?.role === "dev";
 
   return (
     <>
@@ -133,7 +139,24 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
         </nav>
       </div>
 
-      {isAdmin && (
+      <div className="px-3 pt-3">
+        <p className="px-3 py-1 text-xs text-ink-mute">Work</p>
+        <nav className="mt-1 flex flex-col gap-0.5">
+          {WORK_ITEMS.map((item) => (
+            <NavItem
+              key={item.label}
+              label={item.label}
+              icon={item.icon}
+              href={item.href}
+              active={isActive(pathname, item.href)}
+              caret
+              onClick={onNavigate}
+            />
+          ))}
+        </nav>
+      </div>
+
+      {isAdminOrDev && (
         <div className="px-3 pt-3">
           <p className="px-3 py-1 text-xs text-ink-mute">Admin</p>
           <nav className="mt-1 flex flex-col gap-0.5">

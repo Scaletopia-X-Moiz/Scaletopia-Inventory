@@ -2,7 +2,7 @@
 
 import { headers } from "next/headers";
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/auth/dal";
+import { requireAdminOrDev } from "@/lib/auth/dal";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { logActivity } from "@/lib/activity/log";
 
@@ -23,7 +23,7 @@ export async function inviteUser(
   _prev: InviteState | undefined,
   formData: FormData
 ): Promise<InviteState> {
-  const admin = await requireAdmin();
+  const admin = await requireAdminOrDev();
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
 
   if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
@@ -45,12 +45,12 @@ export async function inviteUser(
 }
 
 export async function setRole(formData: FormData): Promise<void> {
-  const admin = await requireAdmin();
+  const admin = await requireAdminOrDev();
   const userId = String(formData.get("userId") ?? "");
   const role = String(formData.get("role") ?? "");
   const email = String(formData.get("email") ?? "");
 
-  if (!userId || (role !== "admin" && role !== "member")) return;
+  if (!userId || (role !== "admin" && role !== "member" && role !== "dev")) return;
 
   const { error } = await supabaseAdmin
     .from("profiles")
@@ -64,7 +64,7 @@ export async function setRole(formData: FormData): Promise<void> {
 }
 
 export async function removeUser(formData: FormData): Promise<void> {
-  const admin = await requireAdmin();
+  const admin = await requireAdminOrDev();
   const userId = String(formData.get("userId") ?? "");
   const email = String(formData.get("email") ?? "");
 

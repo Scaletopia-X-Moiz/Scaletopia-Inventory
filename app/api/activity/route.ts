@@ -7,11 +7,11 @@ export const dynamic = "force-dynamic";
 
 export const ACTIVITY_PAGE_SIZE = 200;
 
-/** Paginated fetch backing the "Load more" button on /activity. Admin-only,
- * mirroring the page's own `requireAdmin()` gate. */
+/** Paginated fetch backing the "Load more" button on /activity. Admin/dev
+ * only, mirroring the page's own `requireAdminOrDev()` gate. */
 export async function GET(request: NextRequest) {
   const user = await getUser();
-  if (!user || user.role !== "admin") {
+  if (!user || (user.role !== "admin" && user.role !== "dev")) {
     return Response.json({ error: "Forbidden" }, { status: 403 });
   }
 

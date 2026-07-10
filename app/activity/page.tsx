@@ -1,6 +1,6 @@
 import { AppShell } from "@/components/dashboard/app-shell";
 import { Topbar } from "@/components/dashboard/topbar";
-import { requireAdmin } from "@/lib/auth/dal";
+import { requireAdminOrDev } from "@/lib/auth/dal";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { ActivityView, type ActivityRow } from "./activity-view";
 
@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 export const metadata = { title: "Activity · Scaletopia Inventory" };
 
 export default async function ActivityPage() {
-  await requireAdmin();
+  await requireAdminOrDev();
 
   const PAGE_SIZE = 200;
   const { data } = await supabaseAdmin

@@ -1,6 +1,6 @@
 import { AppShell } from "@/components/dashboard/app-shell";
 import { Topbar } from "@/components/dashboard/topbar";
-import { requireAdmin } from "@/lib/auth/dal";
+import { requireAdminOrDev } from "@/lib/auth/dal";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { TeamView, type Member } from "./team-view";
 
@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 export const metadata = { title: "Team · Scaletopia Inventory" };
 
 export default async function TeamPage() {
-  const admin = await requireAdmin();
+  const admin = await requireAdminOrDev();
 
   const { data } = await supabaseAdmin
     .from("profiles")
