@@ -44,3 +44,26 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS companies_last_updated
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS people_last_updated
   ON people (last_updated DESC);
+
+-- ---------------------------------------------------------------------------
+-- Index audit (Speed Optimization ticket)
+--
+-- The companies list now runs in two phases (see lib/data/companies.ts):
+--   1. A full-table scan of the *narrow* FILTER_COLUMNS set to filter/facet/sort
+--      in app code. With no search/employee filter this is a deliberate
+--      sequential scan of every row — there is no WHERE clause to index, and a
+--      covering index over the 11 filter columns is not worth the write
+--      amplification on this churny, frequently-reimported table (and Postgres
+--      won't reliably index-only-scan it anyway). The win there is payload size,
+--      handled by dropping the wide display columns from the projection, not an
+--      index. So: no new index is warranted for phase 1.
+--   2. A by-id refetch of the display columns for just the visible page
+--      (`... WHERE id IN (...)`), served by the companies primary key. Already
+--      covered — no new index needed.
+--
+-- Every other filter that reaches Postgres is already covered above:
+--   search (ILIKE)            -> *_trgm GIN indexes
+--   employee_count range      -> companies_employee_count
+--   people-by-company lookups -> people_company_id
+-- Conclusion: the indexes above remain the complete, correct set; the speed win
+-- for the list scan comes from the narrower projection, not from indexing.

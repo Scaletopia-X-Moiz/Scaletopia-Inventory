@@ -107,6 +107,36 @@ interface RawCompanyRow {
 const LIST_COLUMNS =
   "id,company_name,brand_name,domain,website_url,linkedin_url,industry,employee_count,city,state,country,phone,phone_type,phone_status,phone_verified_at,email,email_status,email_verified_at,source,niche,quality_tier,last_updated";
 
+/** The only columns the full-table scan actually needs to filter, facet, and
+ * sort the companies list. Every filter that reaches the scan (niche, country,
+ * industry, source, employee size, email/phone presence + status) reads one of
+ * these; sorting needs id + last_updated. The wide display-only columns
+ * (company_name, brand_name, domain, website_url, linkedin_url, city, state,
+ * phone_status, verified_at, quality_tier) are dropped here and refetched by id
+ * only for the ~50 rows actually shown — see getCompanies. On an ~87k-row table
+ * this roughly halves the per-request payload (the widest text columns are the
+ * dropped ones) without changing any caching semantics. */
+const FILTER_COLUMNS =
+  "id,niche,industry,source,country,employee_count,email,phone,email_status,phone_type,last_updated";
+
+/** Narrow row from the FILTER_COLUMNS scan — enough to filter, facet, and sort,
+ * but not to render a table row (that needs the display columns refetched by
+ * id). RawCompanyRow is a structural superset, so the shared matchers and
+ * filterCompanyRows work over either. */
+interface FilterCompanyRow {
+  id: string;
+  niche: string | null;
+  industry: string | null;
+  source: string | null;
+  country: string | null;
+  employee_count: number | null;
+  email: string | null;
+  phone: string | null;
+  email_status: string | null;
+  phone_type: string | null;
+  last_updated: string | null;
+}
+
 function employeeBucketOrClause(bucketIds: string[]): string {
   const buckets = EMPLOYEE_BUCKETS.filter((b) => bucketIds.includes(b.id));
   return buckets
@@ -162,6 +192,16 @@ async function fetchBaseRowsUncached(filters: BaseFilters): Promise<RawCompanyRo
   );
 }
 
+/** The hot-path base scan: same filtered set as fetchBaseRowsUncached but pulling
+ * only FILTER_COLUMNS. Backs the rendered list page (getCompanies) and its facets
+ * (getCompanyFilterOptions) — the two queries that fire on every page load,
+ * pagination click, and filter change. */
+async function fetchFilterBaseRows(filters: BaseFilters): Promise<FilterCompanyRow[]> {
+  return fetchAllRows<FilterCompanyRow>("companies", FILTER_COLUMNS, (query) =>
+    applyCompanyBaseFilters(query, filters)
+  );
+}
+
 /** Caching disabled for now — a per-process TTL cache (globalThis Map) was
  * serving stale brand_name/email_status/etc. after writes on multi-instance
  * deployments, since invalidateCompaniesListCache() only clears the instance
@@ -170,41 +210,41 @@ async function fetchBaseRowsUncached(filters: BaseFilters): Promise<RawCompanyRo
  * becomes a bottleneck again. */
 const fetchBaseRows = fetchBaseRowsUncached;
 
-function matchesNiche(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+function matchesNiche(row: FilterCompanyRow, filters: CompanyListFilters): boolean {
   return matchesIncludeExclude(row.niche != null ? [row.niche] : [], filters.niche);
 }
 
-function matchesCountry(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+function matchesCountry(row: FilterCompanyRow, filters: CompanyListFilters): boolean {
   const country = normalizeCountry(row.country);
   return matchesIncludeExclude(country ? [country.id] : [], filters.country);
 }
 
-function matchesIndustry(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+function matchesIndustry(row: FilterCompanyRow, filters: CompanyListFilters): boolean {
   const industry = normalizeIndustry(row.industry);
   return matchesIncludeExclude(industry ? [industry.id] : [], filters.industry);
 }
 
-function matchesSource(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+function matchesSource(row: FilterCompanyRow, filters: CompanyListFilters): boolean {
   return matchesIncludeExclude(normalizeSourceTokens(row.source), filters.source);
 }
 
-function matchesEmailPresence(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+function matchesEmailPresence(row: FilterCompanyRow, filters: CompanyListFilters): boolean {
   if (filters.email === "not_empty" && !row.email) return false;
   if (filters.email === "empty" && row.email) return false;
   return true;
 }
 
-function matchesPhonePresence(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+function matchesPhonePresence(row: FilterCompanyRow, filters: CompanyListFilters): boolean {
   if (filters.phone === "not_empty" && !row.phone) return false;
   if (filters.phone === "empty" && row.phone) return false;
   return true;
 }
 
-function matchesEmailStatus(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+function matchesEmailStatus(row: FilterCompanyRow, filters: CompanyListFilters): boolean {
   return matchesIncludeExclude(row.email_status != null ? [row.email_status] : [], filters.emailStatus);
 }
 
-function matchesPhoneType(row: RawCompanyRow, filters: CompanyListFilters): boolean {
+function matchesPhoneType(row: FilterCompanyRow, filters: CompanyListFilters): boolean {
   return matchesIncludeExclude(row.phone_type != null ? [row.phone_type] : [], filters.phoneType);
 }
 
@@ -219,7 +259,10 @@ function matchesPhoneType(row: RawCompanyRow, filters: CompanyListFilters): bool
  * page's `revalidate` already accepts (matches lib/data/people.ts). */
 /** The niche/country/industry/source pass shared by every consumer of the base
  * rows, cached or not. */
-function filterCompanyRows(rows: RawCompanyRow[], filters: CompanyListFilters): RawCompanyRow[] {
+function filterCompanyRows<T extends FilterCompanyRow>(
+  rows: T[],
+  filters: CompanyListFilters
+): T[] {
   return rows.filter(
     (row) =>
       matchesNiche(row, filters) &&
@@ -290,11 +333,19 @@ function toListRow(row: RawCompanyRow): CompanyListRow {
   };
 }
 
-/** Ids per `.in()` chunk when querying people-by-company below. Keeps each
- * request's query string (and the HEAD count query fetchAllRows issues
- * first) comfortably under URL length limits — a single `.in()` clause built
- * from ~1000 UUIDs (e.g. an export-sized page) was long enough to fail the
- * request outright. */
+/** Split an id list into fixed-size chunks. Every by-id query below fans out
+ * this way to keep each `.in()` clause's query string under URL length limits —
+ * a single `.in()` built from ~1000 UUIDs was long enough to fail the request
+ * outright. */
+function chunkIds(ids: string[], size: number): string[][] {
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += size) {
+    chunks.push(ids.slice(i, i + size));
+  }
+  return chunks;
+}
+
+/** Ids per `.in()` chunk when querying people-by-company below. */
 const PEOPLE_COUNT_ID_CHUNK_SIZE = 100;
 
 /** People linked to each company, scoped to just the ids on the rendered
@@ -307,10 +358,7 @@ async function getPeopleCountsForCompanies(ids: string[]): Promise<Map<string, n
   const counts = new Map<string, number>();
   if (ids.length === 0) return counts;
 
-  const chunks: string[][] = [];
-  for (let i = 0; i < ids.length; i += PEOPLE_COUNT_ID_CHUNK_SIZE) {
-    chunks.push(ids.slice(i, i + PEOPLE_COUNT_ID_CHUNK_SIZE));
-  }
+  const chunks = chunkIds(ids, PEOPLE_COUNT_ID_CHUNK_SIZE);
 
   const chunkResults = await Promise.all(
     chunks.map((chunk) =>
@@ -329,23 +377,64 @@ async function getPeopleCountsForCompanies(ids: string[]): Promise<Map<string, n
   return counts;
 }
 
+/** Ids per `.in()` chunk when refetching display columns for the current page.
+ * Keeps each query string under URL length limits when getCompanies is called
+ * with a large pageSize (e.g. the 1000-row pages the tests exercise). */
+const DISPLAY_ROW_ID_CHUNK_SIZE = 100;
+
+/** Display (LIST_COLUMNS) rows for a set of ids, chunked. Ordering is
+ * re-imposed by the caller from the id list, so this returns a lookup map
+ * rather than an ordered array. The chunk fan-out is unbounded because the id
+ * set is only ever the current page (≤ pageSize) — unlike fetchCompaniesByIds,
+ * which caps concurrency precisely because its set can be the whole table. */
+async function fetchCompanyDisplayRowsByIds(ids: string[]): Promise<Map<string, RawCompanyRow>> {
+  const byId = new Map<string, RawCompanyRow>();
+  if (ids.length === 0) return byId;
+
+  const chunks = chunkIds(ids, DISPLAY_ROW_ID_CHUNK_SIZE);
+
+  const results = await Promise.all(
+    chunks.map((chunk) =>
+      supabaseAdmin.from("companies").select(LIST_COLUMNS).in("id", chunk)
+    )
+  );
+  for (const { data, error } of results) {
+    if (error) throw error;
+    for (const row of (data ?? []) as unknown as RawCompanyRow[]) {
+      byId.set(row.id, row);
+    }
+  }
+  return byId;
+}
+
 export async function getCompanies(
   filters: CompanyListFilters,
   page = 1,
   pageSize = 50
 ): Promise<CompanyListResult> {
-  const rows = sortByLastUpdatedDesc(await fetchFilteredRows(filters));
+  // Scan only the narrow filter columns for the whole table, then refetch the
+  // wide display columns for just the current page's ids (see FILTER_COLUMNS).
+  const baseRows = await fetchFilterBaseRows(toBaseFilters(filters));
+  const filtered = sortByLastUpdatedDesc(filterCompanyRows(baseRows, filters));
   const start = (page - 1) * pageSize;
-  const pageRows = rows.slice(start, start + pageSize).map(toListRow);
+  const pageIds = filtered.slice(start, start + pageSize).map((r) => r.id);
 
-  const peopleCounts = await getPeopleCountsForCompanies(pageRows.map((r) => r.id));
+  const [displayById, peopleCounts] = await Promise.all([
+    fetchCompanyDisplayRowsByIds(pageIds),
+    getPeopleCountsForCompanies(pageIds),
+  ]);
+
+  const pageRows = pageIds
+    .map((id) => displayById.get(id))
+    .filter((row): row is RawCompanyRow => row != null)
+    .map(toListRow);
   for (const row of pageRows) {
     row.peopleCount = peopleCounts.get(row.id) ?? 0;
   }
 
   return {
     rows: pageRows,
-    total: rows.length,
+    total: filtered.length,
     page,
     pageSize,
   };
@@ -424,10 +513,7 @@ async function fetchCompaniesByIds(ids: string[]): Promise<Map<string, FullCompa
   const byId = new Map<string, FullCompanyRow>();
   if (ids.length === 0) return byId;
 
-  const chunks: string[][] = [];
-  for (let i = 0; i < ids.length; i += FULL_ROW_ID_CHUNK_SIZE) {
-    chunks.push(ids.slice(i, i + FULL_ROW_ID_CHUNK_SIZE));
-  }
+  const chunks = chunkIds(ids, FULL_ROW_ID_CHUNK_SIZE);
 
   for (let i = 0; i < chunks.length; i += FULL_ROW_FETCH_CONCURRENCY) {
     const window = chunks.slice(i, i + FULL_ROW_FETCH_CONCURRENCY);
@@ -573,7 +659,8 @@ export async function getCompaniesForClay(
 export async function getCompanyFilterOptions(
   filters: CompanyListFilters = {}
 ): Promise<CompanyFilterOptions> {
-  const rows = await fetchBaseRows(toBaseFilters(filters));
+  // Facets read only filter columns, so the narrow scan is enough here too.
+  const rows = await fetchFilterBaseRows(toBaseFilters(filters));
 
   const niches = new Map<string, number>();
   const sources = new Map<string, number>();

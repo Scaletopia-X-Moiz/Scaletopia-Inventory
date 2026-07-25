@@ -37,6 +37,36 @@ describe("getCompanies", () => {
     expect(result.page).toBe(1);
   });
 
+  it("page rows carry full display columns via the by-id refetch", async () => {
+    // getCompanies scans a narrow filter-column set for the full table, then
+    // refetches display columns only for the visible page by id. The paged
+    // rows must be byte-identical to the full-scan path (getAllFilteredCompanies)
+    // for both identity/order and the display-only columns dropped from the scan.
+    const all = await getAllFilteredCompanies({});
+    const page = await getCompanies({}, 1, 25);
+
+    expect(page.rows.map((r) => r.id)).toEqual(all.slice(0, 25).map((r) => r.id));
+
+    for (let i = 0; i < page.rows.length; i++) {
+      const p = page.rows[i];
+      const a = all[i];
+      // display-only columns absent from the narrow filter scan
+      expect(p.companyName).toBe(a.companyName);
+      expect(p.brandName).toBe(a.brandName);
+      expect(p.domain).toBe(a.domain);
+      expect(p.websiteUrl).toBe(a.websiteUrl);
+      expect(p.linkedinUrl).toBe(a.linkedinUrl);
+      expect(p.city).toBe(a.city);
+      expect(p.state).toBe(a.state);
+      expect(p.qualityTier).toBe(a.qualityTier);
+      expect(p.phoneStatus).toBe(a.phoneStatus);
+      // filter columns still present and correct
+      expect(p.niche).toBe(a.niche);
+      expect(p.employeeCount).toBe(a.employeeCount);
+      expect(p.sources).toEqual(a.sources);
+    }
+  });
+
   it("search filters by name or domain substring", async () => {
     const first = await getAllFilteredCompanies({});
     const sample = first[0];
