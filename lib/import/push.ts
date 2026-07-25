@@ -7,6 +7,9 @@ import {
   dedupeCompanies,
   dedupePeople,
 } from "@/lib/import/normalize";
+import { normalizeCountry } from "@/lib/data/country";
+import { normalizeIndustry } from "@/lib/data/industry";
+import { normalizeSourceTokens } from "@/lib/data/source";
 
 export interface PushOptions {
   records: Record<string, unknown>[];
@@ -234,6 +237,21 @@ async function insertWithBinarySplit(
   };
 }
 
+/** Recomputes country_id/industry_id on an in-progress enrichment payload from
+ * whatever raw country/industry string it just set, mirroring the COALESCE
+ * semantics of those raw fields (only set — and re-normalized — when this
+ * record actually supplies a new raw value, so omitting country doesn't clear
+ * an existing country_id). Shared by the primary bulk-update payload and its
+ * individual-record fallback so the two paths can't drift. */
+function withCanonicalIdentityIds(enrichment: Record<string, unknown>): void {
+  if (typeof enrichment.country === "string") {
+    enrichment.country_id = normalizeCountry(enrichment.country)?.id ?? null;
+  }
+  if (typeof enrichment.industry === "string") {
+    enrichment.industry_id = normalizeIndustry(enrichment.industry)?.id ?? null;
+  }
+}
+
 async function bulkInsert(
   records: Record<string, unknown>[],
   targetTable: "companies" | "people",
@@ -246,11 +264,24 @@ async function bulkInsert(
   const now = new Date().toISOString();
   const total = records.length;
 
+  // Canonical columns (docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md)
+  // are computed here so a fresh insert never needs a separate backfill pass.
+  // People rows have no country/industry/source columns to normalize.
+  const canonicalColumnsFor = (r: Record<string, unknown>): Record<string, unknown> => {
+    if (targetTable !== "companies") return {};
+    return {
+      country_id: normalizeCountry(r.country as string | null | undefined)?.id ?? null,
+      industry_id: normalizeIndustry(r.industry as string | null | undefined)?.id ?? null,
+      source_tokens: normalizeSourceTokens(sourceKey),
+    };
+  };
+
   const prepared = records.map((r) => ({
     ...r,
     source: sourceKey,
     tags,
     last_updated: now,
+    ...canonicalColumnsFor(r),
   }));
 
   const batches = chunkArray(prepared, 1000);
@@ -301,11 +332,22 @@ async function bulkUpdate(
       const cd = r.custom_data;
       if (cd && typeof cd === "object" && !Array.isArray(cd)) enrichment.custom_data = cd;
 
+      // Canonical columns (docs/adr/0001-...). country_id/industry_id mirror
+      // the COALESCE semantics of the raw string fields above — only included
+      // (and re-normalized) when this record actually supplies a new raw
+      // value, so a record that omits country doesn't clear an existing
+      // country_id. source_tokens is different: `source` is *appended to*
+      // (see the RPC's dedupe-append CASE), not overwritten, so the RPC does
+      // the corresponding array union itself — new_source_tokens here is just
+      // this record's own canonical token(s), not the row's final set.
+      withCanonicalIdentityIds(enrichment);
+
       return {
         domain: r.domain ?? null,
         linkedin_url: r.linkedin_url ?? null,
         tags,
         source: sourceKey,
+        new_source_tokens: normalizeSourceTokens(sourceKey),
         last_updated: now,
         ...enrichment,
       };
@@ -340,10 +382,17 @@ async function bulkUpdate(
             for (const f of ["employee_count", "founded_year"] as const) {
               if (rec[f] !== null && rec[f] !== undefined && rec[f] !== "") enrichment[f] = rec[f];
             }
+            withCanonicalIdentityIds(enrichment);
 
             const query = supabaseAdmin.from("companies").update({
               tags,
               source: sourceKey,
+              // Rare error-recovery path (the bulk RPC above already failed):
+              // overwrites source_tokens with just this record's own token(s)
+              // rather than unioning with whatever was already there, unlike
+              // the RPC path. Acceptable for a fallback that only runs when
+              // the primary path has already errored.
+              source_tokens: normalizeSourceTokens(sourceKey),
               last_updated: now,
               ...enrichment,
             });

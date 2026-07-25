@@ -71,6 +71,11 @@ ALTER TABLE companies ADD COLUMN IF NOT EXISTS email_verified_at timestamptz;
 -- RPC: bulk company updates (appends source, overwrites tags, merges enrichment fields)
 -- Enrichment fields use COALESCE so only non-null incoming values overwrite existing data.
 -- custom_data is merged (||) so new keys are added without wiping existing provider data.
+--
+-- CANONICAL COLUMNS UPDATE (must be re-run in the Supabase SQL editor after
+-- lib/data/canonical-columns.sql has added country_id/industry_id/
+-- source_tokens to companies — this CREATE OR REPLACE now also maintains
+-- them; see docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md).
 CREATE OR REPLACE FUNCTION import_bulk_update_companies(
   updates jsonb
 ) RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$
@@ -107,6 +112,21 @@ BEGIN
           CASE WHEN rec->>'founded_year' ~ '^[0-9]+$'
             THEN (rec->>'founded_year')::int ELSE NULL END,
           founded_year
+        ),
+        -- Canonical columns (docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md).
+        -- country_id/industry_id follow the same COALESCE-if-supplied
+        -- semantics as the raw fields above (push.ts only includes them when
+        -- the record supplies a new raw value). source_tokens is a set
+        -- union, not an overwrite, because `source` itself is appended to
+        -- (not replaced) by the CASE below — new_source_tokens carries just
+        -- this record's own canonical token(s).
+        country_id = COALESCE(rec->>'country_id', country_id),
+        industry_id = COALESCE(rec->>'industry_id', industry_id),
+        source_tokens = ARRAY(
+          SELECT DISTINCT unnest(
+            COALESCE(source_tokens, '{}'::text[]) ||
+            COALESCE(ARRAY(SELECT jsonb_array_elements_text(rec->'new_source_tokens')), '{}'::text[])
+          )
         ),
         custom_data = CASE
           WHEN rec->'custom_data' IS NOT NULL AND jsonb_typeof(rec->'custom_data') = 'object'
@@ -160,6 +180,21 @@ BEGIN
           CASE WHEN rec->>'founded_year' ~ '^[0-9]+$'
             THEN (rec->>'founded_year')::int ELSE NULL END,
           founded_year
+        ),
+        -- Canonical columns (docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md).
+        -- country_id/industry_id follow the same COALESCE-if-supplied
+        -- semantics as the raw fields above (push.ts only includes them when
+        -- the record supplies a new raw value). source_tokens is a set
+        -- union, not an overwrite, because `source` itself is appended to
+        -- (not replaced) by the CASE below — new_source_tokens carries just
+        -- this record's own canonical token(s).
+        country_id = COALESCE(rec->>'country_id', country_id),
+        industry_id = COALESCE(rec->>'industry_id', industry_id),
+        source_tokens = ARRAY(
+          SELECT DISTINCT unnest(
+            COALESCE(source_tokens, '{}'::text[]) ||
+            COALESCE(ARRAY(SELECT jsonb_array_elements_text(rec->'new_source_tokens')), '{}'::text[])
+          )
         ),
         custom_data = CASE
           WHEN rec->'custom_data' IS NOT NULL AND jsonb_typeof(rec->'custom_data') = 'object'

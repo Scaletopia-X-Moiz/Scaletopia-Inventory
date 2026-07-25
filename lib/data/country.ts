@@ -27,3 +27,24 @@ export function normalizeCountry(raw: string | null | undefined): { id: string; 
   const id = trimmed.toUpperCase();
   return { id, label: titleCase(trimmed) };
 }
+
+const COUNTRY_LABELS_BY_ID: Record<string, string> = Object.fromEntries(
+  Object.values(COUNTRY_ALIASES).map((v) => [v.id, v.label])
+);
+
+/** Reconstructs a display label from a canonical country_id alone (the DB-side
+ * facet RPC returns ids, not the raw row that produced them). Aliased
+ * countries (US/GB/CA) use their fixed label; anything else derives a label
+ * purely from the id (already uppercase — e.g. "FRANCE" -> "France"), which
+ * is deterministic unlike the old per-row `normalizeCountry(...).label`
+ * fallback (title-cased from whatever casing that row's raw value happened
+ * to use). */
+export function countryLabel(id: string): string {
+  const known = COUNTRY_LABELS_BY_ID[id];
+  if (known) return known;
+  return id
+    .split(" ")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(" ");
+}

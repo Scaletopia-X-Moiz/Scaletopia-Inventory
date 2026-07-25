@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { pushRecords, preflightRecords } from "@/lib/import/push";
+import { normalizeSourceTokens } from "@/lib/data/source";
 
 // All test records use this domain prefix so we can clean up safely.
 const TEST_PREFIX = "__test-import-push__";
@@ -126,6 +127,76 @@ describe("pushRecords — insert", () => {
 
     expect(result.insertedCount).toBe(2);
     expect(result.failedCount).toBe(0);
+  });
+});
+
+describe("pushRecords — canonical columns", () => {
+  // Guard test for docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md:
+  // import is the sole writer of country_id/industry_id/source_tokens, so a
+  // fresh push must always leave them in sync with the raw columns.
+  it("sets country_id/industry_id/source_tokens on insert", async () => {
+    const domain = testDomain("canonical-insert");
+
+    await pushRecords(
+      {
+        records: [
+          {
+            domain,
+            company_name: "Canonical Insert Co",
+            country: "united states",
+            industry: "Technology; Information and Internet",
+          },
+        ],
+        targetTable: "companies",
+        sourceKey: SOURCE_KEY,
+        tags: TAGS,
+      },
+      noopProgress
+    );
+
+    const { data } = await supabaseAdmin
+      .from("companies")
+      .select("country_id,industry_id,source_tokens")
+      .eq("domain", domain)
+      .single();
+
+    expect(data?.country_id).toBe("US");
+    expect(data?.industry_id).toBe("technology, information and internet");
+    expect(data?.source_tokens).toEqual(normalizeSourceTokens(SOURCE_KEY));
+  });
+
+  it("updates country_id/industry_id/source_tokens on update", async () => {
+    const domain = testDomain("canonical-update");
+
+    await pushRecords(
+      { records: [{ domain, company_name: "Canonical Update Co", country: "Canada" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: TAGS },
+      noopProgress
+    );
+
+    const otherSource = `${SOURCE_KEY}-other`;
+    await pushRecords(
+      {
+        records: [{ domain, company_name: "Canonical Update Co", country: "united kingdom", industry: "SaaS" }],
+        targetTable: "companies",
+        sourceKey: otherSource,
+        tags: TAGS,
+      },
+      noopProgress
+    );
+
+    const { data } = await supabaseAdmin
+      .from("companies")
+      .select("country_id,industry_id,source_tokens")
+      .eq("domain", domain)
+      .single();
+
+    expect(data?.country_id).toBe("GB");
+    expect(data?.industry_id).toBe("saas");
+    // source_tokens is a union across both pushes, not an overwrite.
+    expect(data?.source_tokens).toEqual(
+      expect.arrayContaining([...normalizeSourceTokens(SOURCE_KEY), ...normalizeSourceTokens(otherSource)])
+    );
+    expect(data?.source_tokens).toHaveLength(2);
   });
 });
 

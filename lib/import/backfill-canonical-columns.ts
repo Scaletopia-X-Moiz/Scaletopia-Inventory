@@ -1,0 +1,123 @@
+/**
+ * One-time backfill: populates country_id / industry_id / source_tokens on
+ * every existing companies row, using the same normalize*() functions the
+ * import pipeline now writes on every insert/update (see
+ * docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md and
+ * lib/data/canonical-columns.sql, which must be run first to add the
+ * columns).
+ *
+ * Run once via `npm run backfill:canonical-columns`. Safe to re-run — it's
+ * idempotent (recomputes from the current raw country/industry/source columns
+ * every time) and skips rows whose canonical columns already match.
+ *
+ * Deliberately does not import lib/supabase/admin.ts: that module pulls in
+ * the "server-only" marker package, which throws unconditionally outside a
+ * Next.js server bundle. This script builds its own client instead.
+ */
+import { config } from "dotenv";
+config({ path: ".env.local" });
+
+import { createClient } from "@supabase/supabase-js";
+import { normalizeCountry } from "@/lib/data/country";
+import { normalizeIndustry } from "@/lib/data/industry";
+import { normalizeSourceTokens } from "@/lib/data/source";
+
+const url = process.env.SUPABASE_URL;
+const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+if (!url || !serviceRoleKey) {
+  throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set");
+}
+const supabaseAdmin = createClient(url, serviceRoleKey, { auth: { persistSession: false } });
+
+interface Row {
+  id: string;
+  country: string | null;
+  industry: string | null;
+  source: string | null;
+  country_id: string | null;
+  industry_id: string | null;
+  source_tokens: string[] | null;
+}
+
+const PAGE_SIZE = 1000;
+const UPDATE_BATCH_SIZE = 500;
+const UPDATE_CONCURRENCY = 8;
+
+function sameTokens(a: string[] | null, b: string[]): boolean {
+  if (!a) return b.length === 0;
+  if (a.length !== b.length) return false;
+  const as = [...a].sort();
+  const bs = [...b].sort();
+  return as.every((v, i) => v === bs[i]);
+}
+
+async function fetchPage(from: number): Promise<Row[]> {
+  const { data, error } = await supabaseAdmin
+    .from("companies")
+    .select("id,country,industry,source,country_id,industry_id,source_tokens")
+    .order("id", { ascending: true })
+    .range(from, from + PAGE_SIZE - 1);
+  if (error) throw error;
+  return (data ?? []) as unknown as Row[];
+}
+
+async function main() {
+  const { count, error: countError } = await supabaseAdmin
+    .from("companies")
+    .select("id", { count: "exact", head: true });
+  if (countError) throw countError;
+
+  const total = count ?? 0;
+  console.log(`Backfilling canonical columns for ${total} companies rows...`);
+
+  let scanned = 0;
+  let changed = 0;
+  const pendingUpdates: { id: string; country_id: string | null; industry_id: string | null; source_tokens: string[] }[] = [];
+
+  const flush = async () => {
+    if (pendingUpdates.length === 0) return;
+    const batches: (typeof pendingUpdates)[] = [];
+    for (let i = 0; i < pendingUpdates.length; i += UPDATE_BATCH_SIZE) {
+      batches.push(pendingUpdates.slice(i, i + UPDATE_BATCH_SIZE));
+    }
+    for (let i = 0; i < batches.length; i += UPDATE_CONCURRENCY) {
+      const window = batches.slice(i, i + UPDATE_CONCURRENCY);
+      const results = await Promise.all(
+        window.map((batch) => supabaseAdmin.rpc("backfill_canonical_columns", { updates: batch }))
+      );
+      for (const { error } of results) {
+        if (error) throw error;
+      }
+    }
+    pendingUpdates.length = 0;
+  };
+
+  for (let from = 0; from < total; from += PAGE_SIZE) {
+    const rows = await fetchPage(from);
+    for (const row of rows) {
+      scanned++;
+      const countryId = normalizeCountry(row.country)?.id ?? null;
+      const industryId = normalizeIndustry(row.industry)?.id ?? null;
+      const sourceTokens = normalizeSourceTokens(row.source);
+
+      const upToDate =
+        row.country_id === countryId &&
+        row.industry_id === industryId &&
+        sameTokens(row.source_tokens, sourceTokens);
+      if (upToDate) continue;
+
+      changed++;
+      pendingUpdates.push({ id: row.id, country_id: countryId, industry_id: industryId, source_tokens: sourceTokens });
+    }
+    if (pendingUpdates.length >= UPDATE_BATCH_SIZE * UPDATE_CONCURRENCY) await flush();
+    console.log(`  scanned ${scanned}/${total}, ${changed} rows changed so far`);
+  }
+  await flush();
+
+  console.log(`Done. Scanned ${scanned} rows, updated ${changed}.`);
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

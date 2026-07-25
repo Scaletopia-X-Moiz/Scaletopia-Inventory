@@ -25,3 +25,11 @@ export function normalizeIndustry(raw: string | null | undefined): { id: string;
   const id = canonicalKey(trimmed);
   return { id, label: titleCase(id) };
 }
+
+/** Reconstructs a display label from a canonical industry_id alone (the
+ * DB-side facet RPC returns ids, not the raw row that produced them).
+ * industry_id is already the canonicalKey() form (lowercase), so this is the
+ * same title-casing normalizeIndustry applies. */
+export function industryLabel(id: string): string {
+  return titleCase(id);
+}
