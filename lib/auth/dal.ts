@@ -19,20 +19,21 @@ export interface SessionUser {
 export const getUser = cache(async (): Promise<SessionUser | null> => {
   const supabase = await createSupabaseServerClient();
   const {
-    data: { user },
-  } = await supabase.auth.getUser();
+    data: claimsData,
+  } = await supabase.auth.getClaims();
+  const claims = claimsData?.claims;
 
-  if (!user) return null;
+  if (!claims) return null;
 
   const { data: profile } = await supabaseAdmin
     .from("profiles")
     .select("role")
-    .eq("id", user.id)
+    .eq("id", claims.sub)
     .maybeSingle();
 
   return {
-    id: user.id,
-    email: user.email ?? "",
+    id: claims.sub,
+    email: claims.email ?? "",
     role: (profile?.role as Role) ?? "member",
   };
 });

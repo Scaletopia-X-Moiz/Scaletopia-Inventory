@@ -38,12 +38,13 @@ export async function proxy(request: NextRequest) {
   });
 
   const {
-    data: { user },
-  } = await supabase.auth.getUser();
+    data: claimsData,
+  } = await supabase.auth.getClaims();
+  const claims = claimsData?.claims ?? null;
 
   const path = request.nextUrl.pathname;
 
-  if (!user && !isPublicPath(path)) {
+  if (!claims && !isPublicPath(path)) {
     if (path.startsWith("/api")) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
@@ -52,7 +53,7 @@ export async function proxy(request: NextRequest) {
   }
 
   // Already signed in — keep users off the login page.
-  if (user && path === "/login") {
+  if (claims && path === "/login") {
     return NextResponse.redirect(new URL("/", request.url));
   }
 
