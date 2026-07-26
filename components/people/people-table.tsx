@@ -15,6 +15,7 @@ function formatLastUpdated(value: string | null): string {
 
 const HEADERS = [
   "Full Name",
+  "Job Title",
   "LinkedIn URL",
   "Email",
   "Phone",
@@ -59,6 +60,9 @@ export function PeopleTable({ rows }: { rows: PersonListRow[] }) {
                 >
                   {row.fullName ?? "—"}
                 </Link>
+              </td>
+              <td className="max-w-[220px] truncate px-3 py-2.5 text-ink-soft" title={row.jobTitle ?? undefined}>
+                {row.jobTitle ?? "—"}
               </td>
               <ExternalLinkCell url={row.linkedinUrl} />
               <PersonCell href={`/people/${row.id}`}>
