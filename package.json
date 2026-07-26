@@ -10,7 +10,8 @@
     "test": "vitest run",
     "backfill:canonical-columns": "tsx lib/import/backfill-canonical-columns.ts",
     "backfill:canonical-columns-people": "tsx lib/import/backfill-canonical-columns-people.ts",
-    "verify:auth-hook": "tsx lib/auth/verify-access-token-hook.ts"
+    "verify:auth-hook": "tsx lib/auth/verify-access-token-hook.ts",
+    "bench:dashboard": "tsx scripts/bench-dashboard.ts"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.3.0",

@@ -1,8 +1,8 @@
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import { fetchAllRows } from "@/lib/data/fetch-all-rows";
 import { withTtlCache } from "@/lib/data/cache-with-ttl";
-import { normalizeSourceTokens, sourceLabel } from "@/lib/data/source";
-import { normalizeCountry } from "@/lib/data/country";
+import { sourceLabel } from "@/lib/data/source";
+import { industryLabel } from "@/lib/data/industry";
+import { countryLabel, normalizeCountry } from "@/lib/data/country";
 
 export interface BreakdownEntry {
   id: string;
@@ -35,109 +35,76 @@ export interface DashboardDateRange {
   to?: string;
 }
 
-function titleCase(value: string): string {
-  return value
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
+function sortByCountDesc(a: { count: number }, b: { count: number }): number {
+  return b.count - a.count;
 }
 
-function sortedBreakdown(
-  counts: Map<string, { label: string; count: number }>
-): BreakdownEntry[] {
-  return Array.from(counts.entries())
-    .map(([id, v]) => ({ id, label: v.label, count: v.count }))
-    .sort((a, b) => b.count - a.count);
+interface FacetIdCount {
+  id: string;
+  count: number;
 }
 
-function bump(map: Map<string, { label: string; count: number }>, id: string, label: string) {
-  const existing = map.get(id);
-  if (existing) existing.count += 1;
-  else map.set(id, { label, count: 1 });
+interface DashboardStatsRpcResult {
+  totalCompanies: number;
+  totalPeople: number;
+  niches: FacetIdCount[];
+  sources: FacetIdCount[];
+  industries: FacetIdCount[];
+  countries: FacetIdCount[];
+  recentCompanies: {
+    id: string;
+    name: string | null;
+    niche: string | null;
+    country: string | null;
+    createdAt: string | null;
+  }[];
 }
 
-interface CompanyScanRow {
-  niche: string | null;
-  source: string | null;
-  industry: string | null;
-  country: string | null;
-}
-
+/** Aggregation runs in Postgres via the dashboard_stats RPC
+ * (lib/data/dashboard-stats.sql), grouping on the canonical columns from ADR
+ * 0001 (country_id, industry_id, source_tokens) plus `niche`, instead of
+ * paging the whole ~109k-row companies table into the app and counting in
+ * JS. Only ids/counts come back from SQL; labels are attached here from the
+ * same TypeScript alias tables (sourceLabel/industryLabel/countryLabel) the
+ * /companies facets use, so casing/display stays single-edit-point and
+ * identical to before. `recentCompanies` carries the raw `country` text (not
+ * country_id) so it can keep going through normalizeCountry() exactly as the
+ * old JS-scan implementation did. */
 async function getDashboardUncached(range: DashboardDateRange = {}): Promise<Dashboard> {
-  const [companiesCount, peopleCount, rows, recentCompaniesRes] = await Promise.all([
-    (() => {
-      let q = supabaseAdmin.from("companies").select("id", { count: "exact", head: true });
-      if (range.from) q = q.gte("created_at", range.from);
-      if (range.to) q = q.lt("created_at", range.to);
-      return q;
-    })(),
-    (() => {
-      let q = supabaseAdmin.from("people").select("id", { count: "exact", head: true });
-      if (range.from) q = q.gte("created_at", range.from);
-      if (range.to) q = q.lt("created_at", range.to);
-      return q;
-    })(),
-    fetchAllRows<CompanyScanRow>("companies", "niche,source,industry,country", (query) => {
-      let q = query;
-      if (range.from) q = q.gte("created_at", range.from);
-      if (range.to) q = q.lt("created_at", range.to);
-      return q;
-    }),
-    (() => {
-      let q = supabaseAdmin
-        .from("companies")
-        .select("id,company_name,niche,country,created_at")
-        .order("created_at", { ascending: false })
-        .limit(5);
-      if (range.from) q = q.gte("created_at", range.from);
-      if (range.to) q = q.lt("created_at", range.to);
-      return q;
-    })(),
-  ]);
+  const { data, error } = await supabaseAdmin.rpc("dashboard_stats", {
+    range_from: range.from ?? null,
+    range_to: range.to ?? null,
+  });
+  if (error) throw error;
+  const result = data as DashboardStatsRpcResult;
 
-  if (companiesCount.error) throw companiesCount.error;
-  if (peopleCount.error) throw peopleCount.error;
-  if (recentCompaniesRes.error) throw recentCompaniesRes.error;
-
-  const niches = new Map<string, { label: string; count: number }>();
-  const sources = new Map<string, { label: string; count: number }>();
-  const industries = new Map<string, { label: string; count: number }>();
-  const countries = new Map<string, { label: string; count: number }>();
-
-  for (const row of rows) {
-    if (row.niche) bump(niches, row.niche, row.niche);
-    for (const token of normalizeSourceTokens(row.source)) {
-      bump(sources, token, sourceLabel(token));
-    }
-    if (row.industry?.trim()) {
-      const id = row.industry.trim().toLowerCase();
-      bump(industries, id, titleCase(id));
-    }
-    const country = normalizeCountry(row.country);
-    if (country) bump(countries, country.id, country.label);
-  }
-
-  const recentCompanies: RecentCompany[] = (recentCompaniesRes.data ?? []).map((c) => ({
+  const recentCompanies: RecentCompany[] = result.recentCompanies.map((c) => ({
     id: String(c.id),
-    name: c.company_name ?? "Unknown",
+    name: c.name ?? "Unknown",
     niche: c.niche,
     country: normalizeCountry(c.country)?.label ?? c.country,
-    createdAt: c.created_at,
+    createdAt: c.createdAt,
   }));
 
   return {
-    totalCompanies: companiesCount.count ?? 0,
-    totalPeople: peopleCount.count ?? 0,
-    niches: sortedBreakdown(niches),
-    sources: sortedBreakdown(sources),
-    industries: sortedBreakdown(industries),
-    countries: sortedBreakdown(countries),
+    totalCompanies: result.totalCompanies,
+    totalPeople: result.totalPeople,
+    niches: result.niches.map(({ id, count }) => ({ id, label: id, count })).sort(sortByCountDesc),
+    sources: result.sources
+      .map(({ id, count }) => ({ id, label: sourceLabel(id), count }))
+      .sort(sortByCountDesc),
+    industries: result.industries
+      .map(({ id, count }) => ({ id, label: industryLabel(id), count }))
+      .sort(sortByCountDesc),
+    countries: result.countries
+      .map(({ id, count }) => ({ id, label: countryLabel(id), count }))
+      .sort(sortByCountDesc),
     recentCompanies,
   };
 }
 
-/** Full-table aggregation is expensive (~29k rows scanned per call), so dedupe
- * and cache by date-range for 60s — matching the TTL used by the companies and
- * people queries. Concurrent requests share one in-flight scan. */
-export const getDashboard = withTtlCache(getDashboardUncached, 60_000);
+/** Cached by date-range for 60s under a stable key — matching the TTL used by
+ * the companies and people queries — so the cache survives dev-mode recompiles
+ * and repeat views inside the TTL are instant. Concurrent requests share one
+ * in-flight call. */
+export const getDashboard = withTtlCache(getDashboardUncached, 60_000, "dashboard");

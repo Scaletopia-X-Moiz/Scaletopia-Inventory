@@ -193,6 +193,31 @@ same GROUP BY counts over all 109,756 rows in **~1.1 s / 66 KB** vs the scan's
 equal-or-faster, so ~1.1 s is a conservative upper bound. With F5's cache,
 subsequent loads inside the TTL are effectively instant.
 
+**Implemented (issue #27):** `dashboard_stats` RPC added
+(`lib/data/dashboard-stats.sql`), `getDashboard` rewritten to call it
+(`lib/data/dashboard.ts`). Measured via the repeatable benchmark
+(`npm run bench:dashboard`, `scripts/bench-dashboard.ts`), 2026-07-26:
+
+| | elapsed | payload |
+|---|---|---|
+| before (`fetchAllRows` + JS aggregation) | 5,479 ms | 49.2 KB |
+| after (`dashboard_stats` RPC) | 868 ms | 61.1 KB |
+
+~6.3x faster in this run — short of the ~9x / ~1.1s proxy above, and the
+"before" leg itself ran under half the original ~9.8s cold measurement, so
+this run's connection/cache conditions weren't a clean re-creation of the
+original cold baseline. Re-run `npm run bench:dashboard` from a cold state
+(fresh process, no warm connection pool) for a tighter before/after
+comparison; the RPC's absolute cost (868 ms) is what matters for the current
+implementation regardless. A parity test
+(`lib/data/dashboard-parity.test.ts`) confirmed the RPC-backed output matches
+the old JS-scan implementation, with two intentional, documented exceptions:
+industry and country breakdown labels/grouping now use the canonical
+`industry_id`/`countryLabel()` already used by `company_filter_options`,
+fixing two pre-existing normalization bugs in the old per-row JS aggregation
+(e.g. `;`- vs `,`-delimited industry variants were previously counted as
+separate buckets).
+
 ---
 
 ## F5 — `getDashboard` cache has no stable key (cold scan on nearly every dev nav)
