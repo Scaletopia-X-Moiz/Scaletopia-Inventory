@@ -10,6 +10,7 @@ import {
 import { normalizeCountry } from "@/lib/data/country";
 import { normalizeIndustry } from "@/lib/data/industry";
 import { normalizeSourceTokens } from "@/lib/data/source";
+import { nichesFromTags } from "@/lib/data/niche";
 
 export interface PushOptions {
   records: Record<string, unknown>[];
@@ -169,18 +170,44 @@ async function fetchExistingCompanies(
   return existingKeys;
 }
 
+/** A company row's fields needed to link an imported person to their
+ * employer and to populate the person's canonical columns (docs/adr/0001-...
+ * and lib/data/people-canonical-columns.sql) from the linked company's own
+ * already-canonical `industry_id`/`employee_count`/`linkedin_url`/`niche`. */
+export interface PersonCompanyRow {
+  id: string;
+  client: string | null;
+  niche: string | null;
+  industry_id: string | null;
+  employee_count: number | null;
+  linkedin_url: string | null;
+}
+
 /**
- * Map company domain -> companies.id, used to link imported people records
- * to their employer via the real `people.company_id` foreign key (the
+ * Map company domain -> full company row, used to link imported people
+ * records to their employer via the real `people.company_id` foreign key (the
  * relation the rest of the app — company detail people-counts, the people
- * drawer — actually reads). Without this, imported people only ever get a
- * loose `domain`/`company_name` text copy with no queryable relation.
+ * drawer — actually reads) and to carry the company's canonical fields onto
+ * the person row. Without this, imported people only ever get a loose
+ * `domain`/`company_name` text copy with no queryable relation.
  */
-async function fetchCompanyIdByDomain(): Promise<Map<string, string>> {
-  const rows = await fetchAllRows("companies", "id,domain");
-  const map = new Map<string, string>();
+async function fetchCompanyIdByDomain(): Promise<Map<string, PersonCompanyRow>> {
+  const rows = await fetchAllRows(
+    "companies",
+    "id,domain,client,niche,industry_id,employee_count,linkedin_url"
+  );
+  const map = new Map<string, PersonCompanyRow>();
   for (const row of rows) {
-    if (row.domain && row.id) map.set(row.domain as string, row.id as string);
+    if (row.domain && row.id) {
+      map.set(row.domain as string, {
+        id: row.id as string,
+        client: (row.client as string | null) ?? null,
+        niche: (row.niche as string | null) ?? null,
+        industry_id: (row.industry_id as string | null) ?? null,
+        employee_count: (row.employee_count as number | null) ?? null,
+        linkedin_url: (row.linkedin_url as string | null) ?? null,
+      });
+    }
   }
   return map;
 }
@@ -257,6 +284,8 @@ async function bulkInsert(
   targetTable: "companies" | "people",
   sourceKey: string,
   tags: [string, string, string],
+  companyById: Map<string, PersonCompanyRow>,
+  knownClients: Set<string>,
   onProgress?: (done: number, total: number) => void
 ): Promise<{ inserted: number; failed: Record<string, unknown>[] }> {
   let inserted = 0;
@@ -264,15 +293,33 @@ async function bulkInsert(
   const now = new Date().toISOString();
   const total = records.length;
 
-  // Canonical columns (docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md)
-  // are computed here so a fresh insert never needs a separate backfill pass.
-  // People rows have no country/industry/source columns to normalize.
+  // Canonical columns (docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md,
+  // extended to people by docs/adr/0001-.../lib/data/people-canonical-columns.sql) are
+  // computed here so a fresh insert never needs a separate backfill pass.
   const canonicalColumnsFor = (r: Record<string, unknown>): Record<string, unknown> => {
-    if (targetTable !== "companies") return {};
+    if (targetTable === "companies") {
+      return {
+        country_id: normalizeCountry(r.country as string | null | undefined)?.id ?? null,
+        industry_id: normalizeIndustry(r.industry as string | null | undefined)?.id ?? null,
+        source_tokens: normalizeSourceTokens(sourceKey),
+      };
+    }
+
+    // people: country_id/source_tokens are normalized from the record's own
+    // raw fields. industry_id/employee_count/company_linkedin_url mirror the
+    // linked company's own already-canonical columns (not re-normalized —
+    // copied directly). niche_tokens prefers the company's niche and only
+    // falls back to parsing the person's own tags when the company has none.
+    const company = r.company_id ? companyById.get(r.company_id as string) : undefined;
     return {
       country_id: normalizeCountry(r.country as string | null | undefined)?.id ?? null,
-      industry_id: normalizeIndustry(r.industry as string | null | undefined)?.id ?? null,
       source_tokens: normalizeSourceTokens(sourceKey),
+      industry_id: company?.industry_id ?? null,
+      employee_count: company?.employee_count ?? null,
+      company_linkedin_url: company?.linkedin_url ?? null,
+      niche_tokens: company?.niche
+        ? [company.niche]
+        : nichesFromTags(r.tags as string[] | undefined, knownClients),
     };
   };
 
@@ -306,6 +353,8 @@ async function bulkUpdate(
   targetTable: "companies" | "people",
   sourceKey: string,
   tags: [string, string, string],
+  companyById: Map<string, PersonCompanyRow>,
+  knownClients: Set<string>,
   onProgress?: (done: number, total: number) => void
 ): Promise<{ updated: number; failed: Record<string, unknown>[] }> {
   let updated = 0;
@@ -425,6 +474,27 @@ async function bulkUpdate(
       }
     }
   } else {
+    // Canonical columns (docs/adr/0001-..., lib/data/people-canonical-columns.sql).
+    // Mirrors the insert-path logic in bulkInsert's canonicalColumnsFor: the
+    // company-derived fields (industry_id/employee_count/company_linkedin_url/
+    // niche_tokens) are only included when this record resolved a company, so
+    // omitting them lets the RPC's COALESCE / "key present" check preserve
+    // whatever the row already had. country_id is deliberately never touched
+    // here — import_bulk_update_people's contract leaves it alone because the
+    // update path doesn't rewrite people's raw `country`.
+    const companyEnrichmentFor = (r: Record<string, unknown>): Record<string, unknown> => {
+      if (!r.company_id) return {};
+      const company = companyById.get(r.company_id as string);
+      return {
+        industry_id: company?.industry_id ?? null,
+        employee_count: company?.employee_count ?? null,
+        company_linkedin_url: company?.linkedin_url ?? null,
+        niche_tokens: company?.niche
+          ? [company.niche]
+          : nichesFromTags(r.tags as string[] | undefined, knownClients),
+      };
+    };
+
     const updatePayload = records.map((r) => {
       const payload: Record<string, unknown> = {
         linkedin_url: r.linkedin_url ?? null,
@@ -432,7 +502,9 @@ async function bulkUpdate(
         company_id: r.company_id ?? null,
         tags,
         source: sourceKey,
+        new_source_tokens: normalizeSourceTokens(sourceKey),
         last_updated: now,
+        ...companyEnrichmentFor(r),
       };
       const cd = r.custom_data;
       if (cd && typeof cd === "object" && !Array.isArray(cd)) payload.custom_data = cd;
@@ -462,6 +534,14 @@ async function bulkUpdate(
               // Only overwrite company_id when we actually resolved one for
               // this row; a lookup miss shouldn't unlink an existing match.
               ...(rec.company_id ? { company_id: rec.company_id } : {}),
+              // Rare error-recovery path (the bulk RPC above already failed):
+              // best-effort mirror of the RPC's canonical-column writes.
+              // source_tokens is overwritten with just this record's own
+              // token(s) rather than unioned with whatever was already
+              // there, unlike the RPC path — acceptable for a fallback that
+              // only runs once the primary path has errored.
+              source_tokens: normalizeSourceTokens(sourceKey),
+              ...companyEnrichmentFor(rec),
             });
 
             // BUG A: mirror the SQL RPC's deterministic precedence — prefer
@@ -611,11 +691,22 @@ export async function pushRecords(
         ? await fetchExistingCompanies(deduped)
         : await fetchExistingPeople(deduped);
 
+    // Populated only for targetTable === "people"; passed through to bulkInsert
+    // and bulkUpdate so they can derive the person canonical columns from the
+    // linked company's own already-canonical fields without a second full
+    // companies-table fetch.
+    const companyById = new Map<string, PersonCompanyRow>();
+    const knownClients = new Set<string>();
+
     if (targetTable === "people") {
-      const companyIdByDomain = await fetchCompanyIdByDomain();
+      const companyByDomain = await fetchCompanyIdByDomain();
+      for (const company of companyByDomain.values()) {
+        companyById.set(company.id, company);
+        if (company.client) knownClients.add(company.client.trim().toLowerCase());
+      }
       for (const rec of deduped) {
         const domain = typeof rec.domain === "string" ? rec.domain : null;
-        rec.company_id = domain ? companyIdByDomain.get(domain) ?? null : null;
+        rec.company_id = domain ? companyByDomain.get(domain)?.id ?? null : null;
       }
     }
 
@@ -639,6 +730,8 @@ export async function pushRecords(
       targetTable,
       sourceKey,
       tags,
+      companyById,
+      knownClients,
       (done, total) => onProgress({ phase: "inserting", done, total })
     );
     inserted = ins;
@@ -651,6 +744,8 @@ export async function pushRecords(
       targetTable,
       sourceKey,
       tags,
+      companyById,
+      knownClients,
       (done, total) => onProgress({ phase: "updating", done, total })
     );
     updated = upd;

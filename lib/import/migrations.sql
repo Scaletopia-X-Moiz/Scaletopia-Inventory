@@ -68,6 +68,48 @@ ALTER TABLE companies ADD COLUMN IF NOT EXISTS email_status text;
 ALTER TABLE people ADD COLUMN IF NOT EXISTS email_verified_at timestamptz;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS email_verified_at timestamptz;
 
+-- SQL port of lib/data/niche.ts's nichesFromTags, needed only by the people-
+-- propagation step inside import_bulk_update_companies below: that RPC has no
+-- access to TypeScript, so the tag-parsing fallback (used when a company has
+-- no niche of its own) is duplicated here. Mirrors the TS function exactly:
+-- a keyed `niche:value` tag wins outright; otherwise dates, known prefixes,
+-- and known client names are stripped and whatever remains is the niche set.
+-- If lib/data/niche.ts's nichesFromTags ever changes, this must change too.
+CREATE OR REPLACE FUNCTION niche_tokens_from_tags(p_tags text[], p_known_clients text[])
+RETURNS text[] LANGUAGE sql STABLE AS $$
+  -- WITH ORDINALITY + GROUP BY MIN(ord) dedupes while preserving each value's
+  -- FIRST occurrence order, matching `Array.from(new Set(...))` in TS exactly
+  -- (plain `SELECT DISTINCT` does not preserve input order in Postgres).
+  WITH keyed AS (
+    SELECT trim(substring(t from position(':' in t) + 1)) AS niche, min(ord) AS first_ord
+    FROM unnest(p_tags) WITH ORDINALITY AS u(t, ord)
+    WHERE lower(t) LIKE 'niche:%'
+    GROUP BY 1
+  ),
+  keyed_filtered AS (
+    SELECT niche, first_ord FROM keyed WHERE niche <> ''
+  )
+  SELECT
+    CASE
+      WHEN (SELECT count(*) FROM keyed_filtered) > 0
+        THEN ARRAY(SELECT niche FROM keyed_filtered ORDER BY first_ord)
+      ELSE ARRAY(
+        SELECT t FROM (
+          SELECT t, min(ord) AS first_ord
+          FROM unnest(p_tags) WITH ORDINALITY AS u(t, ord)
+          WHERE trim(t) !~ '^\d{4}-\d{2}-\d{2}$'
+            AND NOT (
+              lower(trim(t)) LIKE 'campaign:%' OR lower(trim(t)) LIKE 'geo:%' OR
+              lower(trim(t)) LIKE 'imported:%' OR lower(trim(t)) LIKE 'source:%'
+            )
+            AND NOT (lower(trim(t)) = ANY(COALESCE(p_known_clients, '{}'::text[])))
+          GROUP BY t
+        ) dedup
+        ORDER BY first_ord
+      )
+    END
+$$;
+
 -- RPC: bulk company updates (appends source, overwrites tags, merges enrichment fields)
 -- Enrichment fields use COALESCE so only non-null incoming values overwrite existing data.
 -- custom_data is merged (||) so new keys are added without wiping existing provider data.
@@ -76,11 +118,27 @@ ALTER TABLE companies ADD COLUMN IF NOT EXISTS email_verified_at timestamptz;
 -- lib/data/canonical-columns.sql has added country_id/industry_id/
 -- source_tokens to companies — this CREATE OR REPLACE now also maintains
 -- them; see docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md).
+--
+-- PEOPLE PROPAGATION (must be re-run again after lib/data/people-canonical-columns.sql
+-- has added industry_id/employee_count/company_linkedin_url/niche_tokens to
+-- people — ticket "Company updates propagate canonical fields to linked
+-- people"). Every UPDATE ... companies branch below is immediately followed by
+-- a bulk, indexed `UPDATE people ... WHERE company_id = ...` so a company
+-- enrichment that lands after a person's own last import doesn't leave that
+-- person's copies silently stale. Only industry_id/employee_count/
+-- company_linkedin_url/niche_tokens are pushed — country_id/source_tokens on
+-- people come from the person's OWN country/source, not the company's, so
+-- they're left untouched here. niche_tokens follows the same precedence as
+-- push.ts: the company's own niche wins when set, otherwise fall back to each
+-- linked person's existing tag-parsed niche_tokens (already computed at their
+-- own last import/backfill) rather than recomputing from tags here, since this
+-- RPC has no access to lib/data/niche.ts's nichesFromTags.
 CREATE OR REPLACE FUNCTION import_bulk_update_companies(
   updates jsonb
 ) RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE
   rec jsonb;
+  updated_company_id uuid;
 BEGIN
   FOR rec IN SELECT * FROM jsonb_array_elements(updates) LOOP
     IF (rec->>'domain') IS NOT NULL THEN
@@ -151,7 +209,24 @@ BEGIN
             )
           ELSE custom_data
         END
-      WHERE domain = rec->>'domain';
+      WHERE domain = rec->>'domain'
+      RETURNING id INTO updated_company_id;
+
+      IF updated_company_id IS NOT NULL THEN
+        UPDATE people p SET
+          industry_id = c.industry_id,
+          employee_count = c.employee_count,
+          company_linkedin_url = c.linkedin_url,
+          niche_tokens = CASE
+            WHEN c.niche IS NOT NULL AND c.niche <> '' THEN ARRAY[c.niche]
+            ELSE niche_tokens_from_tags(p.tags, (
+              SELECT array_agg(DISTINCT lower(trim(cl.client)))
+              FROM companies cl WHERE cl.client IS NOT NULL AND trim(cl.client) <> ''
+            ))
+          END
+        FROM companies c
+        WHERE p.company_id = c.id AND c.id = updated_company_id;
+      END IF;
     ELSIF (rec->>'linkedin_url') IS NOT NULL THEN
       UPDATE companies SET
         tags = ARRAY(SELECT jsonb_array_elements_text(rec->'tags')),
@@ -219,7 +294,24 @@ BEGIN
             )
           ELSE custom_data
         END
-      WHERE linkedin_url = rec->>'linkedin_url' AND domain IS NULL;
+      WHERE linkedin_url = rec->>'linkedin_url' AND domain IS NULL
+      RETURNING id INTO updated_company_id;
+
+      IF updated_company_id IS NOT NULL THEN
+        UPDATE people p SET
+          industry_id = c.industry_id,
+          employee_count = c.employee_count,
+          company_linkedin_url = c.linkedin_url,
+          niche_tokens = CASE
+            WHEN c.niche IS NOT NULL AND c.niche <> '' THEN ARRAY[c.niche]
+            ELSE niche_tokens_from_tags(p.tags, (
+              SELECT array_agg(DISTINCT lower(trim(cl.client)))
+              FROM companies cl WHERE cl.client IS NOT NULL AND trim(cl.client) <> ''
+            ))
+          END
+        FROM companies c
+        WHERE p.company_id = c.id AND c.id = updated_company_id;
+      END IF;
     END IF;
   END LOOP;
 END;
@@ -253,6 +345,19 @@ ON CONFLICT (source_key) DO NOTHING;
 -- their rows clobbered from one import record. The match is now deterministic
 -- and single-row-intended: linkedin_url is the identity, and email is only used
 -- as a fallback when the record has no linkedin (see CASE in the WHERE below).
+--
+-- CANONICAL COLUMNS (must be re-run after lib/data/people-canonical-columns.sql
+-- has added industry_id/employee_count/company_linkedin_url/niche_tokens to
+-- people — ticket "Import: people writes populate the new canonical
+-- columns"). country_id is deliberately NOT touched here: the update path
+-- never rewrites a person's own raw `country`, so re-deriving country_id here
+-- would desync it from that unchanged raw value — it's only ever (re)computed
+-- on insert/backfill. source_tokens follows the same append-not-overwrite
+-- semantics as `source` above. industry_id/employee_count/
+-- company_linkedin_url/niche_tokens are COALESCEd against push.ts's payload,
+-- which only includes them when this update actually resolved a company_id
+-- (lib/import/push.ts) — a lookup miss must leave the prior linked company's
+-- values in place, same as company_id itself.
 CREATE OR REPLACE FUNCTION import_bulk_update_people(
   updates jsonb
 ) RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$
@@ -271,6 +376,24 @@ BEGIN
           WHEN source IS NULL THEN rec->>'source'
           WHEN source LIKE '%' || (rec->>'source') || '%' THEN source
           ELSE source || ',' || (rec->>'source')
+        END,
+        source_tokens = ARRAY(
+          SELECT DISTINCT unnest(
+            COALESCE(source_tokens, '{}'::text[]) ||
+            COALESCE(ARRAY(SELECT jsonb_array_elements_text(rec->'new_source_tokens')), '{}'::text[])
+          )
+        ),
+        industry_id = COALESCE(rec->>'industry_id', industry_id),
+        employee_count = COALESCE(
+          CASE WHEN rec->>'employee_count' ~ '^[0-9]+$'
+            THEN (rec->>'employee_count')::int ELSE NULL END,
+          employee_count
+        ),
+        company_linkedin_url = COALESCE(rec->>'company_linkedin_url', company_linkedin_url),
+        niche_tokens = CASE
+          WHEN rec->'niche_tokens' IS NOT NULL
+            THEN ARRAY(SELECT jsonb_array_elements_text(rec->'niche_tokens'))
+          ELSE niche_tokens
         END,
         last_updated = (rec->>'last_updated')::timestamptz,
         custom_data = CASE

@@ -14,6 +14,10 @@ function testLinkedin(slug: string) {
   return `https://www.linkedin.com/company/${TEST_PREFIX}${slug}/`;
 }
 
+function testPersonLinkedin(slug: string) {
+  return `https://www.linkedin.com/in/${TEST_PREFIX}${slug}/`;
+}
+
 const SOURCE_KEY = `${TEST_PREFIX}source`;
 const TAGS: [string, string, string] = ["test-client", "test-niche", "2026-01-01"];
 
@@ -29,6 +33,13 @@ async function cleanupCompanies() {
     .like("linkedin_url", `%${TEST_PREFIX}%`);
 }
 
+async function cleanupPeople() {
+  await supabaseAdmin
+    .from("people")
+    .delete()
+    .like("linkedin_url", `%${TEST_PREFIX}%`);
+}
+
 async function cleanupHistory() {
   await supabaseAdmin
     .from("import_history")
@@ -38,11 +49,13 @@ async function cleanupHistory() {
 
 beforeAll(async () => {
   await cleanupCompanies();
+  await cleanupPeople();
   await cleanupHistory();
 });
 
 afterAll(async () => {
   await cleanupCompanies();
+  await cleanupPeople();
   await cleanupHistory();
 });
 
@@ -197,6 +210,238 @@ describe("pushRecords — canonical columns", () => {
       expect.arrayContaining([...normalizeSourceTokens(SOURCE_KEY), ...normalizeSourceTokens(otherSource)])
     );
     expect(data?.source_tokens).toHaveLength(2);
+  });
+});
+
+describe("pushRecords — people canonical columns", () => {
+  // Guard test for ticket "Import: people writes populate the new canonical
+  // columns": a fresh people import must always leave country_id/source_tokens/
+  // industry_id/employee_count/company_linkedin_url/niche_tokens in sync with
+  // the person's own raw data and their linked company's canonical columns.
+  it("sets all 6 columns on insert, preferring the linked company's niche", async () => {
+    const companyDomain = testDomain("people-canonical-co");
+    await pushRecords(
+      {
+        records: [
+          {
+            domain: companyDomain,
+            company_name: "People Canonical Co",
+            niche: "fintech",
+            industry: "Technology; Information and Internet",
+            employee_count: 42,
+            linkedin_url: testLinkedin("people-canonical-co"),
+          },
+        ],
+        targetTable: "companies",
+        sourceKey: SOURCE_KEY,
+        tags: TAGS,
+      },
+      noopProgress
+    );
+
+    const linkedin = testPersonLinkedin("canonical-insert");
+    await pushRecords(
+      {
+        records: [
+          {
+            linkedin_url: linkedin,
+            full_name: "Canonical Insert Person",
+            domain: companyDomain,
+            country: "united states",
+            tags: ["some-other-tag"],
+          },
+        ],
+        targetTable: "people",
+        sourceKey: SOURCE_KEY,
+        tags: TAGS,
+      },
+      noopProgress
+    );
+
+    const { data } = await supabaseAdmin
+      .from("people")
+      .select("country_id,source_tokens,industry_id,employee_count,company_linkedin_url,niche_tokens,company_id")
+      .eq("linkedin_url", linkedin)
+      .single();
+
+    expect(data?.company_id).toBeTruthy();
+    expect(data?.country_id).toBe("US");
+    expect(data?.source_tokens).toEqual(normalizeSourceTokens(SOURCE_KEY));
+    expect(data?.industry_id).toBe("technology, information and internet");
+    expect(data?.employee_count).toBe(42);
+    expect(data?.company_linkedin_url).toBe(testLinkedin("people-canonical-co"));
+    // Company has its own niche set, so it wins over the tag-parsing fallback.
+    expect(data?.niche_tokens).toEqual(["fintech"]);
+  });
+
+  it("falls back to tag-parsed niche_tokens when the linked company has no niche", async () => {
+    const linkedin = testPersonLinkedin("canonical-niche-fallback");
+    await pushRecords(
+      {
+        records: [
+          {
+            linkedin_url: linkedin,
+            full_name: "Niche Fallback Person",
+            tags: ["Acme Widgets", "2026-01-01", "campaign:spring", "roofing"],
+          },
+        ],
+        targetTable: "people",
+        sourceKey: SOURCE_KEY,
+        tags: TAGS,
+      },
+      noopProgress
+    );
+
+    const { data } = await supabaseAdmin
+      .from("people")
+      .select("niche_tokens,company_id")
+      .eq("linkedin_url", linkedin)
+      .single();
+
+    expect(data?.company_id).toBeNull();
+    expect(data?.niche_tokens).toEqual(["Acme Widgets", "roofing"]);
+  });
+
+  it("recomputes source_tokens (union) and company-derived fields on update", async () => {
+    const companyDomain = testDomain("people-canonical-update-co");
+    await pushRecords(
+      {
+        records: [
+          {
+            domain: companyDomain,
+            company_name: "People Canonical Update Co",
+            employee_count: 7,
+            linkedin_url: testLinkedin("people-canonical-update-co"),
+          },
+        ],
+        targetTable: "companies",
+        sourceKey: SOURCE_KEY,
+        tags: TAGS,
+      },
+      noopProgress
+    );
+
+    const linkedin = testPersonLinkedin("canonical-update");
+    await pushRecords(
+      { records: [{ linkedin_url: linkedin, full_name: "Canonical Update Person" }], targetTable: "people", sourceKey: SOURCE_KEY, tags: TAGS },
+      noopProgress
+    );
+
+    const otherSource = `${SOURCE_KEY}-other`;
+    await pushRecords(
+      {
+        records: [{ linkedin_url: linkedin, full_name: "Canonical Update Person", domain: companyDomain }],
+        targetTable: "people",
+        sourceKey: otherSource,
+        tags: TAGS,
+      },
+      noopProgress
+    );
+
+    const { data } = await supabaseAdmin
+      .from("people")
+      .select("source_tokens,employee_count,company_linkedin_url")
+      .eq("linkedin_url", linkedin)
+      .single();
+
+    // source_tokens is a union across both pushes, not an overwrite.
+    expect(data?.source_tokens).toEqual(
+      expect.arrayContaining([...normalizeSourceTokens(SOURCE_KEY), ...normalizeSourceTokens(otherSource)])
+    );
+    expect(data?.employee_count).toBe(7);
+    expect(data?.company_linkedin_url).toBe(testLinkedin("people-canonical-update-co"));
+  });
+});
+
+describe("import_bulk_update_companies — propagates canonical fields to linked people", () => {
+  // Guard test for ticket "Company updates propagate canonical fields to
+  // linked people": a company enrichment (industry/employee_count/linkedin_url/
+  // niche) must push through to every person already linked via
+  // people.company_id, without those people being re-imported themselves —
+  // and must NOT touch a person linked to a different company.
+  it("updates linked people's columns and leaves an unrelated person untouched", async () => {
+    const domain = testDomain("propagation-co");
+    const otherDomain = testDomain("propagation-other-co");
+
+    await pushRecords(
+      {
+        records: [
+          { domain, company_name: "Propagation Co", employee_count: 5 },
+          { domain: otherDomain, company_name: "Propagation Other Co", employee_count: 5, niche: "unrelated-niche" },
+        ],
+        targetTable: "companies",
+        sourceKey: SOURCE_KEY,
+        tags: TAGS,
+      },
+      noopProgress
+    );
+
+    const linkedin = testPersonLinkedin("propagation-linked");
+    const otherLinkedin = testPersonLinkedin("propagation-unrelated");
+    await pushRecords(
+      {
+        records: [
+          { linkedin_url: linkedin, full_name: "Propagation Linked Person", domain },
+          { linkedin_url: otherLinkedin, full_name: "Propagation Unrelated Person", domain: otherDomain },
+        ],
+        targetTable: "people",
+        sourceKey: SOURCE_KEY,
+        tags: TAGS,
+      },
+      noopProgress
+    );
+
+    const { data: beforeOther } = await supabaseAdmin
+      .from("people")
+      .select("niche_tokens")
+      .eq("linkedin_url", otherLinkedin)
+      .single();
+    expect(beforeOther?.niche_tokens).toEqual(["unrelated-niche"]);
+
+    // `niche` isn't one of import's updatable company fields (only set at
+    // insert time) — set it directly here to simulate however else a
+    // company's niche gets edited post-import, so the propagation step below
+    // is exercised against a real empty-to-set niche transition.
+    await supabaseAdmin.from("companies").update({ niche: "enriched-niche" }).eq("domain", domain);
+
+    // Enrich the company WITHOUT re-importing the linked person.
+    await pushRecords(
+      {
+        records: [
+          {
+            domain,
+            company_name: "Propagation Co",
+            employee_count: 250,
+            industry: "SaaS",
+            linkedin_url: testLinkedin("propagation-co-enriched"),
+          },
+        ],
+        targetTable: "companies",
+        sourceKey: SOURCE_KEY,
+        tags: TAGS,
+      },
+      noopProgress
+    );
+
+    const { data: linked } = await supabaseAdmin
+      .from("people")
+      .select("industry_id,employee_count,company_linkedin_url,niche_tokens")
+      .eq("linkedin_url", linkedin)
+      .single();
+
+    expect(linked?.industry_id).toBe("saas");
+    expect(linked?.employee_count).toBe(250);
+    expect(linked?.company_linkedin_url).toBe(testLinkedin("propagation-co-enriched"));
+    expect(linked?.niche_tokens).toEqual(["enriched-niche"]);
+
+    // Unrelated person (different company) must be untouched.
+    const { data: afterOther } = await supabaseAdmin
+      .from("people")
+      .select("employee_count,niche_tokens")
+      .eq("linkedin_url", otherLinkedin)
+      .single();
+    expect(afterOther?.employee_count).toBe(5);
+    expect(afterOther?.niche_tokens).toEqual(["unrelated-niche"]);
   });
 });
 

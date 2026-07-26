@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "backfill:canonical-columns": "tsx lib/import/backfill-canonical-columns.ts"
+    "backfill:canonical-columns": "tsx lib/import/backfill-canonical-columns.ts",
+    "backfill:canonical-columns-people": "tsx lib/import/backfill-canonical-columns-people.ts"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.3.0",

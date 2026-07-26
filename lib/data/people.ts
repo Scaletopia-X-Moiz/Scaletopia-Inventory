@@ -1,15 +1,13 @@
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { fetchAllRows } from "@/lib/data/fetch-all-rows";
-import { withTtlCache, invalidateTtlCache } from "@/lib/data/cache-with-ttl";
 import { normalizeSourceTokens, sourceLabel } from "@/lib/data/source";
-import { normalizeCountry } from "@/lib/data/country";
-import { normalizeIndustry } from "@/lib/data/industry";
+import { countryLabel } from "@/lib/data/country";
+import { industryLabel } from "@/lib/data/industry";
 import { EMPLOYEE_BUCKETS, employeeBucketOf } from "@/lib/data/employee-size";
 import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
-import { nichesFromTags } from "@/lib/data/niche";
 import { sortByLastUpdatedDesc } from "@/lib/data/sort";
 import type { ClayPushRecord } from "@/lib/clay/types";
-import { matchesIncludeExclude, type IncludeExclude } from "@/lib/data/include-exclude";
+import type { IncludeExclude } from "@/lib/data/include-exclude";
 
 export type SingleSelectFilter = "any" | "not_empty" | "empty";
 
@@ -96,220 +94,136 @@ interface RawPersonRow {
   phone_status: string | null;
   phone_verified_at: string | null;
   company_name: string | null;
+  company_linkedin_url: string | null;
 }
 
 const LIST_COLUMNS =
-  "id,company_id,full_name,job_title,email,phone,linkedin_url,domain,city,state,country,source,tags,last_updated,email_status,email_verified_at,phone_type,phone_status,phone_verified_at,company_name";
+  "id,company_id,full_name,job_title,email,phone,linkedin_url,domain,city,state,country,source,tags,last_updated,email_status,email_verified_at,phone_type,phone_status,phone_verified_at,company_name,company_linkedin_url";
 
-interface LinkedCompanyJoinRow {
-  niche: string | null;
-  employee_count: number | null;
-  industry: string | null;
-  linkedin_url: string | null;
+function employeeBucketOrClause(bucketIds: string[]): string {
+  const buckets = EMPLOYEE_BUCKETS.filter((b) => bucketIds.includes(b.id));
+  return buckets
+    .map((b) =>
+      b.max === null
+        ? `employee_count.gte.${b.min}`
+        : `and(employee_count.gte.${b.min},employee_count.lte.${b.max})`
+    )
+    .join(",");
 }
 
-interface CompanyJoinData {
-  byId: Map<string, LinkedCompanyJoinRow>;
-  knownClients: Set<string>;
+function employeeBucketRanges(bucketIds: string[]): { min_v: number; max_v: number | null }[] {
+  return EMPLOYEE_BUCKETS.filter((b) => bucketIds.includes(b.id)).map((b) => ({
+    min_v: b.min,
+    max_v: b.max,
+  }));
 }
 
-/** The companies table is ~87k rows; both getPeople and getPersonFilterOptions
- * need this join per request, and it's identical across requests until the
- * next sync, so it's cached the same way as the companies filter-option rows
- * (see companies.ts) rather than re-fetched from Supabase every time. The
- * stable cacheKey lets the store persist across dev recompiles. TTL matches
- * the page's own `revalidate = 3600`. */
-const fetchCompanyJoinRows = withTtlCache(
-  () =>
-    fetchAllRows<{
-      id: string;
-      niche: string | null;
-      employee_count: number | null;
-      industry: string | null;
-      client: string | null;
-      linkedin_url: string | null;
-    }>("companies", "id,niche,employee_count,industry,client,linkedin_url"),
-  3_600_000,
-  "people:companyJoin"
-);
-
-/** Companies have native niche/employee_count/industry columns people lack on
- * their own row, so Employee Size, Industry, and (when the linked company's
- * niche is empty) Niche all need this join. `knownClients` — derived from
- * `client` rather than an external list — backs the tag-parsing niche
- * fallback in `niche.ts`. */
-async function loadCompanyJoinData(): Promise<CompanyJoinData> {
-  const rows = await fetchCompanyJoinRows();
-
-  const byId = new Map<string, LinkedCompanyJoinRow>();
-  const knownClients = new Set<string>();
-  for (const row of rows) {
-    byId.set(row.id, {
-      niche: row.niche,
-      employee_count: row.employee_count,
-      industry: row.industry,
-      linkedin_url: row.linkedin_url,
-    });
-    if (row.client) knownClients.add(row.client.trim().toLowerCase());
-  }
-  return { byId, knownClients };
+/** Applies an include/exclude filter to a scalar (single-valued) column, e.g.
+ * industry_id, country_id, email_status, phone_type. `.in`/`.notIn` both
+ * append a separate querystring filter on the same column, and PostgREST ANDs
+ * same-column filters together — exactly the "exclude wins, include must also
+ * match" semantics lib/data/include-exclude.ts's matchesIncludeExclude
+ * implements in-app. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyScalarIncludeExclude(query: any, column: string, filter: IncludeExclude | undefined): any {
+  if (!filter) return query;
+  let q = query;
+  if (filter.exclude.length) q = q.notIn(column, filter.exclude);
+  if (filter.include.length) q = q.in(column, filter.include);
+  return q;
 }
 
-function personNiches(
-  row: { tags: string[] | null },
-  company: LinkedCompanyJoinRow | undefined,
-  knownClients: ReadonlySet<string>
-): string[] {
-  if (company?.niche) return [company.niche];
-  return nichesFromTags(row.tags, knownClients);
+/** Applies an include/exclude filter to a multi-valued array column (
+ * source_tokens, niche_tokens). Include matches any overlap (`&&`); exclude
+ * rejects any overlap. Both hold our own canonical slugs with no
+ * delimiter/reserved characters, so the manual `{a,b}` literal is safe
+ * without PostgREST's quoting. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyArrayIncludeExclude(query: any, column: string, filter: IncludeExclude | undefined): any {
+  if (!filter) return query;
+  let q = query;
+  if (filter.exclude.length) q = q.not(column, "ov", `{${filter.exclude.join(",")}}`);
+  if (filter.include.length) q = q.overlaps(column, filter.include);
+  return q;
 }
 
-function jobTitleTerms(raw: string | undefined): string[] {
-  return (raw ?? "")
+/** Presence filter on a nullable text column: "not_empty" excludes both NULL
+ * and '' (matching the in-app `!row.field` truthy check this replaces),
+ * "empty" matches either. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyPresenceFilter(query: any, column: string, filter: SingleSelectFilter | undefined): any {
+  if (filter === "not_empty") return query.not(column, "is", null).neq(column, "");
+  if (filter === "empty") return query.or(`${column}.is.null,${column}.eq.`);
+  return query;
+}
+
+/** jobTitle matches any of several comma-separated terms, case-insensitively —
+ * pushed to Postgres as an OR of ILIKE clauses. Not one of the six facet
+ * dimensions (companies has no equivalent and it's cheap as-is), so it's just
+ * folded into the base WHERE like search/employee size. */
+function jobTitleOrClause(raw: string | undefined): string {
+  const terms = (raw ?? "")
     .split(",")
-    .map((t) => t.trim().toLowerCase())
+    .map((t) => t.trim())
     .filter(Boolean);
+  return terms.map((t) => `job_title.ilike.%${t.replace(/[%,]/g, "")}%`).join(",");
 }
 
-/** Only `search` maps cleanly onto a cheap, cacheable PostgREST query.
- * Everything else — including email_status/phone_type, which used to run as
- * DB-level `.in()` filters — is matched in-app instead. That's what lets
- * getPersonFilterOptions compute facet counts by excluding one filter at a
- * time (e.g. Source counts scoped to the active Industry filter, without the
- * Source filter itself collapsing every other source to zero). */
-type BaseFilters = Pick<PersonListFilters, "search">;
+/** Pushes every /people filter into Postgres: search (ILIKE), jobTitle (OR of
+ * ILIKE), employee size (range or bucket OR-clause, now a native column
+ * instead of a join through companies), and the canonical-column filters
+ * (niche, source, industry, country) plus email/phone presence and status —
+ * all cleanly pushable now that country_id/source_tokens/industry_id/
+ * employee_count/niche_tokens/company_linkedin_url are populated on people
+ * directly (see docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md
+ * and the people-side tickets #20-#25 that extend it). Mirrors
+ * applyCompanyFilters in lib/data/companies.ts. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyPersonFilters(query: any, filters: PersonListFilters): any {
+  let q = query;
 
-function toBaseFilters(filters: PersonListFilters): BaseFilters {
-  return { search: filters.search };
-}
-
-async function fetchBaseRowsUncached(filters: BaseFilters): Promise<RawPersonRow[]> {
   const search = filters.search?.trim();
+  if (search) {
+    const term = search.replace(/[%,]/g, "");
+    q = q.or(`full_name.ilike.%${term}%,email.ilike.%${term}%`);
+  }
 
-  return fetchAllRows<RawPersonRow>("people", LIST_COLUMNS, (query) => {
-    let q = query;
-    if (search) {
-      const term = search.replace(/[%,]/g, "");
-      q = q.or(`full_name.ilike.%${term}%,email.ilike.%${term}%`);
-    }
-    return q;
-  });
-}
+  const jobTitleClause = jobTitleOrClause(filters.jobTitle);
+  if (jobTitleClause) q = q.or(jobTitleClause);
 
-/** Re-fetching and re-filtering the whole people table from Supabase on every
- * request (this page is force-dynamic) is the dominant cost on /people, same
- * as companies.ts. Cached per unique search term — see the companies.ts
- * comment for why a TTL matching the page's `revalidate` window is safe for
- * this synced-in-batches dataset. The stable cacheKey persists the store
- * across dev recompiles. */
-const fetchBaseRows = withTtlCache(fetchBaseRowsUncached, 3_600_000, "people:base");
-
-/** Drops the cached table read so the next list request sees fresh data
- * immediately, instead of waiting out the hour-long TTL. Called after a
- * reverify writes email_status/email_verified_at directly via Supabase,
- * bypassing this cache — without it, that write stays invisible here until
- * the TTL expires (or the dev server restarts, which clears globalThis). */
-export function invalidatePeopleListCache(): void {
-  invalidateTtlCache("people:base");
-}
-
-function matchesEmailPresence(row: RawPersonRow, filters: PersonListFilters): boolean {
-  if (filters.email === "not_empty" && !row.email) return false;
-  if (filters.email === "empty" && row.email) return false;
-  return true;
-}
-
-function matchesPhonePresence(row: RawPersonRow, filters: PersonListFilters): boolean {
-  if (filters.phone === "not_empty" && !row.phone) return false;
-  if (filters.phone === "empty" && row.phone) return false;
-  return true;
-}
-
-function matchesJobTitle(row: RawPersonRow, filters: PersonListFilters): boolean {
-  const titleTerms = jobTitleTerms(filters.jobTitle);
-  if (!titleTerms.length) return true;
-  const title = row.job_title?.toLowerCase() ?? "";
-  return titleTerms.some((t) => title.includes(t));
-}
-
-function matchesCountry(row: RawPersonRow, filters: PersonListFilters): boolean {
-  const country = normalizeCountry(row.country);
-  return matchesIncludeExclude(country ? [country.id] : [], filters.country);
-}
-
-function matchesSource(row: RawPersonRow, filters: PersonListFilters): boolean {
-  return matchesIncludeExclude(normalizeSourceTokens(row.source), filters.source);
-}
-
-function matchesEmailStatus(row: RawPersonRow, filters: PersonListFilters): boolean {
-  return matchesIncludeExclude(row.email_status != null ? [row.email_status] : [], filters.emailStatus);
-}
-
-function matchesPhoneType(row: RawPersonRow, filters: PersonListFilters): boolean {
-  return matchesIncludeExclude(row.phone_type != null ? [row.phone_type] : [], filters.phoneType);
-}
-
-function matchesIndustry(
-  company: LinkedCompanyJoinRow | undefined,
-  filters: PersonListFilters
-): boolean {
-  const industry = normalizeIndustry(company?.industry);
-  return matchesIncludeExclude(industry ? [industry.id] : [], filters.industry);
-}
-
-function matchesEmployeeSize(
-  company: LinkedCompanyJoinRow | undefined,
-  filters: PersonListFilters
-): boolean {
   if (filters.employeeMin != null || filters.employeeMax != null) {
-    const count = company?.employee_count ?? null;
-    if (count == null) return false;
-    if (filters.employeeMin != null && count < filters.employeeMin) return false;
-    if (filters.employeeMax != null && count > filters.employeeMax) return false;
-    return true;
+    if (filters.employeeMin != null) q = q.gte("employee_count", filters.employeeMin);
+    if (filters.employeeMax != null) q = q.lte("employee_count", filters.employeeMax);
+  } else if (filters.employeeBucket?.length) {
+    const clause = employeeBucketOrClause(filters.employeeBucket);
+    if (clause) q = q.or(clause);
   }
-  if (filters.employeeBucket?.length) {
-    const bucket = employeeBucketOf(company?.employee_count);
-    return Boolean(bucket && filters.employeeBucket.includes(bucket.id));
-  }
-  return true;
+
+  q = applyArrayIncludeExclude(q, "niche_tokens", filters.niche);
+  q = applyArrayIncludeExclude(q, "source_tokens", filters.source);
+  q = applyScalarIncludeExclude(q, "industry_id", filters.industry);
+  q = applyScalarIncludeExclude(q, "country_id", filters.country);
+  q = applyPresenceFilter(q, "email", filters.email);
+  q = applyPresenceFilter(q, "phone", filters.phone);
+  q = applyScalarIncludeExclude(q, "email_status", filters.emailStatus);
+  q = applyScalarIncludeExclude(q, "phone_type", filters.phoneType);
+
+  return q;
 }
 
-function matchesNiche(
-  row: RawPersonRow,
-  company: LinkedCompanyJoinRow | undefined,
-  knownClients: ReadonlySet<string>,
-  filters: PersonListFilters
-): boolean {
-  const niches = personNiches(row, company, knownClients);
-  return matchesIncludeExclude(niches, filters.niche);
+async function fetchFilteredRows(filters: PersonListFilters): Promise<RawPersonRow[]> {
+  return fetchAllRows<RawPersonRow>("people", LIST_COLUMNS, (query) =>
+    applyPersonFilters(query, filters)
+  );
 }
 
-async function fetchFilteredRowsUncached(
-  filters: PersonListFilters,
-  companyData: CompanyJoinData
-): Promise<RawPersonRow[]> {
-  const rows = await fetchBaseRows(toBaseFilters(filters));
+/** No-op — kept so callers (reverify, reverify-phone) don't need touching.
+ * There is no app-level cache to invalidate now that filtering, faceting, and
+ * sorting all run in Postgres on every request (mirrors
+ * invalidateCompaniesListCache in lib/data/companies.ts). */
+export function invalidatePeopleListCache(): void {}
 
-  return rows.filter((row) => {
-    const company = row.company_id ? companyData.byId.get(row.company_id) : undefined;
-    return (
-      matchesEmailPresence(row, filters) &&
-      matchesPhonePresence(row, filters) &&
-      matchesJobTitle(row, filters) &&
-      matchesCountry(row, filters) &&
-      matchesSource(row, filters) &&
-      matchesEmailStatus(row, filters) &&
-      matchesPhoneType(row, filters) &&
-      matchesIndustry(company, filters) &&
-      matchesEmployeeSize(company, filters) &&
-      matchesNiche(row, company, companyData.knownClients, filters)
-    );
-  });
-}
-
-function toListRow(row: RawPersonRow, companyData: CompanyJoinData): PersonListRow {
-  const company = row.company_id ? companyData.byId.get(row.company_id) : undefined;
+function toListRow(row: RawPersonRow): PersonListRow {
   return {
     id: row.id,
     fullName: row.full_name,
@@ -325,7 +239,7 @@ function toListRow(row: RawPersonRow, companyData: CompanyJoinData): PersonListR
     companyId: row.company_id,
     companyName: row.company_name,
     domain: row.domain,
-    companyLinkedinUrl: company?.linkedin_url ?? null,
+    companyLinkedinUrl: row.company_linkedin_url,
     city: row.city,
     state: row.state,
     country: row.country,
@@ -334,18 +248,30 @@ function toListRow(row: RawPersonRow, companyData: CompanyJoinData): PersonListR
   };
 }
 
+/** The rendered /people list page: filter, sort, and paginate entirely in
+ * Postgres (see docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md,
+ * extended to people by tickets #20-#25). Deep pages degrade gradually as
+ * OFFSET discards preceding rows — same accepted trade-off as /companies. */
 export async function getPeople(
   filters: PersonListFilters,
   page = 1,
   pageSize = 50
 ): Promise<PersonListResult> {
-  const companyData = await loadCompanyJoinData();
-  const candidateRows = await fetchFilteredRowsUncached(filters, companyData);
-  const rows = sortByLastUpdatedDesc(candidateRows);
+  let query = supabaseAdmin.from("people").select(LIST_COLUMNS, { count: "exact" });
+  query = applyPersonFilters(query, filters);
+  query = query
+    .order("last_updated", { ascending: false, nullsFirst: false })
+    .order("id", { ascending: true });
+
   const start = (page - 1) * pageSize;
+  const { data, error, count } = await query.range(start, start + pageSize - 1);
+  if (error) throw error;
+
+  const rows = (data ?? []) as unknown as RawPersonRow[];
+
   return {
-    rows: rows.slice(start, start + pageSize).map((row) => toListRow(row, companyData)),
-    total: rows.length,
+    rows: rows.map(toListRow),
+    total: count ?? 0,
     page,
     pageSize,
   };
@@ -354,9 +280,7 @@ export async function getPeople(
 /** Same query + filtering as getPeople, with no pagination — the export
  * function must run through the identical filtered query, not a separate path. */
 export async function getAllFilteredPeople(filters: PersonListFilters): Promise<PersonListRow[]> {
-  const companyData = await loadCompanyJoinData();
-  const candidateRows = await fetchFilteredRowsUncached(filters, companyData);
-  return sortByLastUpdatedDesc(candidateRows).map((row) => toListRow(row, companyData));
+  return sortByLastUpdatedDesc(await fetchFilteredRows(filters)).map(toListRow);
 }
 
 /** The raw person row plus the enrichment blob and identity columns the list query drops. */
@@ -431,15 +355,12 @@ async function fetchPeopleByIds(ids: string[]): Promise<Map<string, FullPersonRo
 }
 
 /** Full-record fetch for CSV export and the Clay push. Resolves the matched set
- * cheaply through the cached list query, then pulls every column (including
- * custom_data) only for those ids — so it never fetches `*` for the whole
- * people table, which was slow enough to stall a push before the first row went
- * out. Returned already sorted, in the same order as the list/export. */
-async function fetchFullFilteredPeople(
-  filters: PersonListFilters,
-  companyData: CompanyJoinData
-): Promise<FullPersonRow[]> {
-  const matched = sortByLastUpdatedDesc(await fetchFilteredRowsUncached(filters, companyData));
+ * cheaply through the filtered Postgres query, then pulls every column
+ * (including custom_data) only for those ids — so it never fetches `*` for the
+ * whole people table, which was slow enough to stall a push before the first
+ * row went out. Returned already sorted, in the same order as the list/export. */
+async function fetchFullFilteredPeople(filters: PersonListFilters): Promise<FullPersonRow[]> {
+  const matched = sortByLastUpdatedDesc(await fetchFilteredRows(filters));
   const ids = matched.map((row) => row.id);
   const byId = await fetchPeopleByIds(ids);
   return ids
@@ -447,8 +368,7 @@ async function fetchFullFilteredPeople(
     .filter((row): row is FullPersonRow => row != null);
 }
 
-function toExportRow(row: FullPersonRow, companyData: CompanyJoinData): PersonExportRow {
-  const company = row.company_id ? companyData.byId.get(row.company_id) : undefined;
+function toExportRow(row: FullPersonRow): PersonExportRow {
   return {
     firstName: row.first_name,
     lastName: row.last_name,
@@ -465,7 +385,7 @@ function toExportRow(row: FullPersonRow, companyData: CompanyJoinData): PersonEx
     linkedinUsername: row.linkedin_username,
     companyName: row.company_name,
     domain: row.domain,
-    companyLinkedinUrl: company?.linkedin_url ?? null,
+    companyLinkedinUrl: row.company_linkedin_url,
     city: row.city,
     state: row.state,
     country: row.country,
@@ -482,18 +402,17 @@ function toExportRow(row: FullPersonRow, companyData: CompanyJoinData): PersonEx
 export async function getAllFilteredPeopleForExport(
   filters: PersonListFilters
 ): Promise<PersonExportRow[]> {
-  const companyData = await loadCompanyJoinData();
-  const rows = await fetchFullFilteredPeople(filters, companyData);
-  return rows.map((row) => toExportRow(row, companyData));
+  const rows = await fetchFullFilteredPeople(filters);
+  return rows.map(toExportRow);
 }
 
 /** The full Clay webhook payload for one person: every native column (including
- * the joined company LinkedIn URL) plus each enrichment (custom_data) key
- * flattened to the top level. Enrichment is spread first so native columns stay
- * authoritative on any key collision. Keys are snake_case for clean Clay column
- * mapping; matches the CSV export's field set and custom_data filtering. */
-function toClayPayload(row: FullPersonRow, companyData: CompanyJoinData): Record<string, unknown> {
-  const company = row.company_id ? companyData.byId.get(row.company_id) : undefined;
+ * the person's own denormalized company LinkedIn URL) plus each enrichment
+ * (custom_data) key flattened to the top level. Enrichment is spread first so
+ * native columns stay authoritative on any key collision. Keys are snake_case
+ * for clean Clay column mapping; matches the CSV export's field set and
+ * custom_data filtering. */
+function toClayPayload(row: FullPersonRow): Record<string, unknown> {
   return {
     ...toWebhookCustomData(row.custom_data),
     person_id: row.id,
@@ -514,7 +433,7 @@ function toClayPayload(row: FullPersonRow, companyData: CompanyJoinData): Record
     company_id: row.company_id,
     company_name: row.company_name,
     company_domain: row.domain,
-    company_linkedin_url: company?.linkedin_url ?? null,
+    company_linkedin_url: row.company_linkedin_url,
     city: row.city,
     state: row.state,
     country: row.country,
@@ -527,115 +446,97 @@ function toClayPayload(row: FullPersonRow, companyData: CompanyJoinData): Record
 /** Clay push records for the current filtered view — the same set (and order)
  * as getAllFilteredPeople, each carrying the full flattened webhook payload. */
 export async function getPeopleForClay(filters: PersonListFilters): Promise<ClayPushRecord[]> {
-  const companyData = await loadCompanyJoinData();
-  const rows = await fetchFullFilteredPeople(filters, companyData);
+  const rows = await fetchFullFilteredPeople(filters);
   return rows.map((row) => ({
     id: row.id,
     displayName: row.full_name,
-    payload: toClayPayload(row, companyData),
+    payload: toClayPayload(row),
   }));
+}
+
+interface FacetIdCount {
+  id: string;
+  count: number;
+}
+
+interface PersonFilterOptionsRpcResult {
+  niches: FacetIdCount[];
+  sources: FacetIdCount[];
+  industries: FacetIdCount[];
+  countries: FacetIdCount[];
+  emailStatuses: FacetIdCount[];
+  phoneTypes: FacetIdCount[];
+}
+
+/** Serializes PersonListFilters into the jsonb shape person_filter_options
+ * (lib/data/people-canonical-columns.sql) expects. Employee buckets are
+ * resolved to {min_v,max_v} ranges here (from the same EMPLOYEE_BUCKETS
+ * TypeScript source of truth applyPersonFilters/employeeBucketOrClause use)
+ * rather than passing bucket ids for the RPC to interpret, so the bucket
+ * boundaries never need to be duplicated in SQL. Mirrors
+ * toFilterOptionsRpcPayload in lib/data/companies.ts, plus jobTitle — the
+ * one filter dimension people has that companies doesn't. */
+function toFilterOptionsRpcPayload(filters: PersonListFilters): Record<string, unknown> {
+  const hasExplicitRange = filters.employeeMin != null || filters.employeeMax != null;
+  return {
+    search: filters.search ?? null,
+    jobTitle: filters.jobTitle ?? null,
+    employeeMin: filters.employeeMin ?? null,
+    employeeMax: filters.employeeMax ?? null,
+    employeeBucketRanges: hasExplicitRange ? [] : employeeBucketRanges(filters.employeeBucket ?? []),
+    email: filters.email ?? "any",
+    phone: filters.phone ?? "any",
+    niche: filters.niche ?? { include: [], exclude: [] },
+    source: filters.source ?? { include: [], exclude: [] },
+    industry: filters.industry ?? { include: [], exclude: [] },
+    country: filters.country ?? { include: [], exclude: [] },
+    emailStatus: filters.emailStatus ?? { include: [], exclude: [] },
+    phoneType: filters.phoneType ?? { include: [], exclude: [] },
+  };
+}
+
+function sortByCountDesc(a: { count: number }, b: { count: number }): number {
+  return b.count - a.count;
 }
 
 /** Facet counts reflect the currently active filters, not the whole table —
  * e.g. narrowing to an Industry should make the Source dropdown show counts
- * within that narrowed set, not the global total (see the same pattern in
- * companies.ts::getCompanyFilterOptions). Each facet's own count excludes
- * its own filter so picking a value doesn't zero out its sibling options. */
+ * within that narrowed set, not the global total. Each facet's own count
+ * excludes its own filter (so picking a value doesn't zero out its sibling
+ * options), but is scoped by every other active filter. All six dimensions
+ * are computed by a single Postgres RPC (lib/data/people-canonical-columns.sql);
+ * labels are attached here from the TypeScript alias tables
+ * (sourceLabel/industryLabel/countryLabel) so they stay single-edit-point.
+ * Mirrors getCompanyFilterOptions in lib/data/companies.ts. */
 export async function getPersonFilterOptions(
   filters: PersonListFilters = {}
 ): Promise<PersonFilterOptions> {
-  const [companyData, rows] = await Promise.all([
-    loadCompanyJoinData(),
-    fetchBaseRows(toBaseFilters(filters)),
-  ]);
-
-  const niches = new Map<string, number>();
-  const sources = new Map<string, number>();
-  const countries = new Map<string, { label: string; count: number }>();
-  const industries = new Map<string, { label: string; count: number }>();
-  const emailStatuses = new Map<string, number>();
-  const phoneTypes = new Map<string, number>();
-
-  for (const row of rows) {
-    const company = row.company_id ? companyData.byId.get(row.company_id) : undefined;
-
-    const okCommon =
-      matchesEmailPresence(row, filters) &&
-      matchesPhonePresence(row, filters) &&
-      matchesJobTitle(row, filters);
-    if (!okCommon) continue;
-
-    const okCountry = matchesCountry(row, filters);
-    const okSource = matchesSource(row, filters);
-    const okEmailStatus = matchesEmailStatus(row, filters);
-    const okPhoneType = matchesPhoneType(row, filters);
-    const okIndustry = matchesIndustry(company, filters);
-    const okEmployee = matchesEmployeeSize(company, filters);
-    const okNiche = matchesNiche(row, company, companyData.knownClients, filters);
-
-    if (okCountry && okSource && okEmailStatus && okPhoneType && okIndustry && okEmployee) {
-      for (const niche of personNiches(row, company, companyData.knownClients)) {
-        niches.set(niche, (niches.get(niche) ?? 0) + 1);
-      }
-    }
-
-    if (okNiche && okCountry && okEmailStatus && okPhoneType && okIndustry && okEmployee) {
-      for (const token of normalizeSourceTokens(row.source)) {
-        sources.set(token, (sources.get(token) ?? 0) + 1);
-      }
-    }
-
-    if (okNiche && okSource && okEmailStatus && okPhoneType && okIndustry && okEmployee) {
-      const country = normalizeCountry(row.country);
-      if (country) {
-        const existing = countries.get(country.id);
-        countries.set(country.id, { label: country.label, count: (existing?.count ?? 0) + 1 });
-      }
-    }
-
-    if (okNiche && okCountry && okSource && okEmailStatus && okPhoneType && okEmployee) {
-      const industry = normalizeIndustry(company?.industry);
-      if (industry) {
-        const existing = industries.get(industry.id);
-        industries.set(industry.id, { label: industry.label, count: (existing?.count ?? 0) + 1 });
-      }
-    }
-
-    if (okNiche && okCountry && okSource && okIndustry && okEmployee && okPhoneType) {
-      if (row.email_status) {
-        emailStatuses.set(row.email_status, (emailStatuses.get(row.email_status) ?? 0) + 1);
-      }
-    }
-
-    if (okNiche && okCountry && okSource && okIndustry && okEmployee && okEmailStatus) {
-      if (row.phone_type) {
-        phoneTypes.set(row.phone_type, (phoneTypes.get(row.phone_type) ?? 0) + 1);
-      }
-    }
-  }
-
-  const sortDesc = <T extends { count: number }>(a: T, b: T) => b.count - a.count;
+  const { data, error } = await supabaseAdmin.rpc("person_filter_options", {
+    filters: toFilterOptionsRpcPayload(filters),
+  });
+  if (error) throw error;
+  const result = data as PersonFilterOptionsRpcResult;
 
   return {
-    niches: Array.from(niches.entries())
-      .map(([id, count]) => ({ id, label: id, count }))
-      .sort(sortDesc),
-    sources: Array.from(sources.entries())
-      .map(([id, count]) => ({ id, label: sourceLabel(id), count }))
-      .sort(sortDesc),
-    countries: Array.from(countries.entries())
-      .map(([id, { label, count }]) => ({ id, label, count }))
-      .sort(sortDesc),
-    industries: Array.from(industries.entries())
-      .map(([id, { label, count }]) => ({ id, label, count }))
-      .sort(sortDesc),
+    niches: result.niches
+      .map(({ id, count }) => ({ id, label: id, count }))
+      .sort(sortByCountDesc),
+    sources: result.sources
+      .map(({ id, count }) => ({ id, label: sourceLabel(id), count }))
+      .sort(sortByCountDesc),
+    countries: result.countries
+      .map(({ id, count }) => ({ id, label: countryLabel(id), count }))
+      .sort(sortByCountDesc),
+    industries: result.industries
+      .map(({ id, count }) => ({ id, label: industryLabel(id), count }))
+      .sort(sortByCountDesc),
     employeeBuckets: EMPLOYEE_BUCKETS.map((b) => ({ id: b.id, label: b.label })),
-    emailStatuses: Array.from(emailStatuses.entries())
-      .map(([id, count]) => ({ id, label: id, count }))
-      .sort(sortDesc),
-    phoneTypes: Array.from(phoneTypes.entries())
-      .map(([id, count]) => ({ id, label: id, count }))
-      .sort(sortDesc),
+    emailStatuses: result.emailStatuses
+      .map(({ id, count }) => ({ id, label: id, count }))
+      .sort(sortByCountDesc),
+    phoneTypes: result.phoneTypes
+      .map(({ id, count }) => ({ id, label: id, count }))
+      .sort(sortByCountDesc),
   };
 }
 
