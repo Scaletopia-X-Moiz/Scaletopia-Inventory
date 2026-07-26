@@ -36,7 +36,8 @@ export function FilterPopover({
         <Popover.Content
           align="start"
           sideOffset={6}
-          className="z-30 w-72 rounded-lg border border-rule bg-card p-4 shadow-lg"
+          collisionPadding={12}
+          className="z-30 max-h-[min(24rem,var(--radix-popover-content-available-height))] w-72 overflow-y-auto overscroll-contain rounded-lg border border-rule bg-card p-4 shadow-lg"
         >
           {children}
         </Popover.Content>
