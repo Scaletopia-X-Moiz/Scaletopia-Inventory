@@ -91,15 +91,6 @@ export function CompaniesResultsClient() {
             fieldLabel="email"
             onDone={load}
           />
-          <ReverifyFilteredButton
-            endpoint="/api/companies/reverify-phone"
-            paramsStr={paramsStr}
-            total={result.total}
-            noun="companies"
-            fieldLabel="phone number"
-            providerName="ClearoutPhone"
-            onDone={load}
-          />
           <CleanNamesButton paramsStr={paramsStr} total={result.total} onDone={load} />
           <PushToClayButton paramsStr={paramsStr} total={result.total} />
           <ExportButton href={exportHref} />
