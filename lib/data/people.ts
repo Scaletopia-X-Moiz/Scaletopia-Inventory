@@ -617,29 +617,39 @@ const PERSON_EXTRA_BLOCKED_KEYS = [
   "updated_at",
 ];
 
+function firstOf<T>(value: T | T[] | null): T | null {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
+}
+
+interface RawPersonDetailCompany {
+  id: string;
+  company_name: string | null;
+  domain: string | null;
+  quality_tier: string | null;
+}
+
 export async function getPersonDetail(id: string): Promise<PersonDetail | null> {
-  const { data, error } = await supabaseAdmin.from("people").select("*").eq("id", id).maybeSingle();
+  const { data, error } = await supabaseAdmin
+    .from("people")
+    .select("*, companies(id,company_name,domain,quality_tier)")
+    .eq("id", id)
+    .maybeSingle();
 
   if (error) throw error;
   if (!data) return null;
 
-  let linkedCompany: LinkedCompany | null = null;
-  if (data.company_id) {
-    const { data: company, error: companyError } = await supabaseAdmin
-      .from("companies")
-      .select("id,company_name,domain,quality_tier")
-      .eq("id", data.company_id)
-      .maybeSingle();
-    if (companyError) throw companyError;
-    if (company) {
-      linkedCompany = {
+  const company = firstOf(
+    data.companies as RawPersonDetailCompany | RawPersonDetailCompany[] | null
+  );
+  const linkedCompany: LinkedCompany | null = company
+    ? {
         id: company.id,
         companyName: company.company_name,
         domain: company.domain,
         qualityTier: company.quality_tier,
-      };
-    }
-  }
+      }
+    : null;
 
   return {
     id: data.id,

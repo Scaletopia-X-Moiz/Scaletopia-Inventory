@@ -21,10 +21,11 @@ export default async function CompanyDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const company = await getCompanyDetail(id);
+  const [company, people] = await Promise.all([
+    getCompanyDetail(id),
+    getPeopleByCompanyId(id),
+  ]);
   if (!company) notFound();
-
-  const people = await getPeopleByCompanyId(company.id);
 
   const location = [company.city, company.state, company.country].filter(Boolean).join(", ");
 

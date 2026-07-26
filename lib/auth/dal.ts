@@ -12,9 +12,20 @@ export interface SessionUser {
   role: Role;
 }
 
+const VALID_ROLES: readonly Role[] = ["admin", "member", "dev"];
+
+function isRole(value: unknown): value is Role {
+  return typeof value === "string" && (VALID_ROLES as readonly string[]).includes(value);
+}
+
 /**
- * Returns the signed-in user (with role from `profiles`) or null. Memoized per
- * request so multiple callers in one render don't re-hit Supabase.
+ * Returns the signed-in user or null. Memoized per request so multiple
+ * callers in one render don't re-hit Supabase.
+ *
+ * Role is read from the `user_role` claim injected into the JWT by the
+ * Custom Access Token Hook (see verify-access-token-hook.ts), so no DB call
+ * is needed on the common path. The `profiles` table lookup is kept only as
+ * a fallback for older tokens minted before the hook was wired up.
  */
 export const getUser = cache(async (): Promise<SessionUser | null> => {
   const supabase = await createSupabaseServerClient();
@@ -24,6 +35,14 @@ export const getUser = cache(async (): Promise<SessionUser | null> => {
   const claims = claimsData?.claims;
 
   if (!claims) return null;
+
+  if (isRole(claims.user_role)) {
+    return {
+      id: claims.sub,
+      email: claims.email ?? "",
+      role: claims.user_role,
+    };
+  }
 
   const { data: profile } = await supabaseAdmin
     .from("profiles")
