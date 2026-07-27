@@ -1,4 +1,6 @@
 -- Run once in the Supabase SQL editor (see docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md).
+-- NOTE: on a fresh database, run virtual-columns.sql before this file —
+-- company_filter_options below calls virtual_filters_match, defined there.
 --
 -- Adds app-owned "canonical columns" so Postgres can filter, facet, and sort
 -- the companies list directly instead of the app re-normalizing all ~87k rows
@@ -58,13 +60,17 @@ $$;
 -- RPC: all six /companies facet dimensions in one query. Mirrors
 -- getCompanyFilterOptions' in-app semantics exactly: each facet's own count
 -- excludes its own filter but is scoped by every other active filter, and the
--- base scan (search / employee size / email+phone presence) applies to every
--- facet unconditionally. `filters` is a JSON-serialized CompanyListFilters
--- (see lib/data/companies.ts toFilterOptionsRpcPayload) — include/exclude id lists
--- come straight from the client, already canonical, so no alias table is
--- needed here; only ids/counts are returned, labels are attached back in TS
+-- base scan (search / employee size / email+phone presence / virtual-column
+-- filters) applies to every facet unconditionally. `filters` is a
+-- JSON-serialized CompanyListFilters (see lib/data/companies.ts
+-- toFilterOptionsRpcPayload) — include/exclude id lists come straight from
+-- the client, already canonical, so no alias table is needed here; only
+-- ids/counts are returned, labels are attached back in TS
 -- (sourceLabel/industryLabel/countryLabel) so the alias/label tables stay
--- single-edit-point in TypeScript.
+-- single-edit-point in TypeScript. `virtualFilters` (ticket #33, see
+-- virtual-columns.sql) is folded into the same base scan via
+-- virtual_filters_match, so facet counts share the exact predicate the
+-- list/export/push seam uses — never a second, independently-maintained copy.
 CREATE OR REPLACE FUNCTION company_filter_options(filters jsonb DEFAULT '{}'::jsonb)
 RETURNS jsonb LANGUAGE sql STABLE AS $$
 WITH params AS (
@@ -75,6 +81,7 @@ WITH params AS (
     COALESCE(filters->'employeeBucketRanges', '[]'::jsonb) AS emp_ranges,
     COALESCE(filters->>'email', 'any') AS email_filter,
     COALESCE(filters->>'phone', 'any') AS phone_filter,
+    COALESCE(filters->'virtualFilters', '[]'::jsonb) AS virtual_filters,
     ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,include}', '[]'::jsonb))) AS niche_inc,
     ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,exclude}', '[]'::jsonb))) AS niche_exc,
     ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{source,include}', '[]'::jsonb))) AS source_inc,
@@ -114,6 +121,7 @@ base AS MATERIALIZED (
     AND (p.phone_filter = 'any'
       OR (p.phone_filter = 'not_empty' AND c.phone IS NOT NULL AND c.phone <> '')
       OR (p.phone_filter = 'empty' AND (c.phone IS NULL OR c.phone = '')))
+    AND (jsonb_array_length(p.virtual_filters) = 0 OR virtual_filters_match(c.custom_data, p.virtual_filters))
 ),
 niches AS (
   SELECT base.niche AS id, count(*) AS count FROM base, params

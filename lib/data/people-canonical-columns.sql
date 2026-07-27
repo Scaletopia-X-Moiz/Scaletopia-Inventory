@@ -1,5 +1,7 @@
 -- Run once in the Supabase SQL editor (see docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md
 -- and the "people" follow-up tickets #20-#25 that extend that same pattern to /people).
+-- NOTE: on a fresh database, run virtual-columns.sql before this file —
+-- person_filter_options below calls virtual_filters_match, defined there.
 --
 -- Adds app-owned "canonical columns" so Postgres can filter, facet, and sort
 -- the people list directly instead of the app re-normalizing/joining against
@@ -65,14 +67,17 @@ $$;
 -- RPC: all six /people facet dimensions in one query. Mirrors
 -- getPersonFilterOptions' in-app semantics exactly: each facet's own count
 -- excludes its own filter but is scoped by every other active filter, and the
--- base scan (search / employee size / email+phone presence / jobTitle) applies
--- to every facet unconditionally. `niche_tokens`/`source_tokens` are
--- multi-valued (unnest + GIN), unlike companies' scalar `niche` — a person
--- with 2 niche tokens contributes to both counts. `filters` is a
--- JSON-serialized PersonListFilters (see lib/data/people.ts
--- toFilterOptionsRpcPayload); include/exclude id lists come straight from the
--- client, already canonical, so no alias table is needed here — only
--- ids/counts are returned, labels are attached back in TS.
+-- base scan (search / employee size / email+phone presence / jobTitle /
+-- virtual-column filters) applies to every facet unconditionally.
+-- `niche_tokens`/`source_tokens` are multi-valued (unnest + GIN), unlike
+-- companies' scalar `niche` — a person with 2 niche tokens contributes to
+-- both counts. `filters` is a JSON-serialized PersonListFilters (see
+-- lib/data/people.ts toFilterOptionsRpcPayload); include/exclude id lists
+-- come straight from the client, already canonical, so no alias table is
+-- needed here — only ids/counts are returned, labels are attached back in TS.
+-- `virtualFilters` (ticket #33, see virtual-columns.sql) is folded into the
+-- same base scan via virtual_filters_match, sharing the exact predicate the
+-- People list/export/push seam uses.
 CREATE OR REPLACE FUNCTION person_filter_options(filters jsonb DEFAULT '{}'::jsonb)
 RETURNS jsonb LANGUAGE sql STABLE AS $$
 WITH params AS (
@@ -84,6 +89,7 @@ WITH params AS (
     COALESCE(filters->'employeeBucketRanges', '[]'::jsonb) AS emp_ranges,
     COALESCE(filters->>'email', 'any') AS email_filter,
     COALESCE(filters->>'phone', 'any') AS phone_filter,
+    COALESCE(filters->'virtualFilters', '[]'::jsonb) AS virtual_filters,
     ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,include}', '[]'::jsonb))) AS niche_inc,
     ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,exclude}', '[]'::jsonb))) AS niche_exc,
     ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{source,include}', '[]'::jsonb))) AS source_inc,
@@ -125,6 +131,7 @@ base AS MATERIALIZED (
     AND (pr.phone_filter = 'any'
       OR (pr.phone_filter = 'not_empty' AND p.phone IS NOT NULL AND p.phone <> '')
       OR (pr.phone_filter = 'empty' AND (p.phone IS NULL OR p.phone = '')))
+    AND (jsonb_array_length(pr.virtual_filters) = 0 OR virtual_filters_match(p.custom_data, pr.virtual_filters))
 ),
 niches AS (
   SELECT token AS id, count(*) AS count FROM (

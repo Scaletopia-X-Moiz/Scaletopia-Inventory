@@ -8,6 +8,7 @@ import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
 import { sortByLastUpdatedDesc } from "@/lib/data/sort";
 import type { ClayPushRecord } from "@/lib/clay/types";
 import type { IncludeExclude } from "@/lib/data/include-exclude";
+import type { VirtualColumnFilter } from "@/lib/data/virtual-columns";
 
 export type SingleSelectFilter = "any" | "not_empty" | "empty";
 
@@ -25,6 +26,11 @@ export interface PersonListFilters {
   jobTitle?: string;
   employeeMin?: number;
   employeeMax?: number;
+  /** Virtual-column predicates over custom_data enrichment fields (ticket #33,
+   * docs/adr/0002-virtual-column-enrichment-filtering.md). Evaluated by the
+   * shared SQL predicate (lib/data/virtual-columns.sql), not the PostgREST
+   * builder below — see resolveVirtualFilterIds. */
+  virtualFilters?: VirtualColumnFilter[];
 }
 
 export interface PersonListRow {
@@ -211,10 +217,38 @@ function applyPersonFilters(query: any, filters: PersonListFilters): any {
   return q;
 }
 
+interface VirtualFilterIdRow {
+  id: string;
+}
+
+/** Resolves the id set filters.virtualFilters narrows to via the shared SQL
+ * predicate (lib/data/virtual-columns.sql), or `null` when no virtual filter
+ * is active — the no-op case every list/export/push call site below must
+ * preserve exactly, since this ticket introduces the seam with no operator UI
+ * and existing behavior must stay unchanged. Kept separate from
+ * applyPersonFilters because PostgREST's query builder can't express the
+ * predicate's cast-safe numeric/date comparisons (see ADR-0002) — the
+ * predicate has to be evaluated in SQL, not built through the builder. Sends
+ * the *full* filter payload (not just virtualFilters) so
+ * people_matching_virtual_filters can apply the same native predicate
+ * applyPersonFilters would, bounding its scan to the actual working set
+ * instead of the whole table. Mirrors resolveVirtualFilterIds in
+ * lib/data/companies.ts. */
+async function resolveVirtualFilterIds(filters: PersonListFilters): Promise<string[] | null> {
+  if (!filters.virtualFilters?.length) return null;
+  const { data, error } = await supabaseAdmin.rpc("people_matching_virtual_filters", {
+    filters: toFilterOptionsRpcPayload(filters),
+  });
+  if (error) throw error;
+  return (data as VirtualFilterIdRow[]).map((row) => row.id);
+}
+
 async function fetchFilteredRows(filters: PersonListFilters): Promise<RawPersonRow[]> {
-  return fetchAllRows<RawPersonRow>("people", LIST_COLUMNS, (query) =>
-    applyPersonFilters(query, filters)
-  );
+  const virtualIds = await resolveVirtualFilterIds(filters);
+  return fetchAllRows<RawPersonRow>("people", LIST_COLUMNS, (query) => {
+    const q = applyPersonFilters(query, filters);
+    return virtualIds !== null ? q.in("id", virtualIds) : q;
+  });
 }
 
 /** No-op — kept so callers (reverify, reverify-phone) don't need touching.
@@ -259,6 +293,8 @@ export async function getPeople(
 ): Promise<PersonListResult> {
   let query = supabaseAdmin.from("people").select(LIST_COLUMNS, { count: "exact" });
   query = applyPersonFilters(query, filters);
+  const virtualIds = await resolveVirtualFilterIds(filters);
+  if (virtualIds !== null) query = query.in("id", virtualIds);
   query = query
     .order("last_updated", { ascending: false, nullsFirst: false })
     .order("id", { ascending: true });
@@ -476,7 +512,7 @@ interface PersonFilterOptionsRpcResult {
  * boundaries never need to be duplicated in SQL. Mirrors
  * toFilterOptionsRpcPayload in lib/data/companies.ts, plus jobTitle — the
  * one filter dimension people has that companies doesn't. */
-function toFilterOptionsRpcPayload(filters: PersonListFilters): Record<string, unknown> {
+export function toFilterOptionsRpcPayload(filters: PersonListFilters): Record<string, unknown> {
   const hasExplicitRange = filters.employeeMin != null || filters.employeeMax != null;
   return {
     search: filters.search ?? null,
@@ -492,6 +528,7 @@ function toFilterOptionsRpcPayload(filters: PersonListFilters): Record<string, u
     country: filters.country ?? { include: [], exclude: [] },
     emailStatus: filters.emailStatus ?? { include: [], exclude: [] },
     phoneType: filters.phoneType ?? { include: [], exclude: [] },
+    virtualFilters: filters.virtualFilters ?? [],
   };
 }
 

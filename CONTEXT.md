@@ -33,3 +33,32 @@ source, industry, country, email status, phone type), shown in the filter UI.
 Each facet's own count **excludes its own filter** but is scoped by every other
 active filter, so picking one Source value doesn't zero out the other Source
 options.
+
+### Enrichment field
+A key inside the `custom_data` JSONB, campaign-specific and different for every
+campaign (e.g. `lead_score`, `specialties`, `qualificationStatus`). Distinct
+from a **canonical column**: enrichment fields are raw, unnormalized, and never
+promoted to a real database column.
+_Avoid_: custom field (that means a GHL field), attribute.
+
+### Virtual column
+A view-only column over one **enrichment field**, added to the Companies or
+People table on demand. It exists only in the interface state — never in the
+Supabase schema, and `custom_data` is never modified. Its purpose is to let the
+user **filter** the full result set on an enrichment field, then export or push
+the narrowed set. Removed from view (not from data) after a push/export.
+_Avoid_: computed column, derived column.
+
+### Filterable type
+The interpretation a virtual column applies to an enrichment field's values,
+which selects the operator set and the SQL shape: **Text / Number / Boolean /
+List / Date**. Because the same key can hold different shapes across rows, the
+type is **inferred by sampling** the dominant shape and is user-overridable — it
+is a property of the key *most of the time*, not a schema fact.
+
+### Empty (enrichment value)
+For filtering purposes, an enrichment value counts as empty when it is `null`,
+`""`, whitespace-only, an empty array, the sentinel `"-"`, or an **unrendered
+Clay template** (`"{{ ... }}"`). "is empty" / "is not empty" operators and the
+value picker all use this normalized definition, so placeholder junk never reads
+as real data.
