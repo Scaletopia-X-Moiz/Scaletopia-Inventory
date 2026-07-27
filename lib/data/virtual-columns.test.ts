@@ -134,7 +134,7 @@ describe("vf/vc URL param round-trip (ticket #34)", () => {
       "vf",
       JSON.stringify([
         { key: "a", type: "text", operator: "is" }, // missing required value
-        { key: "b", type: "number", operator: "gt", value: 5 }, // not text yet (ticket #34 scope)
+        { key: "b", type: "boolean", operator: "is_true" }, // not wired until ticket #36
         { key: "c", type: "text", operator: "bogus_op", value: "x" },
         { key: "d", type: "text", operator: "is", value: "ok" },
       ])
@@ -142,6 +142,45 @@ describe("vf/vc URL param round-trip (ticket #34)", () => {
     expect(parseVirtualFiltersParam(params)).toEqual([
       { key: "d", type: "text", operator: "is", value: "ok" },
     ]);
+  });
+
+  it("round-trips number and date filters, including between ranges (ticket #35)", () => {
+    const filters: VirtualColumnFilter[] = [
+      { key: "lead_score", type: "number", operator: "gt", value: 50 },
+      { key: "spend", type: "number", operator: "between", value: [0, 100] },
+      { key: "indexed_at", type: "date", operator: "before", value: "2025-06-01" },
+      { key: "seen", type: "date", operator: "between", value: ["2025-01-01", "2025-12-31"] },
+    ];
+    const params = new URLSearchParams();
+    params.set("vf", serializeVirtualFiltersParam(filters)!);
+    expect(parseVirtualFiltersParam(params)).toEqual(filters);
+  });
+
+  it("drops number/date filters whose value has the wrong shape (ticket #35)", () => {
+    const params = new URLSearchParams();
+    params.set(
+      "vf",
+      JSON.stringify([
+        { key: "a", type: "number", operator: "gt", value: "50" }, // string, not number
+        { key: "b", type: "number", operator: "between", value: [5] }, // not a pair
+        { key: "c", type: "date", operator: "on", value: "nope" }, // not an ISO date
+        { key: "d", type: "date", operator: "between", value: ["2025-01-01", "x"] }, // half-valid pair
+        { key: "e", type: "number", operator: "is", value: 7 }, // valid — survives
+      ])
+    );
+    expect(parseVirtualFiltersParam(params)).toEqual([
+      { key: "e", type: "number", operator: "is", value: 7 },
+    ]);
+  });
+
+  it("accepts number and date active columns (ticket #35)", () => {
+    const columns: ActiveVirtualColumn[] = [
+      { key: "lead_score", type: "number" },
+      { key: "indexed_at", type: "date" },
+    ];
+    const params = new URLSearchParams();
+    params.set("vc", serializeVirtualColumnsParam(columns)!);
+    expect(parseVirtualColumnsParam(params)).toEqual(columns);
   });
 });
 

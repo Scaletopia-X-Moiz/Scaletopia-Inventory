@@ -5,7 +5,7 @@ import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import { Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
-  TEXT_OPERATORS,
+  operatorsForType,
   parseVirtualColumnsParam,
   parseVirtualFiltersParam,
   serializeVirtualColumnsParam,
@@ -13,13 +13,26 @@ import {
   type ActiveVirtualColumn,
   type VirtualColumnFilter,
   type VirtualColumnOperator,
+  type VirtualColumnOperatorMeta,
+  type VirtualColumnType,
 } from "@/lib/data/virtual-columns";
+
+type EnrichmentFieldType = "Text" | "Number" | "Boolean" | "List" | "Date";
 
 interface EnrichmentField {
   key: string;
-  type: "Text" | "Number" | "Boolean" | "List" | "Date";
+  type: EnrichmentFieldType;
   sampleValues: string[];
 }
+
+/** The enrichment-field types ticket #35 can add as columns, mapped to the
+ * VirtualColumnType the filter/predicate speaks. Boolean/List are discovered
+ * but not yet addable (ticket #36). */
+const ADDABLE_TYPES: Record<string, VirtualColumnType> = {
+  Text: "text",
+  Number: "number",
+  Date: "date",
+};
 
 /** "Add column from enrichment" + the operator controls for each active
  * virtual column (ticket #34). Reads/writes the `vc` (which fields are shown)
@@ -56,9 +69,9 @@ export function VirtualColumnsBar() {
     });
   }
 
-  function addColumn(key: string) {
+  function addColumn(key: string, type: VirtualColumnType) {
     if (activeColumns.some((c) => c.key === key)) return;
-    writeColumns([...activeColumns, { key, type: "text" }]);
+    writeColumns([...activeColumns, { key, type }]);
   }
 
   function removeColumn(key: string) {
@@ -95,7 +108,7 @@ function AddColumnButton({
   onAdd,
   addedKeys,
 }: {
-  onAdd: (key: string) => void;
+  onAdd: (key: string, type: VirtualColumnType) => void;
   addedKeys: string[];
 }) {
   const searchParams = useSearchParams();
@@ -121,8 +134,8 @@ function AddColumnButton({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const textFields = (fields ?? []).filter(
-    (f) => f.type === "Text" && !addedKeys.includes(f.key)
+  const addableFields = (fields ?? []).filter(
+    (f) => f.type in ADDABLE_TYPES && !addedKeys.includes(f.key)
   );
 
   return (
@@ -130,23 +143,24 @@ function AddColumnButton({
       <p className="mb-2 text-xs font-medium text-ink-soft">Add column from enrichment</p>
       {loading ? (
         <p className="text-xs text-ink-soft/70">Loading fields…</p>
-      ) : textFields.length === 0 ? (
+      ) : addableFields.length === 0 ? (
         <p className="text-xs text-ink-soft/70">
-          No addable text enrichment fields for the current filters.
+          No addable enrichment fields for the current filters.
         </p>
       ) : (
         <ul className="flex max-h-64 flex-col gap-0.5 overflow-y-auto">
-          {textFields.map((field) => (
+          {addableFields.map((field) => (
             <li key={field.key}>
               <button
                 type="button"
                 onClick={() => {
-                  onAdd(field.key);
+                  onAdd(field.key, ADDABLE_TYPES[field.type]);
                   setOpen(false);
                 }}
-                className="w-full truncate rounded px-2 py-1.5 text-left text-sm text-ink hover:bg-hover"
+                className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm text-ink hover:bg-hover"
               >
-                {field.key}
+                <span className="truncate">{field.key}</span>
+                <span className="shrink-0 text-xs text-ink-soft/70">{field.type}</span>
               </button>
             </li>
           ))}
@@ -190,6 +204,56 @@ function FilterPopoverButton({
   );
 }
 
+/** The two raw input strings a chip holds: `a` for single-value operators and
+ * the low end of a range, `b` for the high end of a `between` range. Kept as
+ * strings (what the DOM inputs produce) and coerced to the typed
+ * VirtualColumnFilter["value"] only at commit time. */
+function initialInputs(filter: VirtualColumnFilter | undefined): { a: string; b: string } {
+  const v = filter?.value;
+  if (Array.isArray(v)) return { a: String(v[0] ?? ""), b: String(v[1] ?? "") };
+  if (v == null) return { a: "", b: "" };
+  return { a: String(v), b: "" };
+}
+
+const INPUT_TYPE: Record<VirtualColumnType, "text" | "number" | "date"> = {
+  text: "text",
+  number: "number",
+  boolean: "text",
+  list: "text",
+  date: "date",
+};
+
+/** Coerces the raw input string(s) into the typed filter value, returning
+ * `undefined` when the value is incomplete/invalid so the caller clears the
+ * filter rather than sending a half-formed one. Number inputs parse to real
+ * numbers (so `9 < 90` compares numerically SQL-side, not as "9" > "90");
+ * date inputs stay ISO strings. */
+function coerceValue(
+  type: VirtualColumnType,
+  meta: VirtualColumnOperatorMeta,
+  a: string,
+  b: string
+): VirtualColumnFilter["value"] | undefined {
+  if (meta.requiresRange) {
+    if (type === "number") {
+      if (a.trim() === "" || b.trim() === "") return undefined;
+      const lo = Number(a);
+      const hi = Number(b);
+      return Number.isFinite(lo) && Number.isFinite(hi) ? [lo, hi] : undefined;
+    }
+    return a && b ? [a, b] : undefined;
+  }
+  if (meta.requiresValue) {
+    if (type === "number") {
+      if (a.trim() === "") return undefined;
+      const n = Number(a);
+      return Number.isFinite(n) ? n : undefined;
+    }
+    return a ? a : undefined;
+  }
+  return undefined;
+}
+
 function VirtualColumnChip({
   column,
   filter,
@@ -201,31 +265,48 @@ function VirtualColumnChip({
   onChangeFilter: (filter: VirtualColumnFilter | null) => void;
   onRemove: () => void;
 }) {
-  const [value, setValue] = useState(typeof filter?.value === "string" ? filter.value : "");
+  const [inputs, setInputs] = useState(() => initialInputs(filter));
 
   useEffect(() => {
-    setValue(typeof filter?.value === "string" ? filter.value : "");
+    setInputs(initialInputs(filter));
   }, [filter?.value]);
 
+  const operators = operatorsForType(column.type);
   const operator = filter?.operator ?? "";
-  const operatorMeta = TEXT_OPERATORS.find((o) => o.id === operator);
+  const operatorMeta = operators.find((o) => o.id === operator);
+  const inputType = INPUT_TYPE[column.type];
 
-  function commit(nextOperator: string, nextValue: string) {
+  function commit(nextOperator: string, next: { a: string; b: string }) {
     if (!nextOperator) {
       onChangeFilter(null);
       return;
     }
-    const meta = TEXT_OPERATORS.find((o) => o.id === nextOperator);
-    if (meta?.requiresValue && !nextValue.trim()) {
+    const meta = operators.find((o) => o.id === nextOperator);
+    if (!meta) {
+      onChangeFilter(null);
+      return;
+    }
+    const value = coerceValue(column.type, meta, next.a, next.b);
+    if ((meta.requiresValue || meta.requiresRange) && value === undefined) {
       onChangeFilter(null);
       return;
     }
     onChangeFilter({
       key: column.key,
-      type: "text",
+      type: column.type,
       operator: nextOperator as VirtualColumnOperator,
-      value: meta?.requiresValue ? nextValue : undefined,
+      value,
     });
+  }
+
+  function onOperatorChange(next: string) {
+    commit(next, inputs);
+  }
+
+  function onInputChange(part: "a" | "b", raw: string) {
+    const next = { ...inputs, [part]: raw };
+    setInputs(next);
+    commit(operator, next);
   }
 
   return (
@@ -240,11 +321,11 @@ function VirtualColumnChip({
       </span>
       <select
         value={operator}
-        onChange={(e) => commit(e.target.value, value)}
+        onChange={(e) => onOperatorChange(e.target.value)}
         className="rounded border border-rule bg-card px-1.5 py-1 text-ink outline-none focus:border-stamp"
       >
         <option value="">no filter</option>
-        {TEXT_OPERATORS.map((o) => (
+        {operators.map((o) => (
           <option key={o.id} value={o.id}>
             {o.label}
           </option>
@@ -252,15 +333,31 @@ function VirtualColumnChip({
       </select>
       {operatorMeta?.requiresValue && (
         <input
-          type="text"
-          value={value}
-          onChange={(e) => {
-            setValue(e.target.value);
-            commit(operator, e.target.value);
-          }}
+          type={inputType}
+          value={inputs.a}
+          onChange={(e) => onInputChange("a", e.target.value)}
           placeholder="value"
           className="w-28 rounded border border-rule bg-card px-1.5 py-1 text-ink outline-none placeholder:text-ink-mute focus:border-stamp"
         />
+      )}
+      {operatorMeta?.requiresRange && (
+        <>
+          <input
+            type={inputType}
+            value={inputs.a}
+            onChange={(e) => onInputChange("a", e.target.value)}
+            placeholder="min"
+            className="w-24 rounded border border-rule bg-card px-1.5 py-1 text-ink outline-none placeholder:text-ink-mute focus:border-stamp"
+          />
+          <span className="text-ink-soft">and</span>
+          <input
+            type={inputType}
+            value={inputs.b}
+            onChange={(e) => onInputChange("b", e.target.value)}
+            placeholder="max"
+            className="w-24 rounded border border-rule bg-card px-1.5 py-1 text-ink outline-none placeholder:text-ink-mute focus:border-stamp"
+          />
+        </>
       )}
       <button
         type="button"

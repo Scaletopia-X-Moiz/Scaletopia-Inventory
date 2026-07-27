@@ -249,6 +249,105 @@ describe("getCompanies — virtual-column Text filter (ticket #34)", () => {
   }, 30000);
 });
 
+describe("getCompanies — virtual-column Number filter (ticket #35)", () => {
+  it("filters numerically over a real numeric key without throwing on junk rows", async () => {
+    // The same key holds non-numeric junk ("$10", "-", "{{ 0 }}") on other
+    // rows across the ~110k-row table; the guarded RPC must exclude those
+    // rather than 500 the request (ADR-0002).
+    const discovery = await getCompanyEnrichmentFields({}, 2000, 25);
+    const field = discovery.fields.find((f) => f.type === "Number" && f.sampleValues.length > 0);
+    if (!field) return; // no numeric enrichment field in this environment
+    const nums = field.sampleValues.map(Number).filter((n) => Number.isFinite(n));
+    if (nums.length === 0) return;
+    const min = Math.min(...nums);
+
+    const result = await getCompanies(
+      {
+        virtualFilters: [{ key: field.key, type: "number", operator: "gt", value: min - 1 }],
+        virtualColumns: [{ key: field.key, type: "number" }],
+      },
+      1,
+      25
+    );
+    expect(result.total).toBeGreaterThan(0);
+
+    // `is` an exact sample narrows to a subset of the `gt` set, never larger.
+    const exact = await getCompanies(
+      { virtualFilters: [{ key: field.key, type: "number", operator: "is", value: nums[0] }] },
+      1,
+      1
+    );
+    expect(exact.total).toBeGreaterThan(0);
+    expect(exact.total).toBeLessThanOrEqual(result.total);
+  }, 30000);
+
+  it("between selects an inclusive numeric range within the unfiltered total", async () => {
+    const discovery = await getCompanyEnrichmentFields({}, 2000, 25);
+    const field = discovery.fields.find((f) => f.type === "Number" && f.sampleValues.length > 0);
+    if (!field) return;
+    const nums = field.sampleValues.map(Number).filter((n) => Number.isFinite(n));
+    if (nums.length === 0) return;
+
+    const all = await getCompanies({}, 1, 1);
+    const between = await getCompanies(
+      {
+        virtualFilters: [
+          { key: field.key, type: "number", operator: "between", value: [Math.min(...nums), Math.max(...nums)] },
+        ],
+      },
+      1,
+      1
+    );
+    expect(between.total).toBeGreaterThan(0);
+    expect(between.total).toBeLessThanOrEqual(all.total);
+  }, 30000);
+});
+
+describe("getCompanies — virtual-column Date filter (ticket #35)", () => {
+  it("selects chronologically and does not throw on malformed date rows", async () => {
+    const discovery = await getCompanyEnrichmentFields({}, 2000, 25);
+    const field = discovery.fields.find((f) => f.type === "Date" && f.sampleValues.length > 0);
+    if (!field) return; // no date enrichment field in this environment
+    const dates = field.sampleValues.filter((v) => /^\d{4}-\d{2}-\d{2}/.test(v)).sort();
+    if (dates.length === 0) return;
+    const earliest = dates[0];
+    const latest = dates[dates.length - 1];
+
+    // `on` a real sample date matches at least that row.
+    const on = await getCompanies(
+      { virtualFilters: [{ key: field.key, type: "date", operator: "on", value: earliest }] },
+      1,
+      1
+    );
+    expect(on.total).toBeGreaterThan(0);
+
+    // Monotonicity of `after`: raising the threshold can only drop rows. This
+    // is the chronological-ordering check, and it exercises the guarded text
+    // compare against whatever malformed dates the key also holds without
+    // throwing.
+    const afterEarly = await getCompanies(
+      { virtualFilters: [{ key: field.key, type: "date", operator: "after", value: earliest }] },
+      1,
+      1
+    );
+    const afterLate = await getCompanies(
+      { virtualFilters: [{ key: field.key, type: "date", operator: "after", value: latest }] },
+      1,
+      1
+    );
+    expect(afterEarly.total).toBeGreaterThanOrEqual(afterLate.total);
+
+    const all = await getCompanies({}, 1, 1);
+    const between = await getCompanies(
+      { virtualFilters: [{ key: field.key, type: "date", operator: "between", value: [earliest, latest] }] },
+      1,
+      1
+    );
+    expect(between.total).toBeGreaterThan(0);
+    expect(between.total).toBeLessThanOrEqual(all.total);
+  }, 30000);
+});
+
 describe("getCompanyDetail", () => {
   it("returns full detail with tags as-is and blocklisted custom_data stripped", async () => {
     // Use source filter to avoid picking up test-inserted records (which sort

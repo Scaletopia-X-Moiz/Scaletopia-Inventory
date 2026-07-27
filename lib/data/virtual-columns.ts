@@ -28,8 +28,11 @@ export interface VirtualColumnFilter {
   type: VirtualColumnType;
   operator: VirtualColumnOperator;
   /** Shape depends on type/operator: a scalar for is/gt/lt/contains, a
-   * [min, max] tuple for between, omitted for is_empty/is_not_empty. */
-  value?: string | number | boolean | [string | number, string | number] | null;
+   * [min, max] tuple for between, omitted for is_empty/is_not_empty. Text
+   * is/is_not additionally accept a `string[]` — the multi-select over a
+   * low-cardinality field's real distinct values (ticket #38); the shared SQL
+   * predicate treats the array as "matches any of" via jsonb containment. */
+  value?: string | number | boolean | string[] | [string | number, string | number] | null;
 }
 
 /** A virtual column added to the Companies/People table for display, distinct
@@ -42,41 +45,116 @@ export interface ActiveVirtualColumn {
   type: VirtualColumnType;
 }
 
-/** Text operators wired up by ticket #34 — the only type with operator UI so
- * far. #35 (Number/Date) and #36 (Boolean/List) add their own operator sets
- * alongside this one; the SQL predicate (virtual-columns.sql) already
- * supports all five types. */
-export const TEXT_OPERATORS: { id: VirtualColumnOperator; label: string; requiresValue: boolean }[] = [
+/** Operator metadata drives both validation (here) and the operator UI
+ * (virtual-columns-bar.tsx). `requiresValue` = one scalar; `requiresRange` =
+ * a [min, max] tuple (the `between` operators); neither = a value-less
+ * operator (is empty / is not empty). Ticket #34 shipped Text; #35 adds
+ * Number and Date; #36 will add Boolean/List. The SQL predicate
+ * (virtual-columns.sql) already supports all five types — these tables gate
+ * what the app is willing to construct and accept back off the URL. */
+export interface VirtualColumnOperatorMeta {
+  id: VirtualColumnOperator;
+  label: string;
+  requiresValue?: boolean;
+  requiresRange?: boolean;
+}
+
+export const TEXT_OPERATORS: VirtualColumnOperatorMeta[] = [
   { id: "is", label: "is", requiresValue: true },
   { id: "is_not", label: "is not", requiresValue: true },
   { id: "contains", label: "contains", requiresValue: true },
   { id: "not_contains", label: "does not contain", requiresValue: true },
-  { id: "is_empty", label: "is empty", requiresValue: false },
-  { id: "is_not_empty", label: "is not empty", requiresValue: false },
+  { id: "is_empty", label: "is empty" },
+  { id: "is_not_empty", label: "is not empty" },
 ];
 
-const TEXT_OPERATOR_IDS = new Set(TEXT_OPERATORS.map((o) => o.id));
+/** Number: `between` carries a [min, max] numeric tuple; the rest a single
+ * number. Values are stored as real JSON numbers (not strings) so the SQL
+ * `enrichment_numeric(f->'value')` read casts them directly (ticket #35). */
+export const NUMBER_OPERATORS: VirtualColumnOperatorMeta[] = [
+  { id: "is", label: "is", requiresValue: true },
+  { id: "is_not", label: "is not", requiresValue: true },
+  { id: "gt", label: "greater than", requiresValue: true },
+  { id: "lt", label: "less than", requiresValue: true },
+  { id: "between", label: "between", requiresRange: true },
+];
+
+/** Date: ISO `YYYY-MM-DD` strings, compared chronologically SQL-side via
+ * enrichment_date_text (ticket #35). `between` carries a [from, to] tuple. */
+export const DATE_OPERATORS: VirtualColumnOperatorMeta[] = [
+  { id: "on", label: "on", requiresValue: true },
+  { id: "before", label: "before", requiresValue: true },
+  { id: "after", label: "after", requiresValue: true },
+  { id: "between", label: "between", requiresRange: true },
+];
+
+/** The types the app can add as columns and filter on. Boolean/List stay out
+ * until ticket #36 even though the SQL predicate already handles them. */
+const SUPPORTED_TYPES: VirtualColumnType[] = ["text", "number", "date"];
+
+export function operatorsForType(type: VirtualColumnType): VirtualColumnOperatorMeta[] {
+  switch (type) {
+    case "text":
+      return TEXT_OPERATORS;
+    case "number":
+      return NUMBER_OPERATORS;
+    case "date":
+      return DATE_OPERATORS;
+    default:
+      return [];
+  }
+}
 
 function isNonEmptyKey(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 200;
 }
 
-/** Only accepts type "text" for now — matches what the UI can actually
- * produce (ticket #34). Loosen alongside #35/#36 as their operator sets land. */
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}/;
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isIsoDate(value: unknown): value is string {
+  return typeof value === "string" && ISO_DATE.test(value);
+}
+
+/** Validates the `value` payload against the column type and the operator's
+ * arity: text wants a non-empty string, number a finite number (a
+ * [min, max] pair for `between`), date an ISO-date string (or pair). A
+ * mismatched shape drops the whole filter rather than coercing, so a
+ * hand-edited URL can't smuggle a string into a numeric comparison. */
+function isValidFilterValue(type: VirtualColumnType, meta: VirtualColumnOperatorMeta, value: unknown): boolean {
+  if (meta.requiresRange) {
+    if (!Array.isArray(value) || value.length !== 2) return false;
+    const [a, b] = value;
+    return type === "number" ? isFiniteNumber(a) && isFiniteNumber(b) : isIsoDate(a) && isIsoDate(b);
+  }
+  if (meta.requiresValue) {
+    if (type === "number") return isFiniteNumber(value);
+    if (type === "date") return isIsoDate(value);
+    return typeof value === "string" && value.length > 0;
+  }
+  return true;
+}
+
+/** Accepts text/number/date filters (tickets #34, #35); boolean/list follow in
+ * #36. Each filter is checked against its type's operator table and value
+ * arity — anything malformed is dropped by the parser rather than thrown. */
 function isValidVirtualColumnFilter(value: unknown): value is VirtualColumnFilter {
   if (typeof value !== "object" || value === null) return false;
   const f = value as Record<string, unknown>;
   if (!isNonEmptyKey(f.key)) return false;
-  if (f.type !== "text") return false;
-  if (typeof f.operator !== "string" || !TEXT_OPERATOR_IDS.has(f.operator as VirtualColumnOperator)) return false;
-  const requiresValue = TEXT_OPERATORS.find((o) => o.id === f.operator)?.requiresValue;
-  return requiresValue ? typeof f.value === "string" && f.value.length > 0 : true;
+  if (typeof f.type !== "string" || !SUPPORTED_TYPES.includes(f.type as VirtualColumnType)) return false;
+  const meta = operatorsForType(f.type as VirtualColumnType).find((o) => o.id === f.operator);
+  if (!meta) return false;
+  return isValidFilterValue(f.type as VirtualColumnType, meta, f.value);
 }
 
 function isValidActiveVirtualColumn(value: unknown): value is ActiveVirtualColumn {
   if (typeof value !== "object" || value === null) return false;
   const c = value as Record<string, unknown>;
-  return isNonEmptyKey(c.key) && c.type === "text";
+  return isNonEmptyKey(c.key) && typeof c.type === "string" && SUPPORTED_TYPES.includes(c.type as VirtualColumnType);
 }
 
 /** Parses the `vf` URL param (a JSON-encoded VirtualColumnFilter[]) shared by
