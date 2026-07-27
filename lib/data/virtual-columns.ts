@@ -105,6 +105,21 @@ export function operatorsForType(type: VirtualColumnType): VirtualColumnOperator
   }
 }
 
+/** Above this many distinct real values, the Text `is` picker keeps free-text
+ * matching instead of a multi-select — "only a handful of distinct values"
+ * (ticket #38). The discovery RPC caps sampleValues per key at 25, so a field
+ * at or below this cap is known to be exhaustively enumerated in the sample
+ * (not truncated) — a safe signal that a multi-select would list every real
+ * value, not a partial set. */
+export const MULTI_SELECT_VALUE_CAP = 12;
+
+/** True when a Text field's distinct real values are few enough to offer as a
+ * multi-select of the real values (ticket #38). An empty set means "no known
+ * values" → fall back to free-text rather than show an empty picker. */
+export function isLowCardinalityTextField(sampleValues: string[]): boolean {
+  return sampleValues.length > 0 && sampleValues.length <= MULTI_SELECT_VALUE_CAP;
+}
+
 function isNonEmptyKey(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 200;
 }
@@ -133,6 +148,11 @@ function isValidFilterValue(type: VirtualColumnType, meta: VirtualColumnOperator
   if (meta.requiresValue) {
     if (type === "number") return isFiniteNumber(value);
     if (type === "date") return isIsoDate(value);
+    // Text is/is_not additionally accept a multi-select value list (ticket #38);
+    // contains/not_contains stay single free-text (substring matching).
+    if ((meta.id === "is" || meta.id === "is_not") && Array.isArray(value)) {
+      return value.length > 0 && value.every((v) => typeof v === "string" && v.length > 0);
+    }
     return typeof value === "string" && value.length > 0;
   }
   return true;

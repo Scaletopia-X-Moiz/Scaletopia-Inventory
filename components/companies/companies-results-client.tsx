@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import type { CompanyListResult } from "@/lib/data/companies";
 import { parseVirtualColumnsParam } from "@/lib/data/virtual-columns";
@@ -61,6 +61,31 @@ export function CompaniesResultsClient() {
     return () => abortRef.current?.abort();
   }, [load]);
 
+  const virtualColumns = useMemo(
+    () => parseVirtualColumnsParam(new URLSearchParams(paramsStr)),
+    [paramsStr]
+  );
+
+  /** Distinct values already on screen per virtual column — the instant seed
+   * the Text `is` value picker shows before the discovery RPC resolves the
+   * fuller, authoritative set (ticket #38). */
+  const onScreenValues = useMemo(() => {
+    const acc: Record<string, Set<string>> = {};
+    for (const col of virtualColumns) acc[col.key] = new Set<string>();
+    for (const row of result?.rows ?? []) {
+      for (const col of virtualColumns) {
+        const v = row.virtualColumnValues?.[col.key];
+        if (typeof v === "string") {
+          const t = v.trim();
+          if (t) acc[col.key].add(t);
+        } else if (typeof v === "number" || typeof v === "boolean") {
+          acc[col.key].add(String(v));
+        }
+      }
+    }
+    return Object.fromEntries(Object.entries(acc).map(([k, s]) => [k, [...s]]));
+  }, [result, virtualColumns]);
+
   const exportHref = `/companies/export?${paramsStr}`;
 
   if (loading) {
@@ -99,9 +124,9 @@ export function CompaniesResultsClient() {
         </div>
       </div>
 
-      <VirtualColumnsBar />
+      <VirtualColumnsBar onScreenValues={onScreenValues} />
 
-      <CompaniesTable rows={result.rows} virtualColumns={parseVirtualColumnsParam(searchParams)} />
+      <CompaniesTable rows={result.rows} virtualColumns={virtualColumns} />
 
       <Pagination
         page={result.page}

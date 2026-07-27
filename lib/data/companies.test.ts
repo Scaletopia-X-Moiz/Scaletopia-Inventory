@@ -212,6 +212,36 @@ describe("getCompanies — virtual-column Text filter (ticket #34)", () => {
     }
   }, 30000);
 
+  it("'is' with a value list matches rows carrying any of the listed values (ticket #38)", async () => {
+    const discovery = await getCompanyEnrichmentFields({}, 2000, 25);
+    const field = discovery.fields.find((f) => f.type === "Text" && f.sampleValues.length >= 2);
+    expect(field).toBeDefined();
+    const values = field!.sampleValues.slice(0, 2);
+
+    // The union of the two values must match at least as many rows as either
+    // value alone, and every returned row must carry one of them.
+    const [a] = values;
+    const onlyA = await getCompanies(
+      { virtualFilters: [{ key: field!.key, type: "text", operator: "is", value: a }] },
+      1,
+      1
+    );
+    const list = await getCompanies(
+      {
+        virtualFilters: [{ key: field!.key, type: "text", operator: "is", value: values }],
+        virtualColumns: [{ key: field!.key, type: "text" }],
+      },
+      1,
+      50
+    );
+
+    expect(list.total).toBeGreaterThanOrEqual(onlyA.total);
+    expect(list.total).toBeGreaterThan(0);
+    for (const row of list.rows) {
+      expect(values).toContain(row.virtualColumnValues?.[field!.key]);
+    }
+  }, 30000);
+
   it("'contains' matches a substring of the field, not just an exact value", async () => {
     const discovery = await getCompanyEnrichmentFields({}, 2000, 25);
     const field = discovery.fields.find(

@@ -112,8 +112,16 @@ $$;
 CREATE OR REPLACE FUNCTION text_filter_matches(data jsonb, f jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
   SELECT CASE f->>'operator'
-    WHEN 'is' THEN COALESCE((data -> (f->>'key')) #>> '{}', '') = COALESCE((f->'value') #>> '{}', '')
-    WHEN 'is_not' THEN COALESCE((data -> (f->>'key')) #>> '{}', '') <> COALESCE((f->'value') #>> '{}', '')
+    -- 'is'/'is_not' accept either a scalar value or a JSON array of values
+    -- (ticket #38's multi-select over a low-cardinality field's real distinct
+    -- values). jsonb containment `@>` unifies both shapes: an array contains
+    -- the row's value iff it matches any member, and — by Postgres's
+    -- scalar-contains-equal-scalar rule — a scalar `@>` the row value is plain
+    -- equality, so the single-value case keeps its exact prior semantics. The
+    -- row value is coalesced to '' (missing key) so 'is_not' still includes a
+    -- row that lacks the key, matching the pre-#38 `<>` behavior.
+    WHEN 'is' THEN (f->'value') @> to_jsonb(COALESCE((data -> (f->>'key')) #>> '{}', ''))
+    WHEN 'is_not' THEN NOT ((f->'value') @> to_jsonb(COALESCE((data -> (f->>'key')) #>> '{}', '')))
     WHEN 'contains' THEN COALESCE((data -> (f->>'key')) #>> '{}', '') ILIKE ('%' || ((f->'value') #>> '{}') || '%')
     WHEN 'not_contains' THEN COALESCE((data -> (f->>'key')) #>> '{}', '') NOT ILIKE ('%' || ((f->'value') #>> '{}') || '%')
     WHEN 'is_empty' THEN is_empty_enrichment_value(data -> (f->>'key'))

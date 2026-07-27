@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import {
+  MULTI_SELECT_VALUE_CAP,
+  isLowCardinalityTextField,
   parseVirtualColumnsParam,
   parseVirtualFiltersParam,
   serializeVirtualColumnsParam,
@@ -95,6 +97,69 @@ describe("virtual_filter_predicate_matches — empty/not-empty share the one nor
       const isNotEmptyOp = await matches({ k: value }, { key: "k", type: "text", operator: "is_not_empty" });
       expect(isEmptyOp).toBe(!isNotEmptyOp);
     }
+  });
+});
+
+describe("virtual_filter_predicate_matches — text is/is_not value list (ticket #38)", () => {
+  it("'is' with a scalar keeps exact-match semantics unchanged", async () => {
+    const filter: VirtualColumnFilter = { key: "tier", type: "text", operator: "is", value: "gold" };
+    expect(await matches({ tier: "gold" }, filter)).toBe(true);
+    expect(await matches({ tier: "silver" }, filter)).toBe(false);
+    expect(await matches({}, filter)).toBe(false);
+  });
+
+  it("'is' with a value list matches any listed value (multi-select 'is any of')", async () => {
+    const filter: VirtualColumnFilter = { key: "tier", type: "text", operator: "is", value: ["gold", "silver"] };
+    expect(await matches({ tier: "gold" }, filter)).toBe(true);
+    expect(await matches({ tier: "silver" }, filter)).toBe(true);
+    expect(await matches({ tier: "bronze" }, filter)).toBe(false);
+    expect(await matches({}, filter)).toBe(false);
+  });
+
+  it("'is_not' with a value list excludes every listed value, keeps the rest (incl. missing)", async () => {
+    const filter: VirtualColumnFilter = { key: "tier", type: "text", operator: "is_not", value: ["gold", "silver"] };
+    expect(await matches({ tier: "gold" }, filter)).toBe(false);
+    expect(await matches({ tier: "silver" }, filter)).toBe(false);
+    expect(await matches({ tier: "bronze" }, filter)).toBe(true);
+    expect(await matches({}, filter)).toBe(true);
+  });
+});
+
+describe("isLowCardinalityTextField (ticket #38)", () => {
+  it("is true only for a non-empty set at or below the cap", () => {
+    expect(isLowCardinalityTextField([])).toBe(false);
+    expect(isLowCardinalityTextField(["a"])).toBe(true);
+    expect(isLowCardinalityTextField(Array.from({ length: MULTI_SELECT_VALUE_CAP }, (_, i) => `v${i}`))).toBe(true);
+    expect(isLowCardinalityTextField(Array.from({ length: MULTI_SELECT_VALUE_CAP + 1 }, (_, i) => `v${i}`))).toBe(false);
+  });
+});
+
+describe("value-list validation on the vf param (ticket #38)", () => {
+  it("round-trips an is/is_not value list unchanged", () => {
+    const filters: VirtualColumnFilter[] = [
+      { key: "tier", type: "text", operator: "is", value: ["gold", "silver"] },
+      { key: "stage", type: "text", operator: "is_not", value: ["lost"] },
+    ];
+    const params = new URLSearchParams();
+    params.set("vf", serializeVirtualFiltersParam(filters)!);
+    expect(parseVirtualFiltersParam(params)).toEqual(filters);
+  });
+
+  it("drops a value list that is empty or carries a blank/non-string entry", () => {
+    const params = new URLSearchParams();
+    params.set(
+      "vf",
+      JSON.stringify([
+        { key: "a", type: "text", operator: "is", value: [] }, // empty list
+        { key: "b", type: "text", operator: "is", value: ["", "x"] }, // blank entry
+        { key: "c", type: "text", operator: "is", value: ["ok", 3] }, // non-string entry
+        { key: "d", type: "text", operator: "contains", value: ["nope"] }, // array not allowed for contains
+        { key: "e", type: "text", operator: "is", value: ["real"] }, // valid — survives
+      ])
+    );
+    expect(parseVirtualFiltersParam(params)).toEqual([
+      { key: "e", type: "text", operator: "is", value: ["real"] },
+    ]);
   });
 });
 
