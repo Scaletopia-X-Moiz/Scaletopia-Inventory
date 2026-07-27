@@ -6,6 +6,7 @@ import {
   getAllFilteredCompanies,
 } from "@/lib/data/companies";
 import { includeOnly } from "@/lib/data/include-exclude";
+import { getCompanyEnrichmentFields } from "@/lib/data/enrichment-fields";
 
 describe("getCompanyFilterOptions", () => {
   it("returns normalized, deduped options for every filter dimension", async () => {
@@ -182,6 +183,70 @@ describe("getCompanies", () => {
       expect(row.niche).toBe(nicheA.id);
     }
   });
+});
+
+describe("getCompanies — virtual-column Text filter (ticket #34)", () => {
+  it("'is' narrows to rows carrying that exact value, and total reflects the narrowed set", async () => {
+    // Find a real Text enrichment key with at least one sample value, rather
+    // than hardcoding a key that may not exist in the connected environment
+    // (same approach as enrichment-fields.test.ts).
+    const discovery = await getCompanyEnrichmentFields({}, 2000, 25);
+    const field = discovery.fields.find((f) => f.type === "Text" && f.sampleValues.length > 0);
+    expect(field).toBeDefined();
+    const value = field!.sampleValues[0];
+
+    const all = await getCompanies({}, 1, 1);
+    const result = await getCompanies(
+      {
+        virtualFilters: [{ key: field!.key, type: "text", operator: "is", value }],
+        virtualColumns: [{ key: field!.key, type: "text" }],
+      },
+      1,
+      50
+    );
+
+    expect(result.total).toBeGreaterThan(0);
+    expect(result.total).toBeLessThanOrEqual(all.total);
+    for (const row of result.rows) {
+      expect(row.virtualColumnValues?.[field!.key]).toBe(value);
+    }
+  }, 30000);
+
+  it("'contains' matches a substring of the field, not just an exact value", async () => {
+    const discovery = await getCompanyEnrichmentFields({}, 2000, 25);
+    const field = discovery.fields.find(
+      (f) => f.type === "Text" && f.sampleValues.some((v) => v.length > 2)
+    );
+    expect(field).toBeDefined();
+    const sample = field!.sampleValues.find((v) => v.length > 2)!;
+    const substring = sample.slice(0, Math.max(2, sample.length - 1));
+
+    const result = await getCompanies(
+      { virtualFilters: [{ key: field!.key, type: "text", operator: "contains", value: substring }] },
+      1,
+      1
+    );
+    expect(result.total).toBeGreaterThan(0);
+  }, 30000);
+
+  it("'is_empty' and 'is_not_empty' exhaustively partition the table for a given key", async () => {
+    const discovery = await getCompanyEnrichmentFields({}, 2000, 25);
+    const field = discovery.fields.find((f) => f.type === "Text");
+    expect(field).toBeDefined();
+
+    const all = await getCompanies({}, 1, 1);
+    const empty = await getCompanies(
+      { virtualFilters: [{ key: field!.key, type: "text", operator: "is_empty" }] },
+      1,
+      1
+    );
+    const notEmpty = await getCompanies(
+      { virtualFilters: [{ key: field!.key, type: "text", operator: "is_not_empty" }] },
+      1,
+      1
+    );
+    expect(empty.total + notEmpty.total).toBe(all.total);
+  }, 30000);
 });
 
 describe("getCompanyDetail", () => {

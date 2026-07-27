@@ -1,4 +1,4 @@
-function formatValue(value: unknown): string {
+export function formatValue(value: unknown): string {
   if (Array.isArray(value)) return value.join(", ");
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "object" && value !== null) return JSON.stringify(value);

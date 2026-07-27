@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import type { CompanyListResult } from "@/lib/data/companies";
+import { parseVirtualColumnsParam } from "@/lib/data/virtual-columns";
 import { CompaniesTable } from "@/components/companies/companies-table";
+import { VirtualColumnsBar } from "@/components/companies/virtual-columns-bar";
 import { Pagination } from "@/components/companies/pagination";
 import { ExportButton } from "@/components/companies/export-button";
 import { PushToClayButton } from "@/components/companies/push-to-clay-button";
@@ -97,7 +99,9 @@ export function CompaniesResultsClient() {
         </div>
       </div>
 
-      <CompaniesTable rows={result.rows} />
+      <VirtualColumnsBar />
+
+      <CompaniesTable rows={result.rows} virtualColumns={parseVirtualColumnsParam(searchParams)} />
 
       <Pagination
         page={result.page}

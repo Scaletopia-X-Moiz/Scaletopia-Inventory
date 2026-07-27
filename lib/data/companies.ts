@@ -8,7 +8,7 @@ import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
 import { sortByLastUpdatedDesc } from "@/lib/data/sort";
 import type { ClayPushRecord } from "@/lib/clay/types";
 import type { IncludeExclude } from "@/lib/data/include-exclude";
-import type { VirtualColumnFilter } from "@/lib/data/virtual-columns";
+import type { ActiveVirtualColumn, VirtualColumnFilter } from "@/lib/data/virtual-columns";
 
 export type SingleSelectFilter = "any" | "not_empty" | "empty";
 
@@ -30,6 +30,11 @@ export interface CompanyListFilters {
    * shared SQL predicate (lib/data/virtual-columns.sql), not the PostgREST
    * builder below — see resolveVirtualFilterIds. */
   virtualFilters?: VirtualColumnFilter[];
+  /** Enrichment fields added as display-only virtual columns on the rendered
+   * page (independent of virtualFilters — a column can be shown before it has
+   * a filter). Only getCompanies (the rendered page) reads this; it has no
+   * bearing on which rows match, so it's not part of toFilterOptionsRpcPayload. */
+  virtualColumns?: ActiveVirtualColumn[];
 }
 
 export interface CompanyListRow {
@@ -60,6 +65,9 @@ export interface CompanyListRow {
    * (export), so exporting the full filtered set doesn't pay for a people
    * lookup on every row. */
   peopleCount?: number;
+  /** custom_data[key] per active virtual column (filters.virtualColumns) —
+   * only populated for getCompanies, matching peopleCount's page-only scope. */
+  virtualColumnValues?: Record<string, unknown>;
 }
 
 export interface CompanyListResult {
@@ -209,6 +217,13 @@ interface VirtualFilterIdRow {
   id: string;
 }
 
+/** PostgREST caps a single response — including an RPC's result set — at 1000
+ * rows (see fetchAllRows above), so a virtual filter matching more than 1000
+ * companies would otherwise come back silently truncated to the first 1000:
+ * confirmed live, a filter matching 2673 rows returned exactly 1000 with no
+ * error. Paged the same way fetchAllRows pages a table query. */
+const RPC_PAGE_SIZE = 1000;
+
 /** Resolves the id set filters.virtualFilters narrows to via the shared SQL
  * predicate (lib/data/virtual-columns.sql), or `null` when no virtual filter
  * is active — the no-op case every list/export/push call site below must
@@ -224,19 +239,41 @@ interface VirtualFilterIdRow {
  * second scan" requirement. */
 async function resolveVirtualFilterIds(filters: CompanyListFilters): Promise<string[] | null> {
   if (!filters.virtualFilters?.length) return null;
-  const { data, error } = await supabaseAdmin.rpc("companies_matching_virtual_filters", {
-    filters: toFilterOptionsRpcPayload(filters),
-  });
-  if (error) throw error;
-  return (data as VirtualFilterIdRow[]).map((row) => row.id);
+  const payload = toFilterOptionsRpcPayload(filters);
+
+  const first = await supabaseAdmin
+    .rpc("companies_matching_virtual_filters", { filters: payload }, { count: "exact" })
+    .range(0, RPC_PAGE_SIZE - 1);
+  if (first.error) throw first.error;
+
+  const ids = (first.data as VirtualFilterIdRow[]).map((row) => row.id);
+  const total = first.count ?? ids.length;
+
+  const pageCount = Math.ceil(total / RPC_PAGE_SIZE);
+  if (pageCount > 1) {
+    const pages = await Promise.all(
+      Array.from({ length: pageCount - 1 }, (_, i) => {
+        const start = (i + 1) * RPC_PAGE_SIZE;
+        return supabaseAdmin
+          .rpc("companies_matching_virtual_filters", { filters: payload })
+          .range(start, start + RPC_PAGE_SIZE - 1);
+      })
+    );
+    for (const page of pages) {
+      if (page.error) throw page.error;
+      ids.push(...(page.data as VirtualFilterIdRow[]).map((row) => row.id));
+    }
+  }
+
+  return ids;
 }
 
 async function fetchFilteredRows(filters: CompanyListFilters): Promise<RawCompanyRow[]> {
   const virtualIds = await resolveVirtualFilterIds(filters);
-  return fetchAllRows<RawCompanyRow>("companies", LIST_COLUMNS, (query) => {
-    const q = applyCompanyFilters(query, filters);
-    return virtualIds !== null ? q.in("id", virtualIds) : q;
-  });
+  if (virtualIds !== null) return fetchRowsForVirtualIds(virtualIds);
+  return fetchAllRows<RawCompanyRow>("companies", LIST_COLUMNS, (query) =>
+    applyCompanyFilters(query, filters)
+  );
 }
 
 /** No-op — kept so callers (clean-names, reverify, reverify-phone) don't need
@@ -283,6 +320,32 @@ function chunkIds(ids: string[], size: number): string[][] {
   return chunks;
 }
 
+/** Ids per `.in()` chunk when re-fetching rows for a resolved virtual-filter id
+ * set below. */
+const VIRTUAL_FILTER_ROW_CHUNK_SIZE = 200;
+
+/** LIST_COLUMNS rows for a virtual-filter id set (resolveVirtualFilterIds),
+ * fanned out and merged the same way fetchCompaniesByIds handles the full `*`
+ * fetch further down. Confirmed empirically against the live table: a single
+ * `.in("id", ids)` (or an equivalent single-request `.or()` of `in.(...)`
+ * groups) throws PostgREST's "Bad Request" once the id list runs past a few
+ * hundred entries — Postgres/PostgREST rejects the request outright before it
+ * ever reaches the query planner, so this isn't a "make the query cheaper"
+ * problem, it's a "the request can't be one HTTP call" problem. ids are
+ * already the *complete* filtered set (resolveVirtualFilterIds sends the full
+ * filter payload, not just virtualFilters), so no filters need reapplying
+ * here — just the id lookup. */
+async function fetchRowsForVirtualIds(ids: string[]): Promise<RawCompanyRow[]> {
+  if (ids.length === 0) return [];
+  const chunks = chunkIds(ids, VIRTUAL_FILTER_ROW_CHUNK_SIZE);
+  const chunkResults = await Promise.all(
+    chunks.map((chunk) =>
+      fetchAllRows<RawCompanyRow>("companies", LIST_COLUMNS, (query) => query.in("id", chunk))
+    )
+  );
+  return chunkResults.flat();
+}
+
 /** Ids per `.in()` chunk when querying people-by-company below. */
 const PEOPLE_COUNT_ID_CHUNK_SIZE = 100;
 
@@ -315,6 +378,41 @@ async function getPeopleCountsForCompanies(ids: string[]): Promise<Map<string, n
   return counts;
 }
 
+/** Ids per `.in()` chunk when querying enrichment values by id below. */
+const ENRICHMENT_VALUES_ID_CHUNK_SIZE = 100;
+
+/** custom_data[key] for each active virtual column, scoped to just the ids on
+ * the rendered page — same shape/reasoning as getPeopleCountsForCompanies:
+ * avoids pulling the whole custom_data blob (and the whole table) just to
+ * populate a handful of display columns for one page. */
+async function getCompanyEnrichmentValues(
+  ids: string[],
+  keys: string[]
+): Promise<Map<string, Record<string, unknown>>> {
+  const result = new Map<string, Record<string, unknown>>();
+  if (ids.length === 0 || keys.length === 0) return result;
+
+  const chunks = chunkIds(ids, ENRICHMENT_VALUES_ID_CHUNK_SIZE);
+  const chunkResults = await Promise.all(
+    chunks.map((chunk) =>
+      fetchAllRows<{ id: string; custom_data: Record<string, unknown> | null }>(
+        "companies",
+        "id,custom_data",
+        (query) => query.in("id", chunk)
+      )
+    )
+  );
+
+  for (const rows of chunkResults) {
+    for (const row of rows) {
+      const values: Record<string, unknown> = {};
+      for (const key of keys) values[key] = row.custom_data?.[key] ?? null;
+      result.set(row.id, values);
+    }
+  }
+  return result;
+}
+
 /** The rendered /companies list page: filter, sort, and paginate entirely in
  * Postgres (see docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md).
  * Deep pages degrade gradually as OFFSET discards preceding rows — accepted
@@ -325,28 +423,51 @@ export async function getCompanies(
   page = 1,
   pageSize = 50
 ): Promise<CompanyListResult> {
-  let query = supabaseAdmin.from("companies").select(LIST_COLUMNS, { count: "exact" });
-  query = applyCompanyFilters(query, filters);
   const virtualIds = await resolveVirtualFilterIds(filters);
-  if (virtualIds !== null) query = query.in("id", virtualIds);
-  query = query
-    .order("last_updated", { ascending: false, nullsFirst: false })
-    .order("id", { ascending: true });
-
   const start = (page - 1) * pageSize;
-  const { data, error, count } = await query.range(start, start + pageSize - 1);
-  if (error) throw error;
 
-  const rows = (data ?? []) as unknown as RawCompanyRow[];
-  const pageRows = rows.map(toListRow);
+  let pageRows: CompanyListRow[];
+  let total: number;
+
+  if (virtualIds !== null) {
+    // A virtual filter is active: the matched id set can't be pushed into a
+    // single `.in()`/`.range()` Postgres query past a few hundred ids (see
+    // fetchRowsForVirtualIds), so order/paginate in app code over the
+    // already-resolved full match instead — the same tradeoff
+    // getAllFilteredCompanies already makes for export.
+    const matched = sortByLastUpdatedDesc(await fetchRowsForVirtualIds(virtualIds));
+    total = matched.length;
+    pageRows = matched.slice(start, start + pageSize).map(toListRow);
+  } else {
+    let query = supabaseAdmin.from("companies").select(LIST_COLUMNS, { count: "exact" });
+    query = applyCompanyFilters(query, filters);
+    query = query
+      .order("last_updated", { ascending: false, nullsFirst: false })
+      .order("id", { ascending: true });
+
+    const { data, error, count } = await query.range(start, start + pageSize - 1);
+    if (error) throw error;
+
+    const rows = (data ?? []) as unknown as RawCompanyRow[];
+    pageRows = rows.map(toListRow);
+    total = count ?? 0;
+  }
   const peopleCounts = await getPeopleCountsForCompanies(pageRows.map((r) => r.id));
   for (const row of pageRows) {
     row.peopleCount = peopleCounts.get(row.id) ?? 0;
   }
 
+  if (filters.virtualColumns?.length) {
+    const keys = filters.virtualColumns.map((c) => c.key);
+    const values = await getCompanyEnrichmentValues(pageRows.map((r) => r.id), keys);
+    for (const row of pageRows) {
+      row.virtualColumnValues = values.get(row.id) ?? {};
+    }
+  }
+
   return {
     rows: pageRows,
-    total: count ?? 0,
+    total,
     page,
     pageSize,
   };

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import type { VirtualColumnFilter } from "@/lib/data/virtual-columns";
+import {
+  parseVirtualColumnsParam,
+  parseVirtualFiltersParam,
+  serializeVirtualColumnsParam,
+  serializeVirtualFiltersParam,
+  type ActiveVirtualColumn,
+  type VirtualColumnFilter,
+} from "@/lib/data/virtual-columns";
 
 /** Exercises the shared SQL predicate (lib/data/virtual-columns.sql) directly
  * with synthetic custom_data/filter payloads, independent of whatever real
@@ -88,6 +95,53 @@ describe("virtual_filter_predicate_matches — empty/not-empty share the one nor
       const isNotEmptyOp = await matches({ k: value }, { key: "k", type: "text", operator: "is_not_empty" });
       expect(isEmptyOp).toBe(!isNotEmptyOp);
     }
+  });
+});
+
+describe("vf/vc URL param round-trip (ticket #34)", () => {
+  it("serializes and re-parses a virtual filter set unchanged", () => {
+    const filters: VirtualColumnFilter[] = [
+      { key: "lead_score", type: "text", operator: "is", value: "gold" },
+      { key: "tier", type: "text", operator: "is_empty" },
+    ];
+    const params = new URLSearchParams();
+    params.set("vf", serializeVirtualFiltersParam(filters)!);
+    expect(parseVirtualFiltersParam(params)).toEqual(filters);
+  });
+
+  it("serializes and re-parses an active-columns set unchanged", () => {
+    const columns: ActiveVirtualColumn[] = [{ key: "lead_score", type: "text" }];
+    const params = new URLSearchParams();
+    params.set("vc", serializeVirtualColumnsParam(columns)!);
+    expect(parseVirtualColumnsParam(params)).toEqual(columns);
+  });
+
+  it("returns undefined/empty for a missing param, without throwing", () => {
+    const params = new URLSearchParams();
+    expect(parseVirtualFiltersParam(params)).toBeUndefined();
+    expect(parseVirtualColumnsParam(params)).toEqual([]);
+  });
+
+  it("drops a malformed vf param instead of throwing", () => {
+    const params = new URLSearchParams();
+    params.set("vf", "{not json");
+    expect(parseVirtualFiltersParam(params)).toBeUndefined();
+  });
+
+  it("drops entries missing a required value or an unsupported type/operator", () => {
+    const params = new URLSearchParams();
+    params.set(
+      "vf",
+      JSON.stringify([
+        { key: "a", type: "text", operator: "is" }, // missing required value
+        { key: "b", type: "number", operator: "gt", value: 5 }, // not text yet (ticket #34 scope)
+        { key: "c", type: "text", operator: "bogus_op", value: "x" },
+        { key: "d", type: "text", operator: "is", value: "ok" },
+      ])
+    );
+    expect(parseVirtualFiltersParam(params)).toEqual([
+      { key: "d", type: "text", operator: "is", value: "ok" },
+    ]);
   });
 });
 

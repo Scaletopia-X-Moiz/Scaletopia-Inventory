@@ -73,85 +73,142 @@ $$;
 -- never matches "a30". Named `_predicate_matches` (singular filter) to keep
 -- it visually distinct from `virtual_filters_match` below (plural, ANDs many)
 -- — the two are easy to transpose at a call site otherwise.
-CREATE OR REPLACE FUNCTION virtual_filter_predicate_matches(data jsonb, f jsonb) RETURNS boolean
+-- Rewritten (ticket #34 perf fix), in two steps, both confirmed with
+-- EXPLAIN/EXPLAIN ANALYZE against the live ~110k-row companies table:
+--
+-- 1. Dropped the original `WITH p AS (...), v AS (...) SELECT ... FROM p, v`
+--    CTE shape in favor of inlining every `data -> (f->>'key')` /
+--    `f->>'type'` etc. read directly. This didn't turn out to be the actual
+--    bottleneck on its own (Postgres 12+ auto-inlines non-recursive CTEs
+--    into the surrounding query by default, so the `WITH` wasn't the
+--    problem the way older Postgres-versions' folklore says it would be) —
+--    kept anyway since it's simpler and reads the same value only once per
+--    branch.
+-- 2. The real bottleneck: whether *this* function itself gets inlined by
+--    Postgres's planner into whatever query calls it. Postgres's
+--    `LANGUAGE sql` function inliner (`inline_function()`) will fold a
+--    function's body directly into the caller's plan as a plain expression
+--    — but only below some function-body complexity; empirically, the
+--    original single function with 5 outer `f->>'type'` branches x ~5
+--    operators each (~24 total WHEN arms across nested CASEs) was NOT
+--    inlined (confirmed via EXPLAIN: it always showed up as an opaque
+--    `virtual_filter_predicate_matches(c.custom_data, vf.value)` function
+--    call in the Filter, never expanded), while smaller versions of the same
+--    shape (fewer branches) *did* inline cleanly into a plain Join Filter
+--    expression. A non-inlined function called once per row of a ~110k-row
+--    scan pays real per-call overhead (confirmed: an equivalent raw
+--    predicate with no function layer at all scans all ~110k rows in ~69ms;
+--    the non-inlined-function version timed out past statement_timeout for
+--    the 'is'/'contains' operators). The fix is to keep every individual
+--    function small enough to inline: this function is now a thin dispatch
+--    by `f->>'type'` to five per-type helper functions below
+--    (text/number/boolean/list/date), each simple enough on its own to
+--    inline (verified individually), and Postgres inlines recursively — a
+--    thin dispatcher that only calls already-inlinable functions is itself
+--    inlinable, so the whole chain collapses into one plain filter
+--    expression with no function-call overhead left, exactly like the
+--    smaller test cases. Semantics (types/operators/branches) are
+--    unchanged, only decomposed into smaller pieces.
+CREATE OR REPLACE FUNCTION text_filter_matches(data jsonb, f jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
-  WITH p AS (
-    SELECT
-      f->>'key' AS key,
-      f->>'type' AS type,
-      f->>'operator' AS operator,
-      f->'value' AS value
-  ),
-  v AS (
-    SELECT data -> p.key AS raw FROM p
-  )
-  SELECT CASE p.type
-    WHEN 'text' THEN
-      CASE p.operator
-        WHEN 'is' THEN COALESCE(v.raw #>> '{}', '') = COALESCE(p.value #>> '{}', '')
-        WHEN 'is_not' THEN COALESCE(v.raw #>> '{}', '') <> COALESCE(p.value #>> '{}', '')
-        WHEN 'contains' THEN COALESCE(v.raw #>> '{}', '') ILIKE ('%' || (p.value #>> '{}') || '%')
-        WHEN 'not_contains' THEN COALESCE(v.raw #>> '{}', '') NOT ILIKE ('%' || (p.value #>> '{}') || '%')
-        WHEN 'is_empty' THEN is_empty_enrichment_value(v.raw)
-        WHEN 'is_not_empty' THEN NOT is_empty_enrichment_value(v.raw)
+  SELECT CASE f->>'operator'
+    WHEN 'is' THEN COALESCE((data -> (f->>'key')) #>> '{}', '') = COALESCE((f->'value') #>> '{}', '')
+    WHEN 'is_not' THEN COALESCE((data -> (f->>'key')) #>> '{}', '') <> COALESCE((f->'value') #>> '{}', '')
+    WHEN 'contains' THEN COALESCE((data -> (f->>'key')) #>> '{}', '') ILIKE ('%' || ((f->'value') #>> '{}') || '%')
+    WHEN 'not_contains' THEN COALESCE((data -> (f->>'key')) #>> '{}', '') NOT ILIKE ('%' || ((f->'value') #>> '{}') || '%')
+    WHEN 'is_empty' THEN is_empty_enrichment_value(data -> (f->>'key'))
+    WHEN 'is_not_empty' THEN NOT is_empty_enrichment_value(data -> (f->>'key'))
+    ELSE false
+  END
+$$;
+
+CREATE OR REPLACE FUNCTION number_filter_matches(data jsonb, f jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE f->>'operator'
+    WHEN 'is' THEN enrichment_numeric(data -> (f->>'key')) IS NOT NULL AND enrichment_numeric(data -> (f->>'key')) = enrichment_numeric(f->'value')
+    WHEN 'is_not' THEN enrichment_numeric(data -> (f->>'key')) IS NOT NULL AND enrichment_numeric(data -> (f->>'key')) <> enrichment_numeric(f->'value')
+    WHEN 'gt' THEN enrichment_numeric(data -> (f->>'key')) IS NOT NULL AND enrichment_numeric(data -> (f->>'key')) > enrichment_numeric(f->'value')
+    WHEN 'lt' THEN enrichment_numeric(data -> (f->>'key')) IS NOT NULL AND enrichment_numeric(data -> (f->>'key')) < enrichment_numeric(f->'value')
+    WHEN 'between' THEN
+      enrichment_numeric(data -> (f->>'key')) IS NOT NULL
+      AND enrichment_numeric(data -> (f->>'key')) BETWEEN enrichment_numeric((f->'value')->0) AND enrichment_numeric((f->'value')->1)
+    ELSE false
+  END
+$$;
+
+CREATE OR REPLACE FUNCTION boolean_filter_matches(data jsonb, f jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE f->>'operator'
+    WHEN 'is_true' THEN
+      CASE jsonb_typeof(data -> (f->>'key'))
+        WHEN 'boolean' THEN ((data -> (f->>'key')) #>> '{}') = 'true'
+        WHEN 'string' THEN lower((data -> (f->>'key')) #>> '{}') IN ('true', 'yes', '1')
         ELSE false
       END
-    WHEN 'number' THEN
-      CASE p.operator
-        WHEN 'is' THEN enrichment_numeric(v.raw) IS NOT NULL AND enrichment_numeric(v.raw) = enrichment_numeric(p.value)
-        WHEN 'is_not' THEN enrichment_numeric(v.raw) IS NOT NULL AND enrichment_numeric(v.raw) <> enrichment_numeric(p.value)
-        WHEN 'gt' THEN enrichment_numeric(v.raw) IS NOT NULL AND enrichment_numeric(v.raw) > enrichment_numeric(p.value)
-        WHEN 'lt' THEN enrichment_numeric(v.raw) IS NOT NULL AND enrichment_numeric(v.raw) < enrichment_numeric(p.value)
-        WHEN 'between' THEN
-          enrichment_numeric(v.raw) IS NOT NULL
-          AND enrichment_numeric(v.raw) BETWEEN enrichment_numeric(p.value->0) AND enrichment_numeric(p.value->1)
-        ELSE false
-      END
-    WHEN 'boolean' THEN
-      CASE p.operator
-        WHEN 'is_true' THEN
-          CASE jsonb_typeof(v.raw)
-            WHEN 'boolean' THEN (v.raw #>> '{}') = 'true'
-            WHEN 'string' THEN lower(v.raw #>> '{}') IN ('true', 'yes', '1')
-            ELSE false
-          END
-        WHEN 'is_false' THEN
-          CASE jsonb_typeof(v.raw)
-            WHEN 'boolean' THEN (v.raw #>> '{}') = 'false'
-            WHEN 'string' THEN lower(v.raw #>> '{}') IN ('false', 'no', '0')
-            ELSE false
-          END
-        ELSE false
-      END
-    WHEN 'list' THEN
-      CASE p.operator
-        WHEN 'contains' THEN jsonb_typeof(v.raw) = 'array' AND v.raw @> jsonb_build_array(p.value)
-        WHEN 'not_contains' THEN NOT (jsonb_typeof(v.raw) = 'array' AND v.raw @> jsonb_build_array(p.value))
-        WHEN 'is_empty' THEN is_empty_enrichment_value(v.raw)
-        WHEN 'is_not_empty' THEN NOT is_empty_enrichment_value(v.raw)
-        ELSE false
-      END
-    WHEN 'date' THEN
-      CASE p.operator
-        WHEN 'on' THEN enrichment_date_text(v.raw) IS NOT NULL AND enrichment_date_text(v.raw) = enrichment_date_text(p.value)
-        WHEN 'before' THEN enrichment_date_text(v.raw) IS NOT NULL AND enrichment_date_text(v.raw) < enrichment_date_text(p.value)
-        WHEN 'after' THEN enrichment_date_text(v.raw) IS NOT NULL AND enrichment_date_text(v.raw) > enrichment_date_text(p.value)
-        WHEN 'between' THEN
-          enrichment_date_text(v.raw) IS NOT NULL
-          AND enrichment_date_text(v.raw) BETWEEN enrichment_date_text(p.value->0) AND enrichment_date_text(p.value->1)
+    WHEN 'is_false' THEN
+      CASE jsonb_typeof(data -> (f->>'key'))
+        WHEN 'boolean' THEN ((data -> (f->>'key')) #>> '{}') = 'false'
+        WHEN 'string' THEN lower((data -> (f->>'key')) #>> '{}') IN ('false', 'no', '0')
         ELSE false
       END
     ELSE false
   END
-  FROM p, v;
+$$;
+
+CREATE OR REPLACE FUNCTION list_filter_matches(data jsonb, f jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE f->>'operator'
+    WHEN 'contains' THEN jsonb_typeof(data -> (f->>'key')) = 'array' AND (data -> (f->>'key')) @> jsonb_build_array(f->'value')
+    WHEN 'not_contains' THEN NOT (jsonb_typeof(data -> (f->>'key')) = 'array' AND (data -> (f->>'key')) @> jsonb_build_array(f->'value'))
+    WHEN 'is_empty' THEN is_empty_enrichment_value(data -> (f->>'key'))
+    WHEN 'is_not_empty' THEN NOT is_empty_enrichment_value(data -> (f->>'key'))
+    ELSE false
+  END
+$$;
+
+CREATE OR REPLACE FUNCTION date_filter_matches(data jsonb, f jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE f->>'operator'
+    WHEN 'on' THEN enrichment_date_text(data -> (f->>'key')) IS NOT NULL AND enrichment_date_text(data -> (f->>'key')) = enrichment_date_text(f->'value')
+    WHEN 'before' THEN enrichment_date_text(data -> (f->>'key')) IS NOT NULL AND enrichment_date_text(data -> (f->>'key')) < enrichment_date_text(f->'value')
+    WHEN 'after' THEN enrichment_date_text(data -> (f->>'key')) IS NOT NULL AND enrichment_date_text(data -> (f->>'key')) > enrichment_date_text(f->'value')
+    WHEN 'between' THEN
+      enrichment_date_text(data -> (f->>'key')) IS NOT NULL
+      AND enrichment_date_text(data -> (f->>'key')) BETWEEN enrichment_date_text((f->'value')->0) AND enrichment_date_text((f->'value')->1)
+    ELSE false
+  END
+$$;
+
+CREATE OR REPLACE FUNCTION virtual_filter_predicate_matches(data jsonb, f jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE f->>'type'
+    WHEN 'text' THEN text_filter_matches(data, f)
+    WHEN 'number' THEN number_filter_matches(data, f)
+    WHEN 'boolean' THEN boolean_filter_matches(data, f)
+    WHEN 'list' THEN list_filter_matches(data, f)
+    WHEN 'date' THEN date_filter_matches(data, f)
+    ELSE false
+  END
 $$;
 
 -- ANDs a jsonb array of virtual-column filters together (an empty/null array
 -- matches every row — the no-virtual-filters-active case that keeps existing
 -- native filtering behavior unchanged). Shared by the facet RPCs
--- (company_filter_options/person_filter_options) and the matching-ids RPCs
--- below, so list/export/push and facets can never disagree on a virtual
--- filter's result.
+-- (company_filter_options/person_filter_options), which call it as a normal
+-- function. The matching-ids RPCs below (companies_matching_virtual_filters /
+-- people_matching_virtual_filters) inline this same `NOT EXISTS` shape
+-- directly into their own WHERE clause instead of calling this function —
+-- see the comment above those two functions for why (ticket #34 perf fix):
+-- a `LANGUAGE sql` function whose body contains an EXISTS (a SubLink) can
+-- never be inlined by the planner (PG's inline_function() bails out whenever
+-- hasSubLinks is set), so calling it from another query's per-row predicate
+-- means every row pays the overhead of a full opaque SQL-function call that
+-- internally re-executes a subquery — confirmed via EXPLAIN ANALYZE to cost
+-- ~100x a plain in-line predicate over the same ~110k rows (69ms vs
+-- 8s+/timeout). This function is kept for the facet callers (unchanged,
+-- out of scope here) and as the single documented definition of "how a
+-- virtual filter array matches", but the two hot list-filtering paths below
+-- must not call through it.
 CREATE OR REPLACE FUNCTION virtual_filters_match(data jsonb, filters jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
   SELECT NOT EXISTS (
@@ -166,8 +223,8 @@ $$;
 -- identical native predicate (search / employee size / niche / source /
 -- industry / country / email+phone presence / emailStatus / phoneType —
 -- mirrors applyCompanyFilters and company_filter_options' `base` CTE)
--- ANDed with virtual_filters_match. Applying the native filters here too
--- (not just the virtual half) matters: without them this would scan the
+-- ANDed with the virtual-filter predicate. Applying the native filters here
+-- too (not just the virtual half) matters: without them this would scan the
 -- *whole* companies table on every virtual-filtered request regardless of
 -- how narrow the native filters already are, instead of the same bounded
 -- working set the native filters produce — which is what "no path pays for
@@ -177,6 +234,28 @@ $$;
 -- non-empty, then intersect via `.in("id", ids)`; when no virtual filter is
 -- active they skip this entirely and existing native-filtering behavior is
 -- unchanged.
+--
+-- ticket #34 perf fix: the virtual-filter AND-across-filters check is
+-- inlined here as `NOT EXISTS (... WHERE NOT virtual_filter_predicate_matches
+-- (...))` directly in this function's own WHERE clause, rather than calling
+-- the shared `virtual_filters_match` helper. Calling `virtual_filters_match`
+-- from here (as ticket #33 originally did) meant every one of the ~110k
+-- company rows paid the cost of an opaque, non-inlinable SQL-function call:
+-- Postgres's planner will never inline a `LANGUAGE sql` function whose body
+-- contains a SubLink (an `EXISTS (...)`  qualifies), so each row's check ran
+-- as a full nested query execution rather than a plain filter expression —
+-- confirmed via EXPLAIN ANALYZE (an equivalent raw predicate with no
+-- function layer at all scanned all ~110k rows in ~69ms; the
+-- virtual_filters_match-wrapped version timed out past Postgres's
+-- statement_timeout on the same table for the 'is'/'contains' operators).
+-- `virtual_filter_predicate_matches` itself has no CTE/SubLink/aggregate in
+-- its body, so once it's the *only* function call in the chain (not nested
+-- inside another opaque function), the planner inlines its CASE expression
+-- directly into this EXISTS subquery's WHERE clause, and the whole thing
+-- runs as ordinary per-row filter evaluation — no per-row function-call
+-- overhead left. `virtual_filters_match` itself is untouched and still used
+-- by the facet RPCs (company_filter_options/person_filter_options in
+-- canonical-columns.sql), which aren't in ticket #34's scope.
 CREATE OR REPLACE FUNCTION companies_matching_virtual_filters(filters jsonb DEFAULT '{}'::jsonb)
 RETURNS TABLE(id uuid) LANGUAGE sql STABLE AS $$
   WITH params AS (
@@ -236,7 +315,10 @@ RETURNS TABLE(id uuid) LANGUAGE sql STABLE AS $$
     AND (cardinality(p.emailstatus_inc) = 0 OR c.email_status = ANY(p.emailstatus_inc))
     AND (cardinality(p.phonetype_exc) = 0 OR c.phone_type IS NULL OR NOT (c.phone_type = ANY(p.phonetype_exc)))
     AND (cardinality(p.phonetype_inc) = 0 OR c.phone_type = ANY(p.phonetype_inc))
-    AND virtual_filters_match(c.custom_data, p.virtual_filters)
+    AND NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements(p.virtual_filters) AS vf
+      WHERE NOT virtual_filter_predicate_matches(c.custom_data, vf)
+    )
 $$;
 
 -- Mirrors companies_matching_virtual_filters for /people — same jsonb shape
@@ -304,5 +386,8 @@ RETURNS TABLE(id uuid) LANGUAGE sql STABLE AS $$
     AND (cardinality(pr.emailstatus_inc) = 0 OR p.email_status = ANY(pr.emailstatus_inc))
     AND (cardinality(pr.phonetype_exc) = 0 OR p.phone_type IS NULL OR NOT (p.phone_type = ANY(pr.phonetype_exc)))
     AND (cardinality(pr.phonetype_inc) = 0 OR p.phone_type = ANY(pr.phonetype_inc))
-    AND virtual_filters_match(p.custom_data, pr.virtual_filters)
+    AND NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements(pr.virtual_filters) AS vf
+      WHERE NOT virtual_filter_predicate_matches(p.custom_data, vf)
+    )
 $$;
