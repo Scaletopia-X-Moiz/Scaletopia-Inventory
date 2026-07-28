@@ -39,56 +39,65 @@ describe("virtual-columns-cache", () => {
 
   it("returns null when nothing is cached", async () => {
     const { readVirtualColumnsCache } = await import("@/lib/data/virtual-columns-cache");
-    expect(readVirtualColumnsCache()).toBeNull();
+    expect(readVirtualColumnsCache("companies")).toBeNull();
   });
 
   it("round-trips a written entry", async () => {
     const { readVirtualColumnsCache, writeVirtualColumnsCache } = await import(
       "@/lib/data/virtual-columns-cache"
     );
-    writeVirtualColumnsCache(columns, filters);
-    expect(readVirtualColumnsCache()).toEqual({ columns, filters });
+    writeVirtualColumnsCache("companies", columns, filters);
+    expect(readVirtualColumnsCache("companies")).toEqual({ columns, filters });
   });
 
   it("expires after the TTL window", async () => {
     const { readVirtualColumnsCache, writeVirtualColumnsCache } = await import(
       "@/lib/data/virtual-columns-cache"
     );
-    writeVirtualColumnsCache(columns, filters);
+    writeVirtualColumnsCache("companies", columns, filters);
     vi.advanceTimersByTime(60 * 60 * 1000 + 1);
-    expect(readVirtualColumnsCache()).toBeNull();
+    expect(readVirtualColumnsCache("companies")).toBeNull();
   });
 
   it("survives a refresh within the TTL window", async () => {
     const { readVirtualColumnsCache, writeVirtualColumnsCache } = await import(
       "@/lib/data/virtual-columns-cache"
     );
-    writeVirtualColumnsCache(columns, filters);
+    writeVirtualColumnsCache("companies", columns, filters);
     vi.advanceTimersByTime(59 * 60 * 1000);
-    expect(readVirtualColumnsCache()).toEqual({ columns, filters });
+    expect(readVirtualColumnsCache("companies")).toEqual({ columns, filters });
   });
 
   it("clears the entry when written with an empty column set", async () => {
     const { readVirtualColumnsCache, writeVirtualColumnsCache } = await import(
       "@/lib/data/virtual-columns-cache"
     );
-    writeVirtualColumnsCache(columns, filters);
-    writeVirtualColumnsCache([], []);
-    expect(readVirtualColumnsCache()).toBeNull();
+    writeVirtualColumnsCache("companies", columns, filters);
+    writeVirtualColumnsCache("companies", [], []);
+    expect(readVirtualColumnsCache("companies")).toBeNull();
   });
 
   it("clearVirtualColumnsCache removes the entry", async () => {
     const { readVirtualColumnsCache, writeVirtualColumnsCache, clearVirtualColumnsCache } =
       await import("@/lib/data/virtual-columns-cache");
-    writeVirtualColumnsCache(columns, filters);
-    clearVirtualColumnsCache();
-    expect(readVirtualColumnsCache()).toBeNull();
+    writeVirtualColumnsCache("companies", columns, filters);
+    clearVirtualColumnsCache("companies");
+    expect(readVirtualColumnsCache("companies")).toBeNull();
   });
 
   it("drops a corrupted entry instead of throwing", async () => {
     const localStorage = installFakeLocalStorage();
     localStorage.setItem("scaletopia:virtual-columns:v1", "not json");
     const { readVirtualColumnsCache } = await import("@/lib/data/virtual-columns-cache");
-    expect(readVirtualColumnsCache()).toBeNull();
+    expect(readVirtualColumnsCache("companies")).toBeNull();
+  });
+
+  it("keeps companies and people caches independent", async () => {
+    const { readVirtualColumnsCache, writeVirtualColumnsCache } = await import(
+      "@/lib/data/virtual-columns-cache"
+    );
+    writeVirtualColumnsCache("companies", columns, filters);
+    expect(readVirtualColumnsCache("people")).toBeNull();
+    expect(readVirtualColumnsCache("companies")).toEqual({ columns, filters });
   });
 });

@@ -1,5 +1,6 @@
 import type { PersonListFilters, SingleSelectFilter } from "@/lib/data/people";
 import { parseIncludeExcludeParam } from "@/lib/data/include-exclude";
+import { parseVirtualFiltersParam, parseVirtualColumnsParam } from "@/lib/data/virtual-columns";
 
 function asSingleSelect(value: string | null): SingleSelectFilter | undefined {
   return value === "any" || value === "not_empty" || value === "empty" ? value : undefined;
@@ -24,5 +25,7 @@ export function parsePersonFilters(searchParams: URLSearchParams): PersonListFil
     jobTitle: searchParams.get("title") ?? undefined,
     employeeMin: Number.isFinite(Number(empMin)) && empMin ? Number(empMin) : undefined,
     employeeMax: Number.isFinite(Number(empMax)) && empMax ? Number(empMax) : undefined,
+    virtualFilters: parseVirtualFiltersParam(searchParams),
+    virtualColumns: parseVirtualColumnsParam(searchParams),
   };
 }

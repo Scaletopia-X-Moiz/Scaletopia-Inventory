@@ -1,6 +1,6 @@
 -- Run once in the Supabase SQL editor (see docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md).
 -- NOTE: on a fresh database, run virtual-columns.sql before this file —
--- company_filter_options below calls virtual_filters_match, defined there.
+-- company_filter_options below calls virtual_filter_predicate_matches, defined there.
 --
 -- Adds app-owned "canonical columns" so Postgres can filter, facet, and sort
 -- the companies list directly instead of the app re-normalizing all ~87k rows
@@ -68,9 +68,13 @@ $$;
 -- ids/counts are returned, labels are attached back in TS
 -- (sourceLabel/industryLabel/countryLabel) so the alias/label tables stay
 -- single-edit-point in TypeScript. `virtualFilters` (ticket #33, see
--- virtual-columns.sql) is folded into the same base scan via
--- virtual_filters_match, so facet counts share the exact predicate the
--- list/export/push seam uses — never a second, independently-maintained copy.
+-- virtual-columns.sql) is folded into the same base scan via an inlined
+-- `NOT EXISTS (... virtual_filter_predicate_matches ...)` (ticket #37 perf
+-- fix — calling through the `virtual_filters_match` wrapper here timed out at
+-- scale, same non-inlinable-SubLink issue documented in virtual-columns.sql
+-- next to `companies_matching_virtual_filters`), so facet counts share the
+-- exact predicate the list/export/push seam uses — never a second,
+-- independently-maintained copy.
 CREATE OR REPLACE FUNCTION company_filter_options(filters jsonb DEFAULT '{}'::jsonb)
 RETURNS jsonb LANGUAGE sql STABLE AS $$
 WITH params AS (
@@ -121,7 +125,10 @@ base AS MATERIALIZED (
     AND (p.phone_filter = 'any'
       OR (p.phone_filter = 'not_empty' AND c.phone IS NOT NULL AND c.phone <> '')
       OR (p.phone_filter = 'empty' AND (c.phone IS NULL OR c.phone = '')))
-    AND (jsonb_array_length(p.virtual_filters) = 0 OR virtual_filters_match(c.custom_data, p.virtual_filters))
+    AND (jsonb_array_length(p.virtual_filters) = 0 OR NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements(p.virtual_filters) AS vf
+      WHERE NOT virtual_filter_predicate_matches(c.custom_data, vf)
+    ))
 ),
 niches AS (
   SELECT base.niche AS id, count(*) AS count FROM base, params

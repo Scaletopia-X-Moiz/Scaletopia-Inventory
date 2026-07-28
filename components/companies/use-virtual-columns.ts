@@ -11,15 +11,21 @@ import {
   type VirtualColumnFilter,
   type VirtualColumnType,
 } from "@/lib/data/virtual-columns";
-import { readVirtualColumnsCache, writeVirtualColumnsCache } from "@/lib/data/virtual-columns-cache";
+import {
+  readVirtualColumnsCache,
+  writeVirtualColumnsCache,
+  type VirtualColumnsCacheTable,
+} from "@/lib/data/virtual-columns-cache";
 
 /** Single source of truth for the active virtual-column set: the `vc`/`vf`
  * URL params, mirrored into a ~1hr client cache so a refresh (or a bare
- * revisit to `/companies`) within the window restores the same columns
- * (ticket #40). Shared by VirtualColumnsBar (the editing UI) and
- * CompaniesResultsClient (the post-push "remove these?" prompt) so both read
- * and write the same state instead of duplicating the URL-sync logic. */
-export function useVirtualColumnsState() {
+ * revisit to the page) within the window restores the same columns (ticket
+ * #40). Shared by VirtualColumnsBar (the editing UI) and *ResultsClient (the
+ * post-push "remove these?" prompt) so both read and write the same state
+ * instead of duplicating the URL-sync logic. `table` scopes the ~1hr cache
+ * (ticket #41) so Companies and People keep independent active-column sets
+ * instead of clobbering each other's cache entry. */
+export function useVirtualColumnsState(table: VirtualColumnsCacheTable = "companies") {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -38,25 +44,25 @@ export function useVirtualColumnsState() {
       else params.delete("vf");
       params.delete("page");
       router.replace(`${pathname}?${params.toString()}`, { scroll: false });
-      writeVirtualColumnsCache(nextColumns, nextFilters);
+      writeVirtualColumnsCache(table, nextColumns, nextFilters);
     },
-    [router, pathname, searchParams]
+    [router, pathname, searchParams, table]
   );
 
-  // On a bare /companies (no `vc` in the URL) restore any still-fresh cached
+  // On a bare page load (no `vc` in the URL) restore any still-fresh cached
   // columns so a refresh or a plain revisit within the TTL window doesn't
   // lose them. When `vc` IS present, keep the cache's TTL alive instead so a
   // long working session doesn't expire mid-use.
   useEffect(() => {
     if (searchParams.get("vc")) {
-      if (activeColumns.length > 0) writeVirtualColumnsCache(activeColumns, activeFilters);
+      if (activeColumns.length > 0) writeVirtualColumnsCache(table, activeColumns, activeFilters);
       return;
     }
-    const cached = readVirtualColumnsCache();
+    const cached = readVirtualColumnsCache(table);
     if (cached && cached.columns.length > 0) persist(cached.columns, cached.filters);
     // Only the URL identity should re-trigger this restore/refresh check.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
+  }, [searchParams, table]);
 
   const addColumn = useCallback(
     (key: string, type: VirtualColumnType) => {

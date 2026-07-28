@@ -1,7 +1,7 @@
 -- Run once in the Supabase SQL editor (see docs/adr/0002-virtual-column-enrichment-filtering.md,
 -- issue #32, parent spec #31).
 -- NOTE: run virtual-columns.sql (ticket #33) before this file — the entity
--- wrappers below call virtual_filters_match, defined there, so an
+-- wrappers below call virtual_filter_predicate_matches, defined there, so an
 -- already-active virtual-column filter also scopes the discovery sample,
 -- exactly like it scopes company_filter_options/person_filter_options.
 --
@@ -217,7 +217,10 @@ CREATE OR REPLACE FUNCTION company_enrichment_fields(
       AND (cardinality(p.emailstatus_exc) = 0 OR c.email_status IS NULL OR NOT (c.email_status = ANY(p.emailstatus_exc)))
       AND (cardinality(p.phonetype_inc) = 0 OR c.phone_type = ANY(p.phonetype_inc))
       AND (cardinality(p.phonetype_exc) = 0 OR c.phone_type IS NULL OR NOT (c.phone_type = ANY(p.phonetype_exc)))
-      AND (jsonb_array_length(p.virtual_filters) = 0 OR virtual_filters_match(c.custom_data, p.virtual_filters))
+      AND (jsonb_array_length(p.virtual_filters) = 0 OR NOT EXISTS (
+        SELECT 1 FROM jsonb_array_elements(p.virtual_filters) AS vf
+        WHERE NOT virtual_filter_predicate_matches(c.custom_data, vf)
+      ))
     LIMIT sample_size
   )
   SELECT jsonb_build_object(
@@ -301,7 +304,10 @@ CREATE OR REPLACE FUNCTION person_enrichment_fields(
       AND (cardinality(pr.emailstatus_exc) = 0 OR p.email_status IS NULL OR NOT (p.email_status = ANY(pr.emailstatus_exc)))
       AND (cardinality(pr.phonetype_inc) = 0 OR p.phone_type = ANY(pr.phonetype_inc))
       AND (cardinality(pr.phonetype_exc) = 0 OR p.phone_type IS NULL OR NOT (p.phone_type = ANY(pr.phonetype_exc)))
-      AND (jsonb_array_length(pr.virtual_filters) = 0 OR virtual_filters_match(p.custom_data, pr.virtual_filters))
+      AND (jsonb_array_length(pr.virtual_filters) = 0 OR NOT EXISTS (
+        SELECT 1 FROM jsonb_array_elements(pr.virtual_filters) AS vf
+        WHERE NOT virtual_filter_predicate_matches(p.custom_data, vf)
+      ))
     LIMIT sample_size
   )
   SELECT jsonb_build_object(

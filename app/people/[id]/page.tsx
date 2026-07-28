@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getPersonDetail } from "@/lib/data/people";
+import { getPersonEnrichmentFields } from "@/lib/data/enrichment-fields";
 import { AppShell } from "@/components/dashboard/app-shell";
 import { Topbar } from "@/components/dashboard/topbar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -20,8 +21,18 @@ export default async function PersonDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const person = await getPersonDetail(id);
+  const [person, enrichmentFields] = await Promise.all([
+    getPersonDetail(id),
+    getPersonEnrichmentFields(),
+  ]);
   if (!person) notFound();
+
+  // Same discovery the /people table's "Add column" picker reads, scoped by
+  // key so EnrichmentList can offer "Add as column" with an identical type
+  // (ticket #41, mirroring the Company detail page's ticket #39 wiring).
+  const enrichmentFieldTypes = Object.fromEntries(
+    enrichmentFields.fields.map((f) => [f.key, f.type])
+  );
 
   return (
     <AppShell>
@@ -130,7 +141,7 @@ export default async function PersonDetailPage({
 
           <section className="flex flex-col gap-2">
             <h2 className="text-sm font-semibold text-ink">Enrichment data</h2>
-            <EnrichmentList data={person.customData} />
+            <EnrichmentList data={person.customData} fieldTypes={enrichmentFieldTypes} basePath="/people" />
           </section>
         </div>
       </main>

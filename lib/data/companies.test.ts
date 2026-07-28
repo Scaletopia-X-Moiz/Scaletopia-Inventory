@@ -4,6 +4,7 @@ import {
   getCompanyDetail,
   getCompanyFilterOptions,
   getAllFilteredCompanies,
+  type CompanyListFilters,
 } from "@/lib/data/companies";
 import { includeOnly } from "@/lib/data/include-exclude";
 import { getCompanyEnrichmentFields } from "@/lib/data/enrichment-fields";
@@ -183,6 +184,42 @@ describe("getCompanies", () => {
       expect(row.niche).toBe(nicheA.id);
     }
   });
+});
+
+describe("getCompanyFilterOptions — facet scoping under virtual filters (ticket #37)", () => {
+  it("facet counts and getCompanies total agree when a virtual filter is active", async () => {
+    // Deliberately uses a Number 'is' filter rather than a Text 'is' filter:
+    // a categorical Text value can be common enough (e.g. a shared category
+    // string) to match thousands of companies, which pushes getCompanies'
+    // virtual-filter id-resolution path (a separate, known perf issue —
+    // multi-round-trip id-then-refetch, not the facet RPC this test targets)
+    // past the statement timeout and makes this test flaky for reasons
+    // unrelated to what it's actually checking. A numeric enrichment value
+    // matched via exact equality is reliably low-cardinality.
+    const discovery = await getCompanyEnrichmentFields({}, 2000, 25);
+    const field = discovery.fields.find((f) => f.type === "Number" && f.sampleValues.length > 0);
+    expect(field).toBeDefined();
+    const nums = field!.sampleValues.map(Number).filter((n) => Number.isFinite(n));
+    expect(nums.length).toBeGreaterThan(0);
+    const value = nums[0];
+
+    const filters: CompanyListFilters = {
+      virtualFilters: [{ key: field!.key, type: "number", operator: "is", value }],
+    };
+
+    const options = await getCompanyFilterOptions(filters);
+    const result = await getCompanies(filters, 1, 1);
+
+    const scopedTotal = [
+      ...options.niches,
+      ...options.sources,
+      ...options.industries,
+      ...options.countries,
+    ].reduce((max, o) => Math.max(max, o.count), 0);
+
+    expect(scopedTotal).toBeLessThanOrEqual(result.total);
+    expect(scopedTotal).toBeGreaterThan(0);
+  }, 30000);
 });
 
 describe("getCompanies — virtual-column Text filter (ticket #34)", () => {

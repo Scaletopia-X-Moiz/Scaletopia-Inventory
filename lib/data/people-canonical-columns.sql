@@ -1,7 +1,7 @@
 -- Run once in the Supabase SQL editor (see docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md
 -- and the "people" follow-up tickets #20-#25 that extend that same pattern to /people).
 -- NOTE: on a fresh database, run virtual-columns.sql before this file —
--- person_filter_options below calls virtual_filters_match, defined there.
+-- person_filter_options below calls virtual_filter_predicate_matches, defined there.
 --
 -- Adds app-owned "canonical columns" so Postgres can filter, facet, and sort
 -- the people list directly instead of the app re-normalizing/joining against
@@ -76,8 +76,10 @@ $$;
 -- come straight from the client, already canonical, so no alias table is
 -- needed here — only ids/counts are returned, labels are attached back in TS.
 -- `virtualFilters` (ticket #33, see virtual-columns.sql) is folded into the
--- same base scan via virtual_filters_match, sharing the exact predicate the
--- People list/export/push seam uses.
+-- same base scan via an inlined `NOT EXISTS (... virtual_filter_predicate_matches
+-- ...)` (ticket #37 perf fix — same non-inlinable-SubLink timeout as
+-- `company_filter_options`, not the `virtual_filters_match` wrapper), sharing
+-- the exact predicate the People list/export/push seam uses.
 CREATE OR REPLACE FUNCTION person_filter_options(filters jsonb DEFAULT '{}'::jsonb)
 RETURNS jsonb LANGUAGE sql STABLE AS $$
 WITH params AS (
@@ -131,7 +133,10 @@ base AS MATERIALIZED (
     AND (pr.phone_filter = 'any'
       OR (pr.phone_filter = 'not_empty' AND p.phone IS NOT NULL AND p.phone <> '')
       OR (pr.phone_filter = 'empty' AND (p.phone IS NULL OR p.phone = '')))
-    AND (jsonb_array_length(pr.virtual_filters) = 0 OR virtual_filters_match(p.custom_data, pr.virtual_filters))
+    AND (jsonb_array_length(pr.virtual_filters) = 0 OR NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements(pr.virtual_filters) AS vf
+      WHERE NOT virtual_filter_predicate_matches(p.custom_data, vf)
+    ))
 ),
 niches AS (
   SELECT token AS id, count(*) AS count FROM (

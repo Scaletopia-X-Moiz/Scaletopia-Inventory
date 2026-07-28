@@ -30,7 +30,19 @@ function isValidHttps(url: string): boolean {
   }
 }
 
-export function PushToClayButton({ paramsStr, total }: { paramsStr: string; total: number }) {
+export function PushToClayButton({
+  paramsStr,
+  total,
+  onDone,
+}: {
+  paramsStr: string;
+  total: number;
+  /** Fired once the push stream reaches its `done` event (success or partial
+   * failure alike) — the caller uses this to offer removing any active
+   * temporary virtual columns (ticket #41, mirroring ticket #40's Companies
+   * wiring). */
+  onDone?: () => void;
+}) {
   const [status, setStatus] = useState<Status>("idle");
   const [webhookUrl, setWebhookUrl] = useState("");
   const [pushLabel, setPushLabel] = useState<string | null>(null);
@@ -134,6 +146,7 @@ export function PushToClayButton({ paramsStr, total }: { paramsStr: string; tota
       } else {
         showToast(`All ${errors} pushes failed. Check the webhook URL.`, "error");
       }
+      onDone?.();
     }
   }
 

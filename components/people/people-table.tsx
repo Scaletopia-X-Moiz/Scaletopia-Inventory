@@ -1,8 +1,10 @@
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 import type { PersonListRow } from "@/lib/data/people";
+import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
 import { EmailStatusBadge } from "@/components/people/email-status-badge";
 import { PhoneStatusBadge } from "@/components/people/phone-status-badge";
+import { formatValue } from "@/components/companies/enrichment-list";
 
 function formatLastUpdated(value: string | null): string {
   if (!value) return "—";
@@ -25,7 +27,13 @@ const HEADERS = [
   "Last Updated",
 ];
 
-export function PeopleTable({ rows }: { rows: PersonListRow[] }) {
+export function PeopleTable({
+  rows,
+  virtualColumns = [],
+}: {
+  rows: PersonListRow[];
+  virtualColumns?: ActiveVirtualColumn[];
+}) {
   if (rows.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-rule bg-card px-6 py-12 text-center text-sm text-ink-soft">
@@ -45,6 +53,14 @@ export function PeopleTable({ rows }: { rows: PersonListRow[] }) {
                 className="whitespace-nowrap px-3 py-2.5 text-left text-xs font-semibold text-ink-soft"
               >
                 {h}
+              </th>
+            ))}
+            {virtualColumns.map((col) => (
+              <th
+                key={col.key}
+                className="whitespace-nowrap px-3 py-2.5 text-left text-xs font-semibold text-stamp"
+              >
+                {col.key}
               </th>
             ))}
           </tr>
@@ -107,6 +123,14 @@ export function PeopleTable({ rows }: { rows: PersonListRow[] }) {
               <PersonCell href={`/people/${row.id}`} mono>
                 {formatLastUpdated(row.lastUpdated)}
               </PersonCell>
+              {virtualColumns.map((col) => {
+                const value = row.virtualColumnValues?.[col.key];
+                return (
+                  <PersonCell key={col.key} href={`/people/${row.id}`}>
+                    {value == null ? "—" : formatValue(value)}
+                  </PersonCell>
+                );
+              })}
             </tr>
           ))}
         </tbody>

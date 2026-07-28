@@ -30,7 +30,7 @@ interface EnrichmentField {
  * filter scope changes — page/vc/vf are stripped from the scope key, so adding a
  * column or toggling a value in the picker never re-fires discovery (that's what
  * keeps the picker stable and the value-add feeling instant, ticket #38). */
-function useEnrichmentFields() {
+function useEnrichmentFields(endpoint: string) {
   const searchParams = useSearchParams();
   // Discovery result tagged with the scope it was fetched for, so a scope
   // change invalidates it by derivation (below) rather than via a
@@ -58,14 +58,14 @@ function useEnrichmentFields() {
     if (startedRef.current === scopeKey) return;
     startedRef.current = scopeKey;
     setState({ scope: scopeKey, fields: null, loading: true });
-    fetch(`/api/companies/enrichment-fields?${scopeKey}`)
+    fetch(`${endpoint}?${scopeKey}`)
       .then((r) => {
         if (!r.ok) throw new Error(r.status.toString());
         return r.json() as Promise<{ fields: EnrichmentField[] }>;
       })
       .then((data) => setState({ scope: scopeKey, fields: data.fields, loading: false }))
       .catch(() => setState({ scope: scopeKey, fields: [], loading: false }));
-  }, [scopeKey]);
+  }, [scopeKey, endpoint]);
 
   return { fields, loading, ensureLoaded };
 }
@@ -88,6 +88,7 @@ export function VirtualColumnsBar({
   removeColumn,
   setFilter,
   onScreenValues = {},
+  endpoint = "/api/companies/enrichment-fields",
 }: {
   activeColumns: ActiveVirtualColumn[];
   activeFilters: VirtualColumnFilter[];
@@ -95,8 +96,11 @@ export function VirtualColumnsBar({
   removeColumn: (key: string) => void;
   setFilter: (key: string, filter: VirtualColumnFilter | null) => void;
   onScreenValues?: Record<string, string[]>;
+  /** Enrichment-field discovery endpoint — defaults to Companies; People
+   * passes "/api/people/enrichment-fields" (ticket #41). */
+  endpoint?: string;
 }) {
-  const { fields, loading, ensureLoaded } = useEnrichmentFields();
+  const { fields, loading, ensureLoaded } = useEnrichmentFields(endpoint);
 
   /** The field's authoritative distinct values from discovery, or `null` while
    * discovery is still loading (fields === null). Once loaded, a key absent

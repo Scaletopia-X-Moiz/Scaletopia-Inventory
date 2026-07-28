@@ -47,3 +47,27 @@ describe("PeopleTable — bug 5c: Job Title column", () => {
     expect(emptyHtml).toContain("Ada Lovelace");
   });
 });
+
+describe("PeopleTable — virtual columns (ticket #41)", () => {
+  it("renders an extra header and cell for each active virtual column", () => {
+    const html = renderToStaticMarkup(
+      createElement(PeopleTable, {
+        rows: [makeRow({ virtualColumnValues: { lead_score: 87 } })],
+        virtualColumns: [{ key: "lead_score", type: "number" }],
+      })
+    );
+    expect(html).toContain("lead_score");
+    expect(html).toContain("87");
+  });
+
+  it("shows an em dash when a row has no value for the active column", () => {
+    const html = renderToStaticMarkup(
+      createElement(PeopleTable, {
+        rows: [makeRow({ virtualColumnValues: {} })],
+        virtualColumns: [{ key: "lead_score", type: "number" }],
+      })
+    );
+    expect(html).toContain("lead_score");
+    expect(html).toContain("—");
+  });
+});

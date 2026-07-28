@@ -15,6 +15,7 @@ export function formatValue(value: unknown): string {
 export function EnrichmentList({
   data,
   fieldTypes = {},
+  basePath = "/companies",
 }: {
   data: Record<string, unknown>;
   /** Discovered type per enrichment key (lib/data/enrichment-fields.ts),
@@ -23,6 +24,9 @@ export function EnrichmentList({
    * picker would. A key absent here (outside the discovery sample, or
    * blocklisted upstream via filterCustomData) gets no action. */
   fieldTypes?: Record<string, EnrichmentFieldType>;
+  /** List page "Add as column" navigates to — defaults to Companies; People
+   * detail passes "/people" (ticket #41). */
+  basePath?: string;
 }) {
   const router = useRouter();
   const entries = Object.entries(data);
@@ -39,7 +43,7 @@ export function EnrichmentList({
     const type = addableVirtualColumnType(fieldTypes[key]);
     if (!type) return;
     const serialized = serializeVirtualColumnsParam([{ key, type }]);
-    router.push(serialized ? `/companies?vc=${encodeURIComponent(serialized)}` : "/companies");
+    router.push(serialized ? `${basePath}?vc=${encodeURIComponent(serialized)}` : basePath);
   }
 
   return (

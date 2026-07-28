@@ -230,22 +230,22 @@ $$;
 
 -- ANDs a jsonb array of virtual-column filters together (an empty/null array
 -- matches every row — the no-virtual-filters-active case that keeps existing
--- native filtering behavior unchanged). Shared by the facet RPCs
--- (company_filter_options/person_filter_options), which call it as a normal
--- function. The matching-ids RPCs below (companies_matching_virtual_filters /
--- people_matching_virtual_filters) inline this same `NOT EXISTS` shape
--- directly into their own WHERE clause instead of calling this function —
--- see the comment above those two functions for why (ticket #34 perf fix):
--- a `LANGUAGE sql` function whose body contains an EXISTS (a SubLink) can
--- never be inlined by the planner (PG's inline_function() bails out whenever
--- hasSubLinks is set), so calling it from another query's per-row predicate
--- means every row pays the overhead of a full opaque SQL-function call that
--- internally re-executes a subquery — confirmed via EXPLAIN ANALYZE to cost
--- ~100x a plain in-line predicate over the same ~110k rows (69ms vs
--- 8s+/timeout). This function is kept for the facet callers (unchanged,
--- out of scope here) and as the single documented definition of "how a
--- virtual filter array matches", but the two hot list-filtering paths below
--- must not call through it.
+-- native filtering behavior unchanged). Kept as the single documented
+-- definition of "how a virtual filter array matches", but every caller below
+-- (list, facet, and discovery RPCs alike) inlines this same `NOT EXISTS`
+-- shape directly into its own WHERE clause instead of calling this function
+-- as an opaque function call, because a `LANGUAGE sql` function whose body
+-- contains an EXISTS (a SubLink) can never be inlined by the planner (PG's
+-- inline_function() bails out whenever hasSubLinks is set) — calling it from
+-- another query's per-row predicate means every row pays the overhead of a
+-- full opaque SQL-function call that internally re-executes a subquery,
+-- confirmed via EXPLAIN ANALYZE to cost ~100x a plain in-line predicate over
+-- the same ~110k rows (69ms vs 8s+/timeout). First caught in the two
+-- list-filtering RPCs (ticket #34 perf fix); the facet RPCs
+-- (company_filter_options/person_filter_options) and the discovery RPCs
+-- (company_enrichment_fields/person_enrichment_fields) had the same bug and
+-- were fixed the same way later (ticket #37 perf fix) — no caller should
+-- reference this function directly.
 CREATE OR REPLACE FUNCTION virtual_filters_match(data jsonb, filters jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
   SELECT NOT EXISTS (
@@ -290,9 +290,13 @@ $$;
 -- inside another opaque function), the planner inlines its CASE expression
 -- directly into this EXISTS subquery's WHERE clause, and the whole thing
 -- runs as ordinary per-row filter evaluation — no per-row function-call
--- overhead left. `virtual_filters_match` itself is untouched and still used
--- by the facet RPCs (company_filter_options/person_filter_options in
--- canonical-columns.sql), which aren't in ticket #34's scope.
+-- overhead left. `virtual_filters_match` itself is kept only as the
+-- documented reference definition — the facet RPCs
+-- (company_filter_options/person_filter_options in canonical-columns.sql)
+-- and the discovery RPCs (company_enrichment_fields/person_enrichment_fields
+-- in enrichment-fields.sql) had the same non-inlinable-call bug and were
+-- fixed the same way later (ticket #37 perf fix); no caller should reference
+-- `virtual_filters_match` directly.
 CREATE OR REPLACE FUNCTION companies_matching_virtual_filters(filters jsonb DEFAULT '{}'::jsonb)
 RETURNS TABLE(id uuid) LANGUAGE sql STABLE AS $$
   WITH params AS (
@@ -356,6 +360,7 @@ RETURNS TABLE(id uuid) LANGUAGE sql STABLE AS $$
       SELECT 1 FROM jsonb_array_elements(p.virtual_filters) AS vf
       WHERE NOT virtual_filter_predicate_matches(c.custom_data, vf)
     )
+  ORDER BY c.id
 $$;
 
 -- Mirrors companies_matching_virtual_filters for /people — same jsonb shape
@@ -427,4 +432,5 @@ RETURNS TABLE(id uuid) LANGUAGE sql STABLE AS $$
       SELECT 1 FROM jsonb_array_elements(pr.virtual_filters) AS vf
       WHERE NOT virtual_filter_predicate_matches(p.custom_data, vf)
     )
+  ORDER BY p.id
 $$;
