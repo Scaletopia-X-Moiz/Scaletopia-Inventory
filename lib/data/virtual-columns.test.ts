@@ -81,11 +81,69 @@ describe("virtual_filter_predicate_matches — date", () => {
   });
 });
 
+describe("virtual_filter_predicate_matches — boolean (ticket #36)", () => {
+  it("is_true/is_false read a real JSON boolean", async () => {
+    const isTrue: VirtualColumnFilter = { key: "is_active", type: "boolean", operator: "is_true" };
+    const isFalse: VirtualColumnFilter = { key: "is_active", type: "boolean", operator: "is_false" };
+    expect(await matches({ is_active: true }, isTrue)).toBe(true);
+    expect(await matches({ is_active: false }, isTrue)).toBe(false);
+    expect(await matches({ is_active: false }, isFalse)).toBe(true);
+    expect(await matches({ is_active: true }, isFalse)).toBe(false);
+  });
+
+  it("is_true/is_false also read truthy/falsy string variants", async () => {
+    const isTrue: VirtualColumnFilter = { key: "verified", type: "boolean", operator: "is_true" };
+    const isFalse: VirtualColumnFilter = { key: "verified", type: "boolean", operator: "is_false" };
+    expect(await matches({ verified: "true" }, isTrue)).toBe(true);
+    expect(await matches({ verified: "yes" }, isTrue)).toBe(true);
+    expect(await matches({ verified: "1" }, isTrue)).toBe(true);
+    expect(await matches({ verified: "false" }, isFalse)).toBe(true);
+    expect(await matches({ verified: "no" }, isFalse)).toBe(true);
+    expect(await matches({ verified: "0" }, isFalse)).toBe(true);
+  });
+
+  it("excludes junk/missing values from both branches instead of throwing", async () => {
+    const isTrue: VirtualColumnFilter = { key: "flag", type: "boolean", operator: "is_true" };
+    const isFalse: VirtualColumnFilter = { key: "flag", type: "boolean", operator: "is_false" };
+    expect(await matches({ flag: "-" }, isTrue)).toBe(false);
+    expect(await matches({ flag: "-" }, isFalse)).toBe(false);
+    expect(await matches({}, isTrue)).toBe(false);
+    expect(await matches({}, isFalse)).toBe(false);
+  });
+});
+
 describe("virtual_filter_predicate_matches — list", () => {
   it("matches an exact member, not a near-string (a3 does not match a30)", async () => {
     const contains: VirtualColumnFilter = { key: "specialties", type: "list", operator: "contains", value: "a3" };
     expect(await matches({ specialties: ["a3", "a4"] }, contains)).toBe(true);
     expect(await matches({ specialties: ["a30"] }, contains)).toBe(false);
+  });
+
+  it("not_contains is the exact inverse, member-exact (ticket #36)", async () => {
+    const notContains: VirtualColumnFilter = {
+      key: "specialties",
+      type: "list",
+      operator: "not_contains",
+      value: "a3",
+    };
+    expect(await matches({ specialties: ["a3", "a4"] }, notContains)).toBe(false);
+    expect(await matches({ specialties: ["a30"] }, notContains)).toBe(true);
+  });
+
+  it("is_empty/is_not_empty treat a zero-length array as empty (ticket #36)", async () => {
+    const empty: VirtualColumnFilter = { key: "specialties", type: "list", operator: "is_empty" };
+    const notEmpty: VirtualColumnFilter = { key: "specialties", type: "list", operator: "is_not_empty" };
+    expect(await matches({ specialties: [] }, empty)).toBe(true);
+    expect(await matches({ specialties: ["a3"] }, empty)).toBe(false);
+    expect(await matches({ specialties: [] }, notEmpty)).toBe(false);
+    expect(await matches({ specialties: ["a3"] }, notEmpty)).toBe(true);
+  });
+
+  it("does not match on a substring of a serialized array (member-exactness, not ILIKE)", async () => {
+    const contains: VirtualColumnFilter = { key: "specialties", type: "list", operator: "contains", value: "a3" };
+    // A non-array custom_data value must never match, even if its raw text
+    // would substring-contain the target value.
+    expect(await matches({ specialties: "a3, a30" }, contains)).toBe(false);
   });
 });
 
@@ -199,12 +257,13 @@ describe("vf/vc URL param round-trip (ticket #34)", () => {
       "vf",
       JSON.stringify([
         { key: "a", type: "text", operator: "is" }, // missing required value
-        { key: "b", type: "boolean", operator: "is_true" }, // not wired until ticket #36
+        { key: "b", type: "boolean", operator: "is_true" }, // valid, value-less (ticket #36)
         { key: "c", type: "text", operator: "bogus_op", value: "x" },
         { key: "d", type: "text", operator: "is", value: "ok" },
       ])
     );
     expect(parseVirtualFiltersParam(params)).toEqual([
+      { key: "b", type: "boolean", operator: "is_true" },
       { key: "d", type: "text", operator: "is", value: "ok" },
     ]);
   });
@@ -242,6 +301,46 @@ describe("vf/vc URL param round-trip (ticket #34)", () => {
     const columns: ActiveVirtualColumn[] = [
       { key: "lead_score", type: "number" },
       { key: "indexed_at", type: "date" },
+    ];
+    const params = new URLSearchParams();
+    params.set("vc", serializeVirtualColumnsParam(columns)!);
+    expect(parseVirtualColumnsParam(params)).toEqual(columns);
+  });
+
+  it("round-trips boolean and list filters (ticket #36)", () => {
+    const filters: VirtualColumnFilter[] = [
+      { key: "is_active", type: "boolean", operator: "is_true" },
+      { key: "verified", type: "boolean", operator: "is_false" },
+      { key: "specialties", type: "list", operator: "contains", value: "a3" },
+      { key: "specialties", type: "list", operator: "is_not_empty" },
+    ];
+    const params = new URLSearchParams();
+    params.set("vf", serializeVirtualFiltersParam(filters)!);
+    expect(parseVirtualFiltersParam(params)).toEqual(filters);
+  });
+
+  it("drops boolean/list filters with the wrong shape (ticket #36)", () => {
+    const params = new URLSearchParams();
+    params.set(
+      "vf",
+      JSON.stringify([
+        { key: "a", type: "boolean", operator: "is_true", value: true }, // value-less op carrying a value is still parsed fine (value ignored)
+        { key: "b", type: "boolean", operator: "gt", value: true }, // gt isn't a boolean operator
+        { key: "c", type: "list", operator: "contains" }, // missing required value
+        { key: "d", type: "list", operator: "contains", value: ["a3"] }, // array not allowed — list contains wants one string
+        { key: "e", type: "list", operator: "is_empty" }, // valid — survives
+      ])
+    );
+    expect(parseVirtualFiltersParam(params)).toEqual([
+      { key: "a", type: "boolean", operator: "is_true", value: true },
+      { key: "e", type: "list", operator: "is_empty" },
+    ]);
+  });
+
+  it("accepts boolean and list active columns (ticket #36)", () => {
+    const columns: ActiveVirtualColumn[] = [
+      { key: "is_active", type: "boolean" },
+      { key: "specialties", type: "list" },
     ];
     const params = new URLSearchParams();
     params.set("vc", serializeVirtualColumnsParam(columns)!);

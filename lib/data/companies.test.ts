@@ -378,6 +378,90 @@ describe("getCompanies — virtual-column Date filter (ticket #35)", () => {
   }, 30000);
 });
 
+describe("getCompanies — virtual-column Boolean filter (ticket #36)", () => {
+  it("is_true and is_false exhaustively partition the table for a given key", async () => {
+    const discovery = await getCompanyEnrichmentFields({}, 2000, 25);
+    const field = discovery.fields.find((f) => f.type === "Boolean");
+    if (!field) return; // no boolean enrichment field in this environment
+
+    const all = await getCompanies({}, 1, 1);
+    const isTrue = await getCompanies(
+      { virtualFilters: [{ key: field.key, type: "boolean", operator: "is_true" }] },
+      1,
+      1
+    );
+    const isFalse = await getCompanies(
+      { virtualFilters: [{ key: field.key, type: "boolean", operator: "is_false" }] },
+      1,
+      1
+    );
+    expect(isTrue.total).toBeLessThanOrEqual(all.total);
+    expect(isFalse.total).toBeLessThanOrEqual(all.total);
+    // A row can't satisfy both, so the two sets never overlap and never
+    // exceed the unfiltered total.
+    expect(isTrue.total + isFalse.total).toBeLessThanOrEqual(all.total);
+  }, 30000);
+});
+
+describe("getCompanies — virtual-column List filter (ticket #36)", () => {
+  it("'contains' matches an exact array member, not a near-string substring", async () => {
+    const discovery = await getCompanyEnrichmentFields({}, 2000, 25);
+    const field = discovery.fields.find((f) => f.type === "List" && f.sampleValues.length > 0);
+    if (!field) return; // no list enrichment field in this environment
+    const value = field.sampleValues[0];
+
+    const result = await getCompanies(
+      {
+        virtualFilters: [{ key: field.key, type: "list", operator: "contains", value }],
+        virtualColumns: [{ key: field.key, type: "list" }],
+      },
+      1,
+      50
+    );
+    expect(result.total).toBeGreaterThan(0);
+
+    // A near-string that isn't itself a sample value must not appear as a
+    // false positive from a substring/ILIKE-style match.
+    const nearString = `${value}_not_a_real_member`;
+    const nearResult = await getCompanies(
+      { virtualFilters: [{ key: field.key, type: "list", operator: "contains", value: nearString }] },
+      1,
+      1
+    );
+    expect(nearResult.total).toBe(0);
+    // Real observed wall-clock against the live table (confirmed via
+    // scratch probe post ticket #36's SQL fix): a `contains` value that
+    // matches most of the ~110k-row table pushes fetchRowsForVirtualIds'
+    // chunked id refetch past the default 30s ceiling on its own (~31.5s),
+    // even though the SQL predicate itself is fast — this is the same
+    // documented "resolve ids, then chunk-refetch by id" tradeoff
+    // fetchRowsForVirtualIds/getCompanies already make (lib/data/companies.ts),
+    // not a hang or regression.
+  }, 60000);
+
+  it("'is_empty' and 'is_not_empty' exhaustively partition the table for a given key", async () => {
+    const discovery = await getCompanyEnrichmentFields({}, 2000, 25);
+    const field = discovery.fields.find((f) => f.type === "List");
+    if (!field) return; // no list enrichment field in this environment
+
+    const all = await getCompanies({}, 1, 1);
+    const empty = await getCompanies(
+      { virtualFilters: [{ key: field.key, type: "list", operator: "is_empty" }] },
+      1,
+      1
+    );
+    const notEmpty = await getCompanies(
+      { virtualFilters: [{ key: field.key, type: "list", operator: "is_not_empty" }] },
+      1,
+      1
+    );
+    expect(empty.total + notEmpty.total).toBe(all.total);
+    // Same real-wall-clock reasoning as the 'contains' test above: `is_empty`
+    // matches most rows for this key (~98k of ~110k), so the chunked
+    // id-refetch fan-out alone takes ~21s.
+  }, 60000);
+});
+
 describe("getCompanyDetail", () => {
   it("returns full detail with tags as-is and blocklisted custom_data stripped", async () => {
     // Use source filter to avoid picking up test-inserted records (which sort

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getCompanyDetail } from "@/lib/data/companies";
 import { getPeopleByCompanyId } from "@/lib/data/people";
+import { getCompanyEnrichmentFields } from "@/lib/data/enrichment-fields";
 import { AppShell } from "@/components/dashboard/app-shell";
 import { Topbar } from "@/components/dashboard/topbar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,11 +22,19 @@ export default async function CompanyDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const [company, people] = await Promise.all([
+  const [company, people, enrichmentFields] = await Promise.all([
     getCompanyDetail(id),
     getPeopleByCompanyId(id),
+    getCompanyEnrichmentFields(),
   ]);
   if (!company) notFound();
+
+  // Same discovery the /companies table's "Add column" picker reads, scoped
+  // by key so EnrichmentList can offer "Add as column" with an identical
+  // type (ticket #39).
+  const enrichmentFieldTypes = Object.fromEntries(
+    enrichmentFields.fields.map((f) => [f.key, f.type])
+  );
 
   const location = [company.city, company.state, company.country].filter(Boolean).join(", ");
 
@@ -169,7 +178,7 @@ export default async function CompanyDetailPage({
 
           <section className="flex flex-col gap-2 animate-in animate-in-stagger-4">
             <h2 className="text-sm font-semibold text-ink">Enrichment data</h2>
-            <EnrichmentList data={company.customData} />
+            <EnrichmentList data={company.customData} fieldTypes={enrichmentFieldTypes} />
           </section>
 
           <section className="flex flex-col gap-2 animate-in animate-in-stagger-5">

@@ -163,11 +163,40 @@ LANGUAGE sql IMMUTABLE AS $$
   END
 $$;
 
+-- contains/not_contains use the `?` (jsonb "does this string exist as a
+-- top-level array element") operator rather than `@> jsonb_build_array(...)`
+-- (ticket #36 perf fix, confirmed against the live ~110k-row companies
+-- table): `?` is a plain built-in binary operator with no per-row function
+-- call, while `jsonb_build_array` is invoked fresh on every row to wrap the
+-- target value before the containment check — measured to push the full
+-- scan past statement_timeout where `?` completes in line with the other
+-- per-type helpers (text/number/date/boolean). Semantics are identical for
+-- this case since the filter value is always a scalar string (never a
+-- multi-value array like Text's is/is_not, ticket #38) — `?` compares each
+-- array member by exact string equality, so "a3" still never matches "a30".
+--
+-- contains/not_contains are wrapped in COALESCE (ticket #36 correctness fix,
+-- found via integration test: a near-string that should never match came
+-- back with ~98k false positives, exactly the count of rows where the key
+-- is absent from custom_data entirely). `jsonb_typeof(NULL)` is SQL NULL,
+-- not a string, so `jsonb_typeof(data -> key) = 'array'` is NULL — not
+-- false — whenever the key is missing, and `NULL AND ...` is NULL too. That
+-- NULL predicate breaks companies_matching_virtual_filters' `NOT EXISTS
+-- (... WHERE NOT virtual_filter_predicate_matches(...))` AND-semantics:
+-- `NOT NULL` is NULL, so a row with a NULL predicate is never excluded by
+-- the EXISTS check, which means it's treated as matching every filter
+-- regardless of value. text/number/date/boolean already avoid this (via
+-- COALESCE, explicit IS NOT NULL guards, or an ELSE false terminating every
+-- CASE) — list's contains/not_contains were the one branch that could still
+-- evaluate to NULL instead of a definite boolean. COALESCE forces a missing
+-- key to definite false for contains (no array, so it can't contain
+-- anything) and definite true for not_contains (same reasoning Text's
+-- not_contains already applies to a missing value via its own COALESCE).
 CREATE OR REPLACE FUNCTION list_filter_matches(data jsonb, f jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
   SELECT CASE f->>'operator'
-    WHEN 'contains' THEN jsonb_typeof(data -> (f->>'key')) = 'array' AND (data -> (f->>'key')) @> jsonb_build_array(f->'value')
-    WHEN 'not_contains' THEN NOT (jsonb_typeof(data -> (f->>'key')) = 'array' AND (data -> (f->>'key')) @> jsonb_build_array(f->'value'))
+    WHEN 'contains' THEN COALESCE(jsonb_typeof(data -> (f->>'key')) = 'array' AND (data -> (f->>'key')) ? (f->>'value'), false)
+    WHEN 'not_contains' THEN COALESCE(NOT (jsonb_typeof(data -> (f->>'key')) = 'array' AND (data -> (f->>'key')) ? (f->>'value')), true)
     WHEN 'is_empty' THEN is_empty_enrichment_value(data -> (f->>'key'))
     WHEN 'is_not_empty' THEN NOT is_empty_enrichment_value(data -> (f->>'key'))
     ELSE false

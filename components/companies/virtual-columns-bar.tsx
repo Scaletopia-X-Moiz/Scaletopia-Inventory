@@ -5,6 +5,7 @@ import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import { Check, ChevronDown, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
+  ADDABLE_ENRICHMENT_TYPES,
   isLowCardinalityTextField,
   operatorsForType,
   parseVirtualColumnsParam,
@@ -25,15 +26,6 @@ interface EnrichmentField {
   type: EnrichmentFieldType;
   sampleValues: string[];
 }
-
-/** The enrichment-field types ticket #35 can add as columns, mapped to the
- * VirtualColumnType the filter/predicate speaks. Boolean/List are discovered
- * but not yet addable (ticket #36). */
-const ADDABLE_TYPES: Record<string, VirtualColumnType> = {
-  Text: "text",
-  Number: "number",
-  Date: "date",
-};
 
 /** One shared enrichment-field discovery for the whole bar: the "Add column"
  * picker and every column chip's value picker read the same discovered fields
@@ -208,7 +200,7 @@ function AddColumnButton({
   }, [open, ensureLoaded]);
 
   const addableFields = (fields ?? []).filter(
-    (f) => f.type in ADDABLE_TYPES && !addedKeys.includes(f.key)
+    (f) => f.type in ADDABLE_ENRICHMENT_TYPES && !addedKeys.includes(f.key)
   );
 
   return (
@@ -227,7 +219,7 @@ function AddColumnButton({
               <button
                 type="button"
                 onClick={() => {
-                  onAdd(field.key, ADDABLE_TYPES[field.type]);
+                  onAdd(field.key, ADDABLE_ENRICHMENT_TYPES[field.type]);
                   setOpen(false);
                 }}
                 className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm text-ink hover:bg-hover"

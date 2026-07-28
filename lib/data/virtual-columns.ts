@@ -48,8 +48,8 @@ export interface ActiveVirtualColumn {
 /** Operator metadata drives both validation (here) and the operator UI
  * (virtual-columns-bar.tsx). `requiresValue` = one scalar; `requiresRange` =
  * a [min, max] tuple (the `between` operators); neither = a value-less
- * operator (is empty / is not empty). Ticket #34 shipped Text; #35 adds
- * Number and Date; #36 will add Boolean/List. The SQL predicate
+ * operator (is empty / is not empty, is true / is false). Ticket #34 shipped
+ * Text; #35 added Number and Date; #36 adds Boolean and List. The SQL predicate
  * (virtual-columns.sql) already supports all five types — these tables gate
  * what the app is willing to construct and accept back off the URL. */
 export interface VirtualColumnOperatorMeta {
@@ -88,9 +88,27 @@ export const DATE_OPERATORS: VirtualColumnOperatorMeta[] = [
   { id: "between", label: "between", requiresRange: true },
 ];
 
-/** The types the app can add as columns and filter on. Boolean/List stay out
- * until ticket #36 even though the SQL predicate already handles them. */
-const SUPPORTED_TYPES: VirtualColumnType[] = ["text", "number", "date"];
+/** Boolean: value-less — the operator itself is the whole predicate
+ * (boolean_filter_matches reads true/false/truthy-string variants SQL-side,
+ * ticket #36). */
+export const BOOLEAN_OPERATORS: VirtualColumnOperatorMeta[] = [
+  { id: "is_true", label: "is true" },
+  { id: "is_false", label: "is false" },
+];
+
+/** List: array enrichment (e.g. `specialties`). `contains`/`not_contains`
+ * match one exact array member via jsonb containment SQL-side
+ * (list_filter_matches) — never a substring, so "a3" never also matches
+ * "a30" (ticket #36). */
+export const LIST_OPERATORS: VirtualColumnOperatorMeta[] = [
+  { id: "contains", label: "contains", requiresValue: true },
+  { id: "not_contains", label: "does not contain", requiresValue: true },
+  { id: "is_empty", label: "is empty" },
+  { id: "is_not_empty", label: "is not empty" },
+];
+
+/** The types the app can add as columns and filter on. */
+const SUPPORTED_TYPES: VirtualColumnType[] = ["text", "number", "date", "boolean", "list"];
 
 export function operatorsForType(type: VirtualColumnType): VirtualColumnOperatorMeta[] {
   switch (type) {
@@ -100,9 +118,34 @@ export function operatorsForType(type: VirtualColumnType): VirtualColumnOperator
       return NUMBER_OPERATORS;
     case "date":
       return DATE_OPERATORS;
+    case "boolean":
+      return BOOLEAN_OPERATORS;
+    case "list":
+      return LIST_OPERATORS;
     default:
       return [];
   }
+}
+
+/** Maps an enrichment field's discovered type (lib/data/enrichment-fields.ts)
+ * to the VirtualColumnType it becomes as a column — the mapping the table's
+ * "Add column" picker uses (tickets #34, #36), reused so a column added from
+ * Company Detail's enrichment tab (ticket #39) gets an identical type and
+ * therefore identical operators to one added from the table. */
+export const ADDABLE_ENRICHMENT_TYPES: Record<string, VirtualColumnType> = {
+  Text: "text",
+  Number: "number",
+  Date: "date",
+  Boolean: "boolean",
+  List: "list",
+};
+
+/** `undefined` when the key wasn't in the discovery sample (or has no
+ * addable type) — callers treat that as "no action offered" rather than
+ * guessing a type. */
+export function addableVirtualColumnType(fieldType: string | undefined): VirtualColumnType | undefined {
+  if (!fieldType) return undefined;
+  return ADDABLE_ENRICHMENT_TYPES[fieldType];
 }
 
 /** Above this many distinct real values, the Text `is` picker keeps free-text
@@ -148,6 +191,10 @@ function isValidFilterValue(type: VirtualColumnType, meta: VirtualColumnOperator
   if (meta.requiresValue) {
     if (type === "number") return isFiniteNumber(value);
     if (type === "date") return isIsoDate(value);
+    // List contains/not_contains take one exact member string to match via
+    // jsonb containment SQL-side (ticket #36) — same shape as Text
+    // contains/not_contains, no array-of-candidates form.
+    if (type === "list") return typeof value === "string" && value.length > 0;
     // Text is/is_not additionally accept a multi-select value list (ticket #38);
     // contains/not_contains stay single free-text (substring matching).
     if ((meta.id === "is" || meta.id === "is_not") && Array.isArray(value)) {
@@ -158,9 +205,9 @@ function isValidFilterValue(type: VirtualColumnType, meta: VirtualColumnOperator
   return true;
 }
 
-/** Accepts text/number/date filters (tickets #34, #35); boolean/list follow in
- * #36. Each filter is checked against its type's operator table and value
- * arity — anything malformed is dropped by the parser rather than thrown. */
+/** Accepts text/number/date/boolean/list filters (tickets #34, #35, #36).
+ * Each filter is checked against its type's operator table and value arity —
+ * anything malformed is dropped by the parser rather than thrown. */
 function isValidVirtualColumnFilter(value: unknown): value is VirtualColumnFilter {
   if (typeof value !== "object" || value === null) return false;
   const f = value as Record<string, unknown>;
