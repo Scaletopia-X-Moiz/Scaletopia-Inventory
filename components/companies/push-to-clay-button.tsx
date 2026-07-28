@@ -139,7 +139,18 @@ function ChecklistRunRow({
   );
 }
 
-export function PushToClayButton({ paramsStr, total }: { paramsStr: string; total: number }) {
+export function PushToClayButton({
+  paramsStr,
+  total,
+  onDone,
+}: {
+  paramsStr: string;
+  total: number;
+  /** Fired once the push stream reaches its `done` event (success or partial
+   * failure alike) — the caller uses this to offer removing any active
+   * temporary virtual columns (ticket #40). */
+  onDone?: () => void;
+}) {
   const [status, setStatus] = useState<Status>("idle");
   const [step, setStep] = useState<Step>("checklist");
   const [webhookUrl, setWebhookUrl] = useState("");
@@ -225,6 +236,7 @@ export function PushToClayButton({ paramsStr, total }: { paramsStr: string; tota
       } else {
         showToast(`All ${errors} pushes failed. Check the webhook URL.`, "error");
       }
+      onDone?.();
     }
   }
 

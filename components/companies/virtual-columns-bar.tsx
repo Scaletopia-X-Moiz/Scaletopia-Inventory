@@ -1,17 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter, useSearchParams, usePathname } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { Check, ChevronDown, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   ADDABLE_ENRICHMENT_TYPES,
   isLowCardinalityTextField,
   operatorsForType,
-  parseVirtualColumnsParam,
-  parseVirtualFiltersParam,
-  serializeVirtualColumnsParam,
-  serializeVirtualFiltersParam,
   type ActiveVirtualColumn,
   type VirtualColumnFilter,
   type VirtualColumnOperator,
@@ -75,64 +71,32 @@ function useEnrichmentFields() {
 }
 
 /** "Add column from enrichment" + the operator controls for each active
- * virtual column (ticket #34). Reads/writes the `vc` (which fields are shown)
- * and `vf` (which of them are actively filtering) URL params directly — no
- * separate client cache, since the URL already survives a page refresh.
+ * virtual column (ticket #34). The active-column/filter state itself (read
+ * from the `vc`/`vf` URL params, mirrored into a ~1hr client cache) is owned
+ * by the caller via `useVirtualColumnsState()` and passed in as props, so
+ * `CompaniesResultsClient` can also react to it — e.g. to offer removing the
+ * temporary columns after a Clay push (ticket #40).
  *
  * `onScreenValues[key]` carries the distinct values already rendered for each
  * column on the current page, so a Text `is` value picker can show candidates
  * instantly while the discovery RPC resolves the fuller, authoritative set
  * (ticket #38). */
 export function VirtualColumnsBar({
+  activeColumns,
+  activeFilters,
+  addColumn,
+  removeColumn,
+  setFilter,
   onScreenValues = {},
 }: {
+  activeColumns: ActiveVirtualColumn[];
+  activeFilters: VirtualColumnFilter[];
+  addColumn: (key: string, type: VirtualColumnType) => void;
+  removeColumn: (key: string) => void;
+  setFilter: (key: string, filter: VirtualColumnFilter | null) => void;
   onScreenValues?: Record<string, string[]>;
 }) {
-  const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
   const { fields, loading, ensureLoaded } = useEnrichmentFields();
-
-  const activeColumns = parseVirtualColumnsParam(searchParams);
-  const activeFilters = parseVirtualFiltersParam(searchParams) ?? [];
-
-  function navigate(mutate: (params: URLSearchParams) => void) {
-    const params = new URLSearchParams(searchParams.toString());
-    mutate(params);
-    params.delete("page");
-    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
-  }
-
-  function writeColumns(next: ActiveVirtualColumn[]) {
-    navigate((params) => {
-      const serialized = serializeVirtualColumnsParam(next);
-      if (serialized) params.set("vc", serialized);
-      else params.delete("vc");
-    });
-  }
-
-  function writeFilters(next: VirtualColumnFilter[]) {
-    navigate((params) => {
-      const serialized = serializeVirtualFiltersParam(next);
-      if (serialized) params.set("vf", serialized);
-      else params.delete("vf");
-    });
-  }
-
-  function addColumn(key: string, type: VirtualColumnType) {
-    if (activeColumns.some((c) => c.key === key)) return;
-    writeColumns([...activeColumns, { key, type }]);
-  }
-
-  function removeColumn(key: string) {
-    writeColumns(activeColumns.filter((c) => c.key !== key));
-    writeFilters(activeFilters.filter((f) => f.key !== key));
-  }
-
-  function setFilter(key: string, filter: VirtualColumnFilter | null) {
-    const rest = activeFilters.filter((f) => f.key !== key);
-    writeFilters(filter ? [...rest, filter] : rest);
-  }
 
   /** The field's authoritative distinct values from discovery, or `null` while
    * discovery is still loading (fields === null). Once loaded, a key absent
