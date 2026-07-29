@@ -1,4 +1,4 @@
-import type { GhlContactPayload, GhlPushRecord } from "@/lib/ghl/types";
+import type { GhlContactPayloadShape, GhlPushRecord } from "@/lib/ghl/types";
 
 /** Shapes a person record into a GHL contact-creation payload. Tags are
  * supplied by the caller (built via buildGhlTag) rather than derived here,
@@ -9,7 +9,7 @@ export function buildGhlContactPayload(
     "firstName" | "lastName" | "email" | "phone" | "companyName" | "city" | "country"
   >,
   tags: string[]
-): GhlContactPayload {
+): GhlContactPayloadShape {
   return {
     firstName: record.firstName,
     lastName: record.lastName,
