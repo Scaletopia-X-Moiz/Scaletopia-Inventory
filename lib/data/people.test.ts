@@ -460,6 +460,17 @@ describe("getPersonDetail", () => {
     }
   });
 
+  it("excludes the pushed_to_ghl / pushed_to_ghl_at push-tracking columns from detail-view rendering (ticket #45)", async () => {
+    const list = await getAllFilteredPeople({});
+    const sample = list[0];
+
+    const detail = await getPersonDetail(sample.id);
+    expect(detail).not.toHaveProperty("pushed_to_ghl");
+    expect(detail).not.toHaveProperty("pushed_to_ghl_at");
+    expect(detail!.customData).not.toHaveProperty("pushed_to_ghl");
+    expect(detail!.customData).not.toHaveProperty("pushed_to_ghl_at");
+  });
+
   it("links to the correct company detail target when company_id is set", async () => {
     const list = await getAllFilteredPeople({});
     const sample = list.find((r) => r.companyName);
