@@ -7,6 +7,7 @@ import { EMPLOYEE_BUCKETS, employeeBucketOf } from "@/lib/data/employee-size";
 import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
 import { sortByLastUpdatedDesc } from "@/lib/data/sort";
 import type { ClayPushRecord } from "@/lib/clay/types";
+import type { GhlPushRecord } from "@/lib/ghl/types";
 import type { IncludeExclude } from "@/lib/data/include-exclude";
 import type { ActiveVirtualColumn, VirtualColumnFilter } from "@/lib/data/virtual-columns";
 
@@ -455,6 +456,8 @@ interface FullPersonRow extends RawPersonRow {
   source_id: string | null;
   linkedin_username: string | null;
   custom_data: Record<string, unknown> | null;
+  employee_count: number | null;
+  niche_tokens: string[] | null;
 }
 
 export interface PersonExportRow {
@@ -616,6 +619,47 @@ export async function getPeopleForClay(filters: PersonListFilters): Promise<Clay
     id: row.id,
     displayName: row.full_name,
     payload: toClayPayload(row),
+  }));
+}
+
+/** One candidate resolved for the GHL push (ticket #47): the GHL contact
+ * fields (GhlPushRecord) plus the identity/phone-type columns the push engine
+ * needs but the payload itself doesn't carry. `niche` prefers the linked
+ * company's niche and falls back to the first tag-parsed token, mirroring how
+ * niche_tokens itself is populated (see lib/import/push.ts). */
+export interface GhlPushCandidate {
+  id: string;
+  displayName: string | null;
+  phoneType: string | null;
+  record: GhlPushRecord;
+}
+
+function toGhlPushRecord(row: FullPersonRow): GhlPushRecord {
+  return {
+    firstName: row.first_name,
+    lastName: row.last_name,
+    email: row.email,
+    phone: row.phone,
+    companyName: row.company_name,
+    city: row.city,
+    country: row.country,
+    niche: row.niche_tokens?.[0] ?? null,
+    employeeCount: row.employee_count,
+    source: row.source,
+  };
+}
+
+/** GHL push candidates for the current filtered view — the same set (and
+ * order) as getAllFilteredPeople. Includes every matched person regardless of
+ * phone_type; the push engine (lib/ghl/push-to-ghl.ts) is responsible for
+ * splitting eligible (mobile/toll-free) from skipped (landline/other). */
+export async function getPeopleForGhl(filters: PersonListFilters): Promise<GhlPushCandidate[]> {
+  const rows = await fetchFullFilteredPeople(filters);
+  return rows.map((row) => ({
+    id: row.id,
+    displayName: row.full_name,
+    phoneType: row.phone_type,
+    record: toGhlPushRecord(row),
   }));
 }
 
