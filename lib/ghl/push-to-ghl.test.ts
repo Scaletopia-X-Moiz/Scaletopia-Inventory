@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import { runPeopleGhlPush } from "@/lib/ghl/push-to-ghl";
+import { runPeopleGhlPush, splitGhlEligibility } from "@/lib/ghl/push-to-ghl";
 import { includeOnly } from "@/lib/data/include-exclude";
 import type { ClientRow } from "@/lib/data/clients";
+import type { GhlPushCandidate } from "@/lib/data/people";
 
 const TEST_PREFIX = "__test-ghl-push__";
 
@@ -119,6 +120,59 @@ function okFetch(): typeof fetch {
     } as unknown as Response;
   }) as unknown as typeof fetch;
 }
+
+function candidate(phoneType: string | null): GhlPushCandidate {
+  return {
+    id: `id-${phoneType ?? "null"}-${Math.random()}`,
+    displayName: "Test Person",
+    phoneType,
+    record: {
+      firstName: "Test",
+      lastName: "Person",
+      email: null,
+      phone: null,
+      companyName: null,
+      city: null,
+      country: null,
+      niche: null,
+      employeeCount: null,
+      source: null,
+    },
+  };
+}
+
+describe("splitGhlEligibility", () => {
+  it("counts mobile and toll_free as eligible", () => {
+    const result = splitGhlEligibility([candidate("mobile"), candidate("toll_free")]);
+    expect(result.total_matched).toBe(2);
+    expect(result.eligible).toHaveLength(2);
+    expect(result.skipped).toBe(0);
+  });
+
+  it("counts landline, other, and null phone types as skipped", () => {
+    const result = splitGhlEligibility([candidate("landline"), candidate("other"), candidate(null)]);
+    expect(result.total_matched).toBe(3);
+    expect(result.eligible).toHaveLength(0);
+    expect(result.skipped).toBe(3);
+  });
+
+  it("splits a mixed batch correctly", () => {
+    const result = splitGhlEligibility([
+      candidate("mobile"),
+      candidate("landline"),
+      candidate("toll_free"),
+      candidate(null),
+    ]);
+    expect(result.total_matched).toBe(4);
+    expect(result.eligible.map((c) => c.phoneType)).toEqual(["mobile", "toll_free"]);
+    expect(result.skipped).toBe(2);
+  });
+
+  it("returns all-zero for an empty input", () => {
+    const result = splitGhlEligibility([]);
+    expect(result).toEqual({ total_matched: 0, eligible: [], skipped: 0 });
+  });
+});
 
 describe("runPeopleGhlPush", () => {
   it("pushes eligible mobile/toll-free people and skips landlines", async () => {

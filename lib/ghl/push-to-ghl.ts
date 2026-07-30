@@ -53,6 +53,25 @@ function isEligible(candidate: GhlPushCandidate): boolean {
   return candidate.phoneType != null && ELIGIBLE_PHONE_TYPES.has(candidate.phoneType);
 }
 
+export interface GhlEligibilitySplit {
+  total_matched: number;
+  eligible: GhlPushCandidate[];
+  skipped: number;
+}
+
+/** Splits resolved candidates into eligible (mobile/toll-free) vs skipped
+ * (landline/other/unverified), without pushing anything — the shared basis
+ * for both the push engine's own resolve step and the preview endpoint the
+ * confirm screen uses to show counts ahead of time. */
+export function splitGhlEligibility(candidates: GhlPushCandidate[]): GhlEligibilitySplit {
+  const eligible = candidates.filter(isEligible);
+  return {
+    total_matched: candidates.length,
+    eligible,
+    skipped: candidates.length - eligible.length,
+  };
+}
+
 type PushOneResult = { ok: true; deduped: boolean } | { ok: false; error: string };
 
 /** Pushes a single person to GHL, then logs the result to platform_pushes and
@@ -144,9 +163,7 @@ export async function runPeopleGhlPush(
   onProgress?.({ phase: "resolving", done: 0, total: 0, pushed: 0, errors: 0 });
 
   const candidates = await getPeopleForGhl(filters);
-  const total_matched = candidates.length;
-  const eligible = candidates.filter(isEligible);
-  const skipped = total_matched - eligible.length;
+  const { total_matched, eligible, skipped } = splitGhlEligibility(candidates);
 
   if (eligible.length === 0) {
     onProgress?.({ phase: "done", done: 0, total: 0, pushed: 0, errors: 0 });

@@ -10,6 +10,7 @@ import { useVirtualColumnsState } from "@/components/companies/use-virtual-colum
 import { Pagination } from "@/components/companies/pagination";
 import { ExportButton } from "@/components/people/export-button";
 import { PushToClayButton } from "@/components/people/push-to-clay-button";
+import { PushToGhlButton } from "@/components/people/push-to-ghl-button";
 import { ReverifyFilteredButton } from "@/components/shared/reverify-filtered-button";
 import { SkeletonTable } from "@/components/shared/skeleton-loaders";
 
@@ -140,6 +141,7 @@ export function PeopleResultsClient() {
             onDone={load}
           />
           <PushToClayButton paramsStr={paramsStr} total={result.total} onDone={handlePushDone} />
+          <PushToGhlButton paramsStr={paramsStr} total={result.total} onDone={handlePushDone} />
           <ExportButton href={exportHref} />
         </div>
       </div>
