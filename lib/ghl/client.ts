@@ -77,28 +77,27 @@ interface RawResponse {
   json: unknown;
 }
 
-/** POSTs `body` to `path` with retry/backoff for transient failures
- * (429/5xx), mirroring lib/clay/push-to-clay.ts's postWithRetry. Non-transient
- * statuses (including 400) are returned rather than thrown, so callers can
- * inspect the response body — e.g. GHL's duplicate-contact 400 carries the
- * existing contact's id in `meta.contactId`, which must be recovered rather
- * than treated as a hard failure.
- *
- * Exported for tests: exercises the retry/backoff logic in isolation. */
-export async function requestWithRetry(
+/** Shared retry/backoff loop for GHL requests (429/5xx), mirroring
+ * lib/clay/push-to-clay.ts's postWithRetry. Non-transient statuses (including
+ * 400) are returned rather than thrown, so callers can inspect the response
+ * body — e.g. GHL's duplicate-contact 400 carries the existing contact's id
+ * in `meta.contactId`, which must be recovered rather than treated as a hard
+ * failure. */
+async function requestWithMethodRetry(
   fetchImpl: typeof fetch,
   credentials: GhlCredentials,
+  method: "GET" | "POST",
   path: string,
-  body: Record<string, unknown>
+  body?: Record<string, unknown>
 ): Promise<RawResponse> {
   let attempt = 0;
   for (;;) {
     let resp: Response;
     try {
       resp = await fetchImpl(`${GHL_API_BASE}${path}`, {
-        method: "POST",
+        method,
         headers: ghlHeaders(credentials.apiKey),
-        body: JSON.stringify(body),
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       });
     } catch (err) {
       if (attempt >= GHL_RETRY_MAX_RETRIES) {
@@ -125,6 +124,26 @@ export async function requestWithRetry(
     const json = await resp.json().catch(() => null);
     return { status: resp.status, json };
   }
+}
+
+/** POSTs `body` to `path` with retry/backoff for transient failures.
+ * Exported for tests: exercises the retry/backoff logic in isolation. */
+export async function requestWithRetry(
+  fetchImpl: typeof fetch,
+  credentials: GhlCredentials,
+  path: string,
+  body: Record<string, unknown>
+): Promise<RawResponse> {
+  return requestWithMethodRetry(fetchImpl, credentials, "POST", path, body);
+}
+
+/** GETs `path` with the same retry/backoff behavior as requestWithRetry. */
+export async function requestGetWithRetry(
+  fetchImpl: typeof fetch,
+  credentials: GhlCredentials,
+  path: string
+): Promise<RawResponse> {
+  return requestWithMethodRetry(fetchImpl, credentials, "GET", path);
 }
 
 function extractDuplicateContactId(json: unknown): string | null {
