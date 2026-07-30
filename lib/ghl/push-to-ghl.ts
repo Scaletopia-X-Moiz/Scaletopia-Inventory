@@ -19,13 +19,26 @@ export interface GhlPushResult {
   eligible: number;
   skipped: number;
   pushed: number;
+  /** Of `pushed`, how many were brand-new GHL contacts. */
+  created: number;
+  /** Of `pushed`, how many were existing GHL contacts that only got the tag appended. */
+  tagAppended: number;
   errors: number;
   /** Display names of people whose push failed, one per failed record. */
   failed_people: string[];
 }
 
+export interface GhlPushProgress {
+  phase: "resolving" | "pushing" | "done";
+  done: number;
+  total: number;
+  pushed: number;
+  errors: number;
+}
+
 export interface RunGhlPushDeps {
   fetchImpl?: typeof fetch;
+  onProgress?: (p: GhlPushProgress) => void;
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -40,7 +53,7 @@ function isEligible(candidate: GhlPushCandidate): boolean {
   return candidate.phoneType != null && ELIGIBLE_PHONE_TYPES.has(candidate.phoneType);
 }
 
-type PushOneResult = { ok: true } | { ok: false; error: string };
+type PushOneResult = { ok: true; deduped: boolean } | { ok: false; error: string };
 
 /** Pushes a single person to GHL, then logs the result to platform_pushes and
  * flips the person's pushed_to_ghl flag. platform_pushes is upserted (not
@@ -58,7 +71,7 @@ async function pushOne(
   const payload = buildGhlContactPayload(candidate.record, [tag]);
 
   try {
-    const { contactId } = await pushContactToGhl(
+    const { contactId, deduped } = await pushContactToGhl(
       credentials,
       {
         firstName: payload.firstName ?? undefined,
@@ -94,7 +107,7 @@ async function pushOne(
       .eq("id", candidate.id);
     if (personError) throw personError;
 
-    return { ok: true };
+    return { ok: true, deduped };
   } catch (err) {
     const message =
       err instanceof GhlApiError || err instanceof Error ? err.message : String(err);
@@ -126,14 +139,36 @@ export async function runPeopleGhlPush(
     locationId: client.ghlLocationId,
   };
   const fetchImpl = deps.fetchImpl ?? fetch;
+  const onProgress = deps.onProgress;
+
+  onProgress?.({ phase: "resolving", done: 0, total: 0, pushed: 0, errors: 0 });
 
   const candidates = await getPeopleForGhl(filters);
   const total_matched = candidates.length;
   const eligible = candidates.filter(isEligible);
   const skipped = total_matched - eligible.length;
 
+  if (eligible.length === 0) {
+    onProgress?.({ phase: "done", done: 0, total: 0, pushed: 0, errors: 0 });
+    return {
+      total_matched,
+      eligible: 0,
+      skipped,
+      pushed: 0,
+      created: 0,
+      tagAppended: 0,
+      errors: 0,
+      failed_people: [],
+    };
+  }
+
+  onProgress?.({ phase: "pushing", done: 0, total: eligible.length, pushed: 0, errors: 0 });
+
   let pushed = 0;
+  let created = 0;
+  let tagAppended = 0;
   let errors = 0;
+  let done = 0;
   const failed_people: string[] = [];
 
   for (const group of chunk(eligible, GHL_PUSH_CONCURRENCY)) {
@@ -145,8 +180,14 @@ export async function runPeopleGhlPush(
     );
 
     for (const settled of results) {
+      done++;
       if (settled.status === "fulfilled" && settled.value.result.ok) {
         pushed++;
+        if (settled.value.result.deduped) {
+          tagAppended++;
+        } else {
+          created++;
+        }
       } else {
         errors++;
         const candidate = settled.status === "fulfilled" ? settled.value.candidate : null;
@@ -164,7 +205,20 @@ export async function runPeopleGhlPush(
         );
       }
     }
+
+    onProgress?.({ phase: "pushing", done, total: eligible.length, pushed, errors });
   }
 
-  return { total_matched, eligible: eligible.length, skipped, pushed, errors, failed_people };
+  onProgress?.({ phase: "done", done, total: eligible.length, pushed, errors });
+
+  return {
+    total_matched,
+    eligible: eligible.length,
+    skipped,
+    pushed,
+    created,
+    tagAppended,
+    errors,
+    failed_people,
+  };
 }

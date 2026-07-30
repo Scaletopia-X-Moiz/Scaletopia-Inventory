@@ -141,6 +141,8 @@ describe("runPeopleGhlPush", () => {
     expect(result.eligible).toBe(2);
     expect(result.skipped).toBe(1);
     expect(result.pushed).toBe(2);
+    expect(result.created).toBe(2);
+    expect(result.tagAppended).toBe(0);
     expect(result.errors).toBe(0);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
@@ -233,6 +235,8 @@ describe("runPeopleGhlPush", () => {
     expect(result.total_matched).toBe(3);
     expect(result.eligible).toBe(3);
     expect(result.pushed).toBe(2);
+    expect(result.created).toBe(2);
+    expect(result.tagAppended).toBe(0);
     expect(result.errors).toBe(1);
     expect(result.failed_people).toContain("Bad Contact");
   });
@@ -249,6 +253,8 @@ describe("runPeopleGhlPush", () => {
       eligible: 0,
       skipped: 0,
       pushed: 0,
+      created: 0,
+      tagAppended: 0,
       errors: 0,
       failed_people: [],
     });
@@ -262,5 +268,61 @@ describe("runPeopleGhlPush", () => {
     await expect(
       runPeopleGhlPush({ niche: includeOnly([niche]) }, client)
     ).rejects.toThrow("GHL credentials");
+  });
+
+  it("counts a deduped (tag-appended) push separately from a created one", async () => {
+    const niche = unique("dedupe");
+    await seedPeople(niche, [
+      { slug: "new", phoneType: "mobile" },
+      { slug: "dupe", phoneType: "mobile", fullName: "Dupe Contact" },
+    ]);
+    const client = await insertClient();
+
+    const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => {
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (typeof url === "string" && url.includes("/tags")) {
+        return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+      }
+      if (body.firstName === "Dupe Contact") {
+        return {
+          ok: false,
+          status: 400,
+          json: async () => ({ meta: { contactId: "existing_contact" } }),
+        } as unknown as Response;
+      }
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ contact: { id: "contact_new" } }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    const result = await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, { fetchImpl });
+
+    expect(result.pushed).toBe(2);
+    expect(result.created).toBe(1);
+    expect(result.tagAppended).toBe(1);
+    expect(result.errors).toBe(0);
+  });
+
+  it("reports progress through resolving, pushing, and done phases", async () => {
+    const niche = unique("progress");
+    await seedPeople(niche, [
+      { slug: "a", phoneType: "mobile" },
+      { slug: "b", phoneType: "mobile" },
+    ]);
+    const client = await insertClient();
+    const fetchImpl = okFetch();
+    const progress: Array<{ phase: string; done: number; total: number }> = [];
+
+    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, {
+      fetchImpl,
+      onProgress: (p) => progress.push({ phase: p.phase, done: p.done, total: p.total }),
+    });
+
+    expect(progress[0]).toEqual({ phase: "resolving", done: 0, total: 0 });
+    expect(progress[1]).toEqual({ phase: "pushing", done: 0, total: 2 });
+    const last = progress[progress.length - 1];
+    expect(last).toEqual({ phase: "done", done: 2, total: 2 });
   });
 });
