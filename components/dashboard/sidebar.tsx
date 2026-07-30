@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { motion } from "framer-motion";
-import { Activity, Building2, ChevronRight, LogOut, PieChart, Ticket, Upload, UserCog, Users } from "lucide-react";
+import { Activity, Building2, ChevronRight, KeyRound, LogOut, PieChart, Ticket, Upload, UserCog, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ScaletopiaLogo } from "@/components/shared/scaletopia-logo";
 import { useSession } from "@/components/dashboard/session-context";
@@ -27,6 +27,7 @@ const WORK_ITEMS = [
 const ADMIN_ITEMS = [
   { href: "/activity", label: "Activity", icon: Activity },
   { href: "/team", label: "Team", icon: UserCog },
+  { href: "/clients", label: "Clients", icon: KeyRound },
 ];
 
 function isActive(pathname: string, href: string) {

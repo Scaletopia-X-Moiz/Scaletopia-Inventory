@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import { getClientById, listActiveClients, updateClientCredentials } from "@/lib/data/clients";
+import {
+  getClientById,
+  listActiveClients,
+  listClients,
+  updateClientCredentials,
+} from "@/lib/data/clients";
 
 const TEST_SLUG_PREFIX = "test_clients_ts_";
 
@@ -42,6 +47,31 @@ describe("clients data layer", () => {
       insertedIds.push(bId, aId);
 
       const clients = await listActiveClients();
+      const aIndex = clients.findIndex((c) => c.id === aId);
+      const bIndex = clients.findIndex((c) => c.id === bId);
+      expect(aIndex).toBeGreaterThanOrEqual(0);
+      expect(bIndex).toBeGreaterThan(aIndex);
+    });
+  });
+
+  describe("listClients", () => {
+    it("includes both active and inactive clients", async () => {
+      const activeId = await insertClient({ is_active: true });
+      const inactiveId = await insertClient({ is_active: false });
+      insertedIds.push(activeId, inactiveId);
+
+      const clients = await listClients();
+      const ids = clients.map((c) => c.id);
+      expect(ids).toContain(activeId);
+      expect(ids).toContain(inactiveId);
+    });
+
+    it("orders results by name ascending", async () => {
+      const bId = await insertClient({ name: `${TEST_SLUG_PREFIX}zzz_b` });
+      const aId = await insertClient({ name: `${TEST_SLUG_PREFIX}aaa_a` });
+      insertedIds.push(bId, aId);
+
+      const clients = await listClients();
       const aIndex = clients.findIndex((c) => c.id === aId);
       const bIndex = clients.findIndex((c) => c.id === bId);
       expect(aIndex).toBeGreaterThanOrEqual(0);
@@ -106,6 +136,14 @@ describe("clients data layer", () => {
 
       const updated = await updateClientCredentials(id, { ghlApiKey: null });
       expect(updated.ghlApiKey).toBeNull();
+    });
+
+    it("toggles isActive", async () => {
+      const id = await insertClient({ is_active: true });
+      insertedIds.push(id);
+
+      const updated = await updateClientCredentials(id, { isActive: false });
+      expect(updated.isActive).toBe(false);
     });
   });
 });

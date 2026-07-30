@@ -54,6 +54,17 @@ export async function listActiveClients(): Promise<ClientRow[]> {
   return ((data ?? []) as unknown as RawClientRow[]).map(toClientRow);
 }
 
+/** Lists every client regardless of active status, ordered by name. */
+export async function listClients(): Promise<ClientRow[]> {
+  const { data, error } = await supabaseAdmin
+    .from("clients")
+    .select(CLIENT_COLUMNS)
+    .order("name", { ascending: true });
+
+  if (error) throw error;
+  return ((data ?? []) as unknown as RawClientRow[]).map(toClientRow);
+}
+
 /** Fetches a single client by id. Returns null if it doesn't exist. */
 export async function getClientById(id: string): Promise<ClientRow | null> {
   const { data, error } = await supabaseAdmin
@@ -72,6 +83,7 @@ export interface UpdateClientCredentialsInput {
   ghlLocationId?: string | null;
   emailbisonApiKey?: string | null;
   emailbisonWorkspaceId?: string | null;
+  isActive?: boolean;
 }
 
 /** Updates a client's push credentials. Only the fields present in `input`
@@ -85,6 +97,7 @@ export async function updateClientCredentials(
   if ("ghlLocationId" in input) patch.ghl_location_id = input.ghlLocationId;
   if ("emailbisonApiKey" in input) patch.emailbison_api_key = input.emailbisonApiKey;
   if ("emailbisonWorkspaceId" in input) patch.emailbison_workspace_id = input.emailbisonWorkspaceId;
+  if ("isActive" in input) patch.is_active = input.isActive;
 
   const { data, error } = await supabaseAdmin
     .from("clients")
