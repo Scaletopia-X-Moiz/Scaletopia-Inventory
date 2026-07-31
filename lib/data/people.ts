@@ -8,6 +8,8 @@ import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
 import { sortByLastUpdatedDesc } from "@/lib/data/sort";
 import type { ClayPushRecord } from "@/lib/clay/types";
 import type { GhlPushRecord } from "@/lib/ghl/types";
+import type { EmailBisonPushRecord } from "@/lib/emailbison/types";
+import { getAllFilteredCompanies, type CompanyListFilters } from "@/lib/data/companies";
 import type { IncludeExclude } from "@/lib/data/include-exclude";
 import type { ActiveVirtualColumn, VirtualColumnFilter } from "@/lib/data/virtual-columns";
 
@@ -666,6 +668,104 @@ export async function getPeopleForGhl(filters: PersonListFilters): Promise<GhlPu
     record: toGhlPushRecord(row),
     customData: row.custom_data,
   }));
+}
+
+/** One candidate resolved for either EmailBison push action (ticket #55): the
+ * EmailBison lead fields (EmailBisonPushRecord) the payload builder
+ * (lib/emailbison/lead-payload.ts) needs, plus the raw custom_data blob so the
+ * push engine can resolve a custom-variable entry bound to a virtual column
+ * (issue #52) without a second fetch. Both getPeopleForEmailBison and
+ * getPeopleForEmailBisonByCompanyFilters below produce this same shape, so
+ * the People-table and Companies-table entity wrappers built in later
+ * tickets converge on one candidate type. Mirrors GhlPushCandidate. */
+export interface EmailBisonPushCandidate {
+  id: string;
+  displayName: string | null;
+  record: EmailBisonPushRecord;
+  customData: Record<string, unknown> | null;
+}
+
+/** People has no dedicated "website" column — domain (the linked company's
+ * bare domain, denormalized onto people at import time) is the closest
+ * available field and mirrors how toGhlPushRecord uses companyName without a
+ * separate website field. */
+function toEmailBisonPushRecord(row: FullPersonRow): EmailBisonPushRecord {
+  return {
+    firstName: row.first_name,
+    lastName: row.last_name,
+    email: row.email,
+    phone: row.phone,
+    companyName: row.company_name,
+    title: row.job_title,
+    website: row.domain,
+  };
+}
+
+function toEmailBisonPushCandidate(row: FullPersonRow): EmailBisonPushCandidate {
+  return {
+    id: row.id,
+    displayName: row.full_name,
+    record: toEmailBisonPushRecord(row),
+    customData: row.custom_data,
+  };
+}
+
+/** EmailBison push candidates for the current People-table filtered view —
+ * the same set (and order) as getAllFilteredPeople. Entry point for both
+ * "Add to EmailBison" and "Add to Campaign" when triggered from the People
+ * table. */
+export async function getPeopleForEmailBison(
+  filters: PersonListFilters
+): Promise<EmailBisonPushCandidate[]> {
+  const rows = await fetchFullFilteredPeople(filters);
+  return rows.map(toEmailBisonPushCandidate);
+}
+
+/** Ids per `.in("company_id", ...)` chunk when re-fetching people for a
+ * resolved Companies-table id set below — same URL-length rationale as
+ * VIRTUAL_FILTER_ROW_CHUNK_SIZE/FULL_ROW_ID_CHUNK_SIZE above. */
+const COMPANY_ID_CHUNK_SIZE = 200;
+
+/** Full `*` people rows for a set of company ids, fanned out across chunks
+ * with the same bounded concurrency as fetchPeopleByIds — a company filter
+ * can resolve to as many chunks as an unfiltered full-row fetch, so this
+ * needs the same cap or it reproduces the stalled-push problem
+ * FULL_ROW_FETCH_CONCURRENCY was added to avoid. */
+async function fetchFullPeopleByCompanyIds(companyIds: string[]): Promise<FullPersonRow[]> {
+  if (companyIds.length === 0) return [];
+  const chunks = chunkIds(companyIds, COMPANY_ID_CHUNK_SIZE);
+  const rows: FullPersonRow[] = [];
+  for (let i = 0; i < chunks.length; i += FULL_ROW_FETCH_CONCURRENCY) {
+    const window = chunks.slice(i, i + FULL_ROW_FETCH_CONCURRENCY);
+    const results = await Promise.all(
+      window.map((chunk) =>
+        fetchAllRows<FullPersonRow>("people", "*", (query) => query.in("company_id", chunk))
+      )
+    );
+    rows.push(...results.flat());
+  }
+  return rows;
+}
+
+/** EmailBison push candidates for the Companies-table trigger (ticket #55):
+ * resolves the Companies-table's current filters to matching company ids,
+ * then loads every Person linked to those companies — there is no
+ * company-level EmailBison object (CONTEXT.md's "Companies-table push"
+ * glossary entry), so the Companies-table trigger always resolves to running
+ * the People-table push logic against every linked Person. A Company with no
+ * linked People (or a filter set matching zero Companies) yields an empty
+ * array, not an error. Produces the same EmailBisonPushCandidate shape as
+ * getPeopleForEmailBison so both entity wrappers converge on one candidate
+ * type. */
+export async function getPeopleForEmailBisonByCompanyFilters(
+  companyFilters: CompanyListFilters
+): Promise<EmailBisonPushCandidate[]> {
+  const companies = await getAllFilteredCompanies(companyFilters);
+  const companyIds = companies.map((c) => c.id);
+  if (companyIds.length === 0) return [];
+
+  const rows = sortByLastUpdatedDesc(await fetchFullPeopleByCompanyIds(companyIds));
+  return rows.map(toEmailBisonPushCandidate);
 }
 
 interface FacetIdCount {
