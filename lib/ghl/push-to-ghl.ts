@@ -4,8 +4,9 @@ import { getPeopleForGhl, type GhlPushCandidate } from "@/lib/data/people";
 import type { PersonListFilters } from "@/lib/data/people";
 import { pushContactToGhl, GhlApiError, type GhlCredentials } from "@/lib/ghl/client";
 import { buildGhlTag } from "@/lib/ghl/tag";
-import { buildGhlContactPayload } from "@/lib/ghl/contact-payload";
+import { buildGhlContactPayload, buildGhlCustomFields } from "@/lib/ghl/contact-payload";
 import type { ClientRow } from "@/lib/data/clients";
+import type { GhlFieldMapping } from "@/lib/ghl/types";
 
 export const GHL_PUSH_CONCURRENCY = 8;
 const PLATFORM = "ghl";
@@ -39,6 +40,10 @@ export interface GhlPushProgress {
 export interface RunGhlPushDeps {
   fetchImpl?: typeof fetch;
   onProgress?: (p: GhlPushProgress) => void;
+  /** Active virtual-column → GHL-field mapping from the push button's
+   * mapping step (ticket #51). Empty/omitted means no mapping was offered
+   * (no virtual columns were active) or every column was skipped. */
+  fieldMapping?: GhlFieldMapping[];
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -84,10 +89,12 @@ async function pushOne(
   candidate: GhlPushCandidate,
   client: ClientRow,
   credentials: GhlCredentials,
-  fetchImpl: typeof fetch
+  fetchImpl: typeof fetch,
+  fieldMapping: GhlFieldMapping[]
 ): Promise<PushOneResult> {
   const tag = buildGhlTag(client.name, candidate.record);
-  const payload = buildGhlContactPayload(candidate.record, [tag]);
+  const customField = buildGhlCustomFields(candidate.customData, fieldMapping);
+  const payload = buildGhlContactPayload(candidate.record, [tag], customField);
 
   try {
     const { contactId, deduped } = await pushContactToGhl(
@@ -101,6 +108,7 @@ async function pushOne(
         city: payload.city ?? undefined,
         country: payload.country ?? undefined,
         tags: payload.tags,
+        ...(payload.customField.length > 0 ? { customField: payload.customField } : {}),
       },
       { fetchImpl }
     );
@@ -159,6 +167,7 @@ export async function runPeopleGhlPush(
   };
   const fetchImpl = deps.fetchImpl ?? fetch;
   const onProgress = deps.onProgress;
+  const fieldMapping = deps.fieldMapping ?? [];
 
   onProgress?.({ phase: "resolving", done: 0, total: 0, pushed: 0, errors: 0 });
 
@@ -192,7 +201,7 @@ export async function runPeopleGhlPush(
     const results = await Promise.allSettled(
       group.map(async (candidate) => ({
         candidate,
-        result: await pushOne(candidate, client, credentials, fetchImpl),
+        result: await pushOne(candidate, client, credentials, fetchImpl, fieldMapping),
       }))
     );
 

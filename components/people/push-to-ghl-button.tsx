@@ -7,6 +7,9 @@ import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
 import { runSse } from "@/components/shared/use-sse-run";
 import type { GhlPushResult } from "@/lib/ghl/push-to-ghl";
+import type { GhlCustomField } from "@/lib/ghl/custom-fields";
+import type { GhlFieldMapping } from "@/lib/ghl/types";
+import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
 
 interface ActiveClient {
   id: string;
@@ -26,15 +29,21 @@ type SseEvent =
   | { type: "error"; message: string };
 
 type Status = "idle" | "open" | "pushing";
-type Step = "picker" | "confirm" | "summary";
+type Step = "picker" | "mapping" | "confirm" | "summary";
 
 export function PushToGhlButton({
   paramsStr,
   total,
+  virtualColumns = [],
   onDone,
 }: {
   paramsStr: string;
   total: number;
+  /** Active virtual/enrichment columns on the current People view. When
+   * non-empty, a mapping step (ticket #51) is inserted between picking a
+   * client and confirming the push, letting each column be mapped to a GHL
+   * custom field or skipped. */
+  virtualColumns?: ActiveVirtualColumn[];
   /** Fired once the push stream reaches its `done` event — mirrors
    * PushToClayButton's onDone, used by the caller to offer removing any
    * active virtual columns. */
@@ -47,6 +56,11 @@ export function PushToGhlButton({
   const [clients, setClients] = useState<ActiveClient[] | null>(null);
   const [clientsError, setClientsError] = useState<string | null>(null);
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
+
+  const [customFields, setCustomFields] = useState<GhlCustomField[] | null>(null);
+  const [customFieldsError, setCustomFieldsError] = useState<string | null>(null);
+  // virtualColumnKey -> chosen GHL field id ("" means "skip this column").
+  const [mapping, setMapping] = useState<Record<string, string>>({});
 
   const [preview, setPreview] = useState<PreviewCounts | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -63,6 +77,9 @@ export function PushToGhlButton({
     setClients(null);
     setClientsError(null);
     setSelectedClientId(null);
+    setCustomFields(null);
+    setCustomFieldsError(null);
+    setMapping({});
     setPreview(null);
     setPreviewError(null);
     setResult(null);
@@ -95,8 +112,7 @@ export function PushToGhlButton({
     reset();
   }
 
-  async function handleContinueToConfirm() {
-    if (!selectedClient || !selectedClient.hasGhlCredentials) return;
+  async function loadPreview() {
     setStep("confirm");
     setPreview(null);
     setPreviewError(null);
@@ -111,6 +127,33 @@ export function PushToGhlButton({
     }
   }
 
+  async function handleContinueFromPicker() {
+    if (!selectedClient || !selectedClient.hasGhlCredentials) return;
+
+    if (virtualColumns.length === 0) {
+      await loadPreview();
+      return;
+    }
+
+    setStep("mapping");
+    setCustomFields(null);
+    setCustomFieldsError(null);
+    setMapping({});
+
+    try {
+      const res = await fetch(`/api/clients/${selectedClient.id}/ghl-custom-fields`);
+      if (!res.ok) throw new Error("Failed to load GHL custom fields");
+      const data = (await res.json()) as { fields: GhlCustomField[] };
+      setCustomFields(data.fields);
+    } catch (error) {
+      setCustomFieldsError((error as Error).message || "Failed to load GHL custom fields.");
+    }
+  }
+
+  function handleMappingChange(virtualColumnKey: string, ghlFieldId: string) {
+    setMapping((prev) => ({ ...prev, [virtualColumnKey]: ghlFieldId }));
+  }
+
   async function handleConfirm() {
     if (!selectedClient) return;
 
@@ -118,13 +161,17 @@ export function PushToGhlButton({
     setPushLabel("Pushing…");
     let reachedDone = false;
 
+    const fieldMapping: GhlFieldMapping[] = Object.entries(mapping)
+      .filter(([, ghlFieldId]) => ghlFieldId !== "")
+      .map(([virtualColumnKey, ghlFieldId]) => ({ virtualColumnKey, ghlFieldId }));
+
     try {
       await runSse<SseEvent>(
         `/api/people/push-to-ghl?${paramsStr}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ clientId: selectedClient.id }),
+          body: JSON.stringify({ clientId: selectedClient.id, fieldMapping }),
         },
         (event) => {
           if (event.type === "done") reachedDone = true;
@@ -252,13 +299,74 @@ export function PushToGhlButton({
               </AlertDialog.Cancel>
               <button
                 type="button"
-                onClick={handleContinueToConfirm}
+                onClick={handleContinueFromPicker}
                 disabled={!selectedClient?.hasGhlCredentials}
                 className={cn(
                   "rounded-md px-3 py-1.5 text-xs font-medium text-white transition-smooth focus-visible:ring-2 focus-visible:ring-stamp/50",
                   selectedClient?.hasGhlCredentials
                     ? "bg-stamp hover:opacity-90"
                     : "bg-stamp/40 cursor-not-allowed"
+                )}
+              >
+                Continue →
+              </button>
+            </div>
+          </AlertDialog.Content>
+        ) : step === "mapping" ? (
+          <AlertDialog.Content className="fixed top-[24%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
+            <AlertDialog.Title className="text-sm font-semibold text-ink">
+              Map enrichment columns to GHL fields
+            </AlertDialog.Title>
+            <AlertDialog.Description className="mt-2 text-sm text-ink-soft">
+              Choose a GHL custom field for each active enrichment column, or skip it. Skipped
+              columns aren&apos;t sent with the push.
+            </AlertDialog.Description>
+
+            <div className="mt-4 flex max-h-64 flex-col gap-2 overflow-y-auto">
+              {customFieldsError ? (
+                <p className="text-xs text-danger">{customFieldsError}</p>
+              ) : customFields === null ? (
+                <p className="flex items-center gap-2 text-xs text-ink-soft">
+                  <Loader2 size={12} className="animate-spin" />
+                  Loading GHL custom fields…
+                </p>
+              ) : (
+                virtualColumns.map((col) => (
+                  <label key={col.key} className="flex items-center justify-between gap-3 text-xs">
+                    <span className="font-medium text-ink">{col.key}</span>
+                    <select
+                      value={mapping[col.key] ?? ""}
+                      onChange={(e) => handleMappingChange(col.key, e.target.value)}
+                      className="rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                    >
+                      <option value="">Skip</option>
+                      {customFields.map((field) => (
+                        <option key={field.id} value={field.id}>
+                          {field.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ))
+              )}
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2">
+              <AlertDialog.Cancel asChild>
+                <button
+                  type="button"
+                  className="rounded-md border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-smooth hover:bg-hover focus-visible:ring-2 focus-visible:ring-stamp/50"
+                >
+                  Cancel
+                </button>
+              </AlertDialog.Cancel>
+              <button
+                type="button"
+                onClick={loadPreview}
+                disabled={customFields === null}
+                className={cn(
+                  "rounded-md px-3 py-1.5 text-xs font-medium text-white transition-smooth focus-visible:ring-2 focus-visible:ring-stamp/50",
+                  customFields !== null ? "bg-stamp hover:opacity-90" : "bg-stamp/40 cursor-not-allowed"
                 )}
               >
                 Continue →

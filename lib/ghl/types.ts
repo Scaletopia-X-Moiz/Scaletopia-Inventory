@@ -29,4 +29,18 @@ export interface GhlContactPayloadShape {
   city: string | null;
   country: string | null;
   tags: string[];
+  /** GHL custom-field values built from the field-mapping step (ticket #51) —
+   * one entry per mapped virtual column that had a non-empty value on this
+   * candidate. Empty when no virtual columns are active or none are mapped. */
+  customField: { id: string; value: string }[];
+}
+
+/** One user-chosen mapping from an active virtual column (People table
+ * enrichment column) to a GHL custom field, collected by the push button's
+ * mapping step (ticket #51) and sent to the push route alongside `clientId`. */
+export interface GhlFieldMapping {
+  /** The custom_data key the virtual column reads (ActiveVirtualColumn.key). */
+  virtualColumnKey: string;
+  /** The target GHL custom field's id (GhlCustomField.id from ticket #49). */
+  ghlFieldId: string;
 }

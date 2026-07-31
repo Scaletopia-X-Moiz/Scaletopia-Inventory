@@ -632,6 +632,10 @@ export interface GhlPushCandidate {
   displayName: string | null;
   phoneType: string | null;
   record: GhlPushRecord;
+  /** Raw custom_data blob, carried alongside `record` so the push engine can
+   * resolve a field-mapping step's virtual-column → GHL-field pairs (ticket
+   * #51) without a second fetch. */
+  customData: Record<string, unknown> | null;
 }
 
 function toGhlPushRecord(row: FullPersonRow): GhlPushRecord {
@@ -660,6 +664,7 @@ export async function getPeopleForGhl(filters: PersonListFilters): Promise<GhlPu
     displayName: row.full_name,
     phoneType: row.phone_type,
     record: toGhlPushRecord(row),
+    customData: row.custom_data,
   }));
 }
 

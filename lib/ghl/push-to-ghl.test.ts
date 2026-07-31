@@ -47,6 +47,7 @@ interface SeedPerson {
   slug: string;
   phoneType: "mobile" | "toll_free" | "landline" | null;
   fullName?: string;
+  customData?: Record<string, unknown>;
 }
 
 async function seedPeople(niche: string, rows: SeedPerson[]) {
@@ -65,6 +66,7 @@ async function seedPeople(niche: string, rows: SeedPerson[]) {
       source: "clay",
       company_name: "Acme Co",
       employee_count: 25,
+      custom_data: r.customData ?? null,
     }))
   );
   if (error) throw error;
@@ -138,6 +140,7 @@ function candidate(phoneType: string | null): GhlPushCandidate {
       employeeCount: null,
       source: null,
     },
+    customData: null,
   };
 }
 
@@ -357,6 +360,56 @@ describe("runPeopleGhlPush", () => {
     expect(result.created).toBe(1);
     expect(result.tagAppended).toBe(1);
     expect(result.errors).toBe(0);
+  });
+
+  it("includes mapped virtual-column values as customField on the push payload", async () => {
+    const niche = unique("field-mapping");
+    await seedPeople(niche, [
+      { slug: "a", phoneType: "mobile", customData: { lead_score: 87, plan: "pro" } },
+      { slug: "b", phoneType: "mobile", customData: { lead_score: null } },
+    ]);
+    const client = await insertClient();
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse((init?.body as string) ?? "{}"));
+      contactCounter++;
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ contact: { id: `contact_${contactCounter}` } }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, {
+      fetchImpl,
+      fieldMapping: [{ virtualColumnKey: "lead_score", ghlFieldId: "f1" }],
+    });
+
+    const customFields = bodies.map((b) => b.customField);
+    expect(customFields).toContainEqual([{ id: "f1", value: "87" }]);
+    // The second person's lead_score is null, so its customField is omitted
+    // entirely from the wire payload rather than sent as an empty array.
+    expect(customFields.some((c) => c === undefined)).toBe(true);
+  });
+
+  it("sends no customField at all when no field mapping is supplied", async () => {
+    const niche = unique("no-mapping");
+    await seedPeople(niche, [{ slug: "a", phoneType: "mobile", customData: { lead_score: 87 } }]);
+    const client = await insertClient();
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse((init?.body as string) ?? "{}"));
+      contactCounter++;
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ contact: { id: `contact_${contactCounter}` } }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, { fetchImpl });
+
+    expect(bodies[0].customField).toBeUndefined();
   });
 
   it("reports progress through resolving, pushing, and done phases", async () => {

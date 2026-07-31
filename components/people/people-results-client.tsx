@@ -141,7 +141,12 @@ export function PeopleResultsClient() {
             onDone={load}
           />
           <PushToClayButton paramsStr={paramsStr} total={result.total} onDone={handlePushDone} />
-          <PushToGhlButton paramsStr={paramsStr} total={result.total} onDone={handlePushDone} />
+          <PushToGhlButton
+            paramsStr={paramsStr}
+            total={result.total}
+            virtualColumns={virtualColumns}
+            onDone={handlePushDone}
+          />
           <ExportButton href={exportHref} />
         </div>
       </div>

@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { parsePersonFilters } from "@/lib/data/people-search-params";
 import { getClientById } from "@/lib/data/clients";
 import { runPeopleGhlPush, type GhlPushProgress } from "@/lib/ghl/push-to-ghl";
+import type { GhlFieldMapping } from "@/lib/ghl/types";
 import { getUser } from "@/lib/auth/dal";
 import { logActivity } from "@/lib/activity/log";
 
@@ -10,6 +11,21 @@ export const maxDuration = 300;
 
 function sseEvent(data: unknown): Uint8Array {
   return new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function isFieldMapping(value: unknown): value is GhlFieldMapping {
+  if (typeof value !== "object" || value === null) return false;
+  const m = value as Record<string, unknown>;
+  return typeof m.virtualColumnKey === "string" && typeof m.ghlFieldId === "string";
+}
+
+/** Parses the mapping step's chosen virtual-column → GHL-field pairs
+ * (ticket #51) off the request body. Malformed entries are dropped rather
+ * than rejected, matching how virtual-column filters degrade elsewhere in
+ * this app rather than erroring the whole push over one bad entry. */
+function parseFieldMapping(value: unknown): GhlFieldMapping[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isFieldMapping);
 }
 
 export async function POST(request: NextRequest) {
@@ -23,8 +39,9 @@ export async function POST(request: NextRequest) {
   const filters = parsePersonFilters(request.nextUrl.searchParams);
 
   let clientId: unknown;
+  let fieldMappingRaw: unknown;
   try {
-    ({ clientId } = await request.json());
+    ({ clientId, fieldMapping: fieldMappingRaw } = await request.json());
   } catch {
     return Response.json({ error: "Invalid request body" }, { status: 400 });
   }
@@ -32,6 +49,8 @@ export async function POST(request: NextRequest) {
   if (typeof clientId !== "string" || clientId.trim() === "") {
     return Response.json({ error: "A clientId is required" }, { status: 400 });
   }
+
+  const fieldMapping = parseFieldMapping(fieldMappingRaw);
 
   const client = await getClientById(clientId);
   if (!client) {
@@ -43,6 +62,7 @@ export async function POST(request: NextRequest) {
       const lastProgress: { current: GhlPushProgress | null } = { current: null };
       try {
         const result = await runPeopleGhlPush(filters, client, {
+          fieldMapping,
           onProgress: (p: GhlPushProgress) => {
             lastProgress.current = p;
             controller.enqueue(sseEvent({ type: "progress", ...p }));

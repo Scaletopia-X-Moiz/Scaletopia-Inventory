@@ -27,6 +27,9 @@ export interface GhlContactPayload {
   city?: string;
   country?: string;
   tags?: string[];
+  /** Custom-field values, keyed by GHL field id — GHL's contact-create API
+   * accepts `{id, value}` pairs here (ticket #51). */
+  customField?: { id: string; value: string }[];
 }
 
 export interface PushContactResult {
