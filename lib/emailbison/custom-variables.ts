@@ -1,0 +1,44 @@
+import "server-only";
+import {
+  listCustomVariables,
+  type EmailBisonClientDeps,
+  type EmailBisonCustomVariable,
+} from "@/lib/emailbison/client";
+import type { EmailBisonCredentials } from "@/lib/emailbison/types";
+
+/** In-memory cache of in-flight/completed custom-variable fetches, keyed by
+ * workspace id. Scoped to this module's lifetime (one process/session)
+ * rather than persisted, mirroring lib/ghl/custom-fields.ts's cache: the
+ * custom-variables reference list is read once per workspace per push run
+ * (not per person), and keying by workspaceId rather than client id means a
+ * client's workspace change naturally lands on a fresh cache entry instead
+ * of a stale one. Caching the promise (not just the resolved value) also
+ * collapses concurrent callers for the same workspace into a single
+ * EmailBison request. */
+const cache = new Map<string, Promise<EmailBisonCustomVariable[]>>();
+
+/** Fetches a workspace's EmailBison custom variables, caching the result per
+ * workspace for the lifetime of this module (i.e. one session). This is the
+ * UI's read-only reference list of variable names already known to the
+ * target workspace — it has no effect on the push itself, it just helps
+ * operators avoid mistyping a name (issue #56). */
+export function getEmailBisonCustomVariables(
+  credentials: EmailBisonCredentials,
+  deps: EmailBisonClientDeps = {}
+): Promise<EmailBisonCustomVariable[]> {
+  const cached = cache.get(credentials.workspaceId);
+  if (cached) return cached;
+
+  const promise = listCustomVariables(credentials, deps).catch((err) => {
+    cache.delete(credentials.workspaceId);
+    throw err;
+  });
+  cache.set(credentials.workspaceId, promise);
+  return promise;
+}
+
+/** Clears the custom-variables cache. Exported for tests to reset state
+ * between cases; not expected to be called from application code. */
+export function clearEmailBisonCustomVariablesCache(): void {
+  cache.clear();
+}
