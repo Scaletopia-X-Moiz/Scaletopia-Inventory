@@ -43,8 +43,28 @@ async function cleanupAll() {
   await supabaseAdmin.from("companies").delete().like("domain", `${TEST_PREFIX}%`);
 }
 
-beforeAll(cleanupAll);
-afterAll(cleanupAll);
+let testActor: { id: string; email: string };
+let otherActor: { id: string; email: string };
+
+async function createTestActor(slug: string): Promise<{ id: string; email: string }> {
+  const { data, error } = await supabaseAdmin.auth.admin.createUser({
+    email: `${TEST_PREFIX}${slug}-${Date.now()}@example.com`,
+    email_confirm: true,
+  });
+  if (error || !data.user) throw error ?? new Error("failed to create test actor");
+  return { id: data.user.id, email: data.user.email! };
+}
+
+beforeAll(async () => {
+  await cleanupAll();
+  testActor = await createTestActor("actor");
+  otherActor = await createTestActor("other-actor");
+});
+afterAll(async () => {
+  await cleanupAll();
+  if (testActor) await supabaseAdmin.auth.admin.deleteUser(testActor.id);
+  if (otherActor) await supabaseAdmin.auth.admin.deleteUser(otherActor.id);
+});
 
 let counter = 0;
 function unique(label: string): string {
@@ -168,7 +188,7 @@ describe("runPeopleAddToEmailBison", () => {
     const client = await insertClient();
     const fetchImpl = okFetch();
 
-    const result = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, { fetchImpl });
+    const result = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
     expect(result.total_matched).toBe(2);
     expect(result.pushed).toBe(2);
@@ -186,13 +206,15 @@ describe("runPeopleAddToEmailBison", () => {
     }
     const { data: pushRows } = await supabaseAdmin
       .from("platform_pushes")
-      .select("platform,platform_contact_id,person_id,client_id")
+      .select("platform,platform_contact_id,person_id,client_id,pushed_by_user_id,pushed_by_email")
       .in("person_id", personIds);
     expect(pushRows).toHaveLength(2);
     for (const row of pushRows!) {
       expect(row.platform).toBe("emailbison");
       expect(row.client_id).toBe(client.id);
       expect(row.platform_contact_id).toBeTruthy();
+      expect(row.pushed_by_user_id).toBe(testActor.id);
+      expect(row.pushed_by_email).toBe(testActor.email);
     }
   });
 
@@ -201,12 +223,12 @@ describe("runPeopleAddToEmailBison", () => {
     await seedPeople(niche, [{ slug: "a" }]);
     const client = await insertClient();
 
-    const first = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, {
+    const first = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, {
       fetchImpl: okFetch(),
     });
     expect(first.pushed).toBe(1);
 
-    const second = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, {
+    const second = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, {
       fetchImpl: okFetch(),
     });
     expect(second.pushed).toBe(1);
@@ -231,7 +253,7 @@ describe("runPeopleAddToEmailBison", () => {
     ]);
     const client = await insertClient();
 
-    const result = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, {
+    const result = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, {
       fetchImpl: okFetch(),
     });
 
@@ -253,7 +275,7 @@ describe("runPeopleAddToEmailBison", () => {
       return { ok: false, status: 500, json: async () => ({ message: "down" }) } as unknown as Response;
     }) as unknown as typeof fetch;
 
-    const result = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, { fetchImpl });
+    const result = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
     expect(result.total_matched).toBe(1);
     expect(result.pushed).toBe(0);
@@ -298,7 +320,7 @@ describe("runPeopleAddToEmailBison", () => {
       throw new Error(`unexpected fetch to ${u}`);
     }) as unknown as typeof fetch;
 
-    const result = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, {
+    const result = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, {
       fetchImpl,
       customVariables: [
         { name: "existing_var", value: "x" },
@@ -316,7 +338,7 @@ describe("runPeopleAddToEmailBison", () => {
     const client = await insertClient();
     const fetchImpl = okFetch();
 
-    const result = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, { fetchImpl });
+    const result = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
     expect(result).toEqual({ total_matched: 0, pushed: 0, errors: 0, failed_people: [] });
     expect(fetchImpl).not.toHaveBeenCalled();
@@ -327,7 +349,7 @@ describe("runPeopleAddToEmailBison", () => {
     const client = await insertClient({ emailbison_api_key: null, emailbison_workspace_id: null });
 
     await expect(
-      runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client)
+      runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor)
     ).rejects.toThrow("EmailBison credentials");
   });
 
@@ -338,7 +360,7 @@ describe("runPeopleAddToEmailBison", () => {
     const fetchImpl = okFetch();
     const progress: Array<{ phase: string; done: number; total: number }> = [];
 
-    await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, {
+    await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, {
       fetchImpl,
       onProgress: (p) => progress.push({ phase: p.phase, done: p.done, total: p.total }),
     });
@@ -361,7 +383,7 @@ describe("runCompaniesAddToEmailBison", () => {
     const client = await insertClient();
     const fetchImpl = okFetch();
 
-    const result = await runCompaniesAddToEmailBison({ niche: includeOnly([niche]) }, client, { fetchImpl });
+    const result = await runCompaniesAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
     expect(result.total_matched).toBe(2);
     expect(result.pushed).toBe(2);
@@ -374,7 +396,7 @@ describe("runCompaniesAddToEmailBison", () => {
     const client = await insertClient();
     const fetchImpl = okFetch();
 
-    const result = await runCompaniesAddToEmailBison({ niche: includeOnly([niche]) }, client, { fetchImpl });
+    const result = await runCompaniesAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
     expect(result).toEqual({ total_matched: 0, pushed: 0, errors: 0, failed_people: [] });
   });
@@ -408,6 +430,7 @@ describe("runPeopleAddToCampaign", () => {
       { niche: includeOnly([niche]) },
       client,
       CAMPAIGN_ID,
+      testActor,
       { fetchImpl: okFetchWithCampaign(attachCalls) }
     );
 
@@ -424,13 +447,15 @@ describe("runPeopleAddToCampaign", () => {
     const personIds = (people ?? []).map((p) => p.id as string);
     const { data: pushRows } = await supabaseAdmin
       .from("platform_pushes")
-      .select("platform_contact_id,campaign_tag,pushed_at")
+      .select("platform_contact_id,campaign_tag,pushed_at,pushed_by_user_id,pushed_by_email")
       .in("person_id", personIds);
     expect(pushRows).toHaveLength(2);
     for (const row of pushRows!) {
       expect(row.platform_contact_id).toBeTruthy();
       expect(row.campaign_tag).toBe(CAMPAIGN_ID);
       expect(row.pushed_at).toBeTruthy();
+      expect(row.pushed_by_user_id).toBe(testActor.id);
+      expect(row.pushed_by_email).toBe(testActor.email);
     }
   });
 
@@ -439,7 +464,7 @@ describe("runPeopleAddToCampaign", () => {
     await seedPeople(niche, [{ slug: "a" }]);
     const client = await insertClient();
 
-    const upsertResult = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, {
+    const upsertResult = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, otherActor, {
       fetchImpl: okFetch(),
     });
     expect(upsertResult.pushed).toBe(1);
@@ -469,7 +494,7 @@ describe("runPeopleAddToCampaign", () => {
       return upsertFetchSpy();
     }) as unknown as typeof fetch;
 
-    const result = await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, {
+    const result = await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, testActor, {
       fetchImpl,
     });
 
@@ -477,6 +502,14 @@ describe("runPeopleAddToCampaign", () => {
     expect(result.errors).toBe(0);
     expect(upsertFetchSpy).not.toHaveBeenCalled();
     expect(attachCalls).toEqual([{ leadIds: [beforeRow!.platform_contact_id], parallel: undefined }]);
+
+    const { data: afterRow } = await supabaseAdmin
+      .from("platform_pushes")
+      .select("pushed_by_user_id,pushed_by_email")
+      .eq("person_id", person!.id as string)
+      .single();
+    expect(afterRow!.pushed_by_user_id).toBe(testActor.id);
+    expect(afterRow!.pushed_by_email).toBe(testActor.email);
   });
 
   it("respects the parallel vs. sequential attach setting", async () => {
@@ -485,7 +518,7 @@ describe("runPeopleAddToCampaign", () => {
     const client = await insertClient();
     const attachCalls: Array<{ leadIds: string[]; parallel: unknown }> = [];
 
-    await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, {
+    await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, testActor, {
       fetchImpl: okFetchWithCampaign(attachCalls),
       parallel: true,
     });
@@ -505,7 +538,7 @@ describe("runPeopleAddToCampaign", () => {
       return (okFetch() as unknown as (u: unknown, i?: RequestInit) => Promise<Response>)(url, init);
     }) as unknown as typeof fetch;
 
-    const result = await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, {
+    const result = await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, testActor, {
       fetchImpl,
     });
 
@@ -532,7 +565,7 @@ describe("runPeopleAddToCampaign", () => {
     const client = await insertClient();
     const attachCalls: Array<{ leadIds: string[]; parallel: unknown }> = [];
 
-    const result = await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, {
+    const result = await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, testActor, {
       fetchImpl: okFetchWithCampaign(attachCalls),
     });
 
@@ -552,7 +585,7 @@ describe("runCompaniesAddToCampaign", () => {
     const client = await insertClient();
     const attachCalls: Array<{ leadIds: string[]; parallel: unknown }> = [];
 
-    const result = await runCompaniesAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, {
+    const result = await runCompaniesAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, testActor, {
       fetchImpl: okFetchWithCampaign(attachCalls),
     });
 

@@ -104,7 +104,7 @@ describe("POST /api/emailbison/push", () => {
   });
 
   it("dispatches Add-to-EmailBison for entity=people, streaming progress and a done event", async () => {
-    runPeopleAddToEmailBison.mockImplementation(async (_filters, _client, deps) => {
+    runPeopleAddToEmailBison.mockImplementation(async (_filters, _client, _user, deps) => {
       deps.onProgress?.({ phase: "resolving", done: 0, total: 0, pushed: 0, errors: 0 });
       deps.onProgress?.({ phase: "done", done: 2, total: 2, pushed: 2, errors: 0 });
       return { total_matched: 2, pushed: 2, errors: 0, failed_people: [] };
@@ -120,8 +120,9 @@ describe("POST /api/emailbison/push", () => {
     expect(response.status).toBe(200);
     expect(runPeopleAddToEmailBison).toHaveBeenCalledTimes(1);
     expect(runCompaniesAddToEmailBison).not.toHaveBeenCalled();
-    const [, client, deps] = runPeopleAddToEmailBison.mock.calls[0];
+    const [, client, user, deps] = runPeopleAddToEmailBison.mock.calls[0];
     expect(client).toBe(testClient);
+    expect(user).toBe(testUser);
     expect(deps.existingLeadBehavior).toBe("put");
 
     const events = await readSseEvents(response);
@@ -140,7 +141,7 @@ describe("POST /api/emailbison/push", () => {
   });
 
   it("dispatches Add-to-Campaign for entity=companies with campaignId and parallel", async () => {
-    runCompaniesAddToCampaign.mockImplementation(async (_filters, _client, campaignId, deps) => {
+    runCompaniesAddToCampaign.mockImplementation(async (_filters, _client, campaignId, _user, deps) => {
       deps.onProgress?.({ phase: "attaching", done: 0, total: 3, attached: 0, errors: 0 });
       return { total_matched: 3, attached: 3, errors: 0, failed_people: [] };
     });
@@ -158,8 +159,9 @@ describe("POST /api/emailbison/push", () => {
     expect(response.status).toBe(200);
     expect(runCompaniesAddToCampaign).toHaveBeenCalledTimes(1);
     expect(runPeopleAddToCampaign).not.toHaveBeenCalled();
-    const [, , campaignId, deps] = runCompaniesAddToCampaign.mock.calls[0];
+    const [, , campaignId, user, deps] = runCompaniesAddToCampaign.mock.calls[0];
     expect(campaignId).toBe("camp-1");
+    expect(user).toBe(testUser);
     expect(deps.parallel).toBe(true);
 
     const events = await readSseEvents(response);
@@ -172,7 +174,7 @@ describe("POST /api/emailbison/push", () => {
   });
 
   it("streams an error event and logs a failed activity when the orchestrator throws", async () => {
-    runPeopleAddToEmailBison.mockImplementation(async (_filters, _client, deps) => {
+    runPeopleAddToEmailBison.mockImplementation(async (_filters, _client, _user, deps) => {
       deps.onProgress?.({ phase: "pushing", done: 1, total: 5, pushed: 1, errors: 0 });
       throw new Error('Client "Acme" has no EmailBison credentials configured');
     });

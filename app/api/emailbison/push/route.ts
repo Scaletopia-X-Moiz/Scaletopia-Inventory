@@ -124,8 +124,8 @@ export async function POST(request: NextRequest) {
           const deps: RunEmailBisonPushDeps = { existingLeadBehavior, customVariables, onProgress };
           result =
             entity === "people"
-              ? await runPeopleAddToEmailBison(personFilters!, client, deps)
-              : await runCompaniesAddToEmailBison(companyFilters!, client, deps);
+              ? await runPeopleAddToEmailBison(personFilters!, client, user, deps)
+              : await runCompaniesAddToEmailBison(companyFilters!, client, user, deps);
         } else {
           const deps: RunEmailBisonCampaignPushDeps = {
             existingLeadBehavior,
@@ -135,8 +135,8 @@ export async function POST(request: NextRequest) {
           };
           result =
             entity === "people"
-              ? await runPeopleAddToCampaign(personFilters!, client, campaignId as string, deps)
-              : await runCompaniesAddToCampaign(companyFilters!, client, campaignId as string, deps);
+              ? await runPeopleAddToCampaign(personFilters!, client, campaignId as string, user, deps)
+              : await runCompaniesAddToCampaign(companyFilters!, client, campaignId as string, user, deps);
         }
 
         await logActivity(

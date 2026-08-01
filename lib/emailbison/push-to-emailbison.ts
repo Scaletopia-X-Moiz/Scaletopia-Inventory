@@ -17,6 +17,7 @@ import {
 import { buildEmailBisonLeadPayload, resolveCustomVariables } from "@/lib/emailbison/lead-payload";
 import type { ClientRow } from "@/lib/data/clients";
 import type { EmailBisonCredentials, EmailBisonCustomVariableEntry } from "@/lib/emailbison/types";
+import type { SessionUser } from "@/lib/auth/dal";
 
 const PLATFORM = "emailbison";
 
@@ -173,7 +174,8 @@ async function pushChunk(
  * without touching the others. */
 async function writePushRows(
   outcomes: PushOutcome[],
-  client: ClientRow
+  client: ClientRow,
+  actor: Pick<SessionUser, "id" | "email">
 ): Promise<{ written: PushOutcome[]; failed: FailedRecord[] }> {
   if (outcomes.length === 0) return { written: [], failed: [] };
 
@@ -187,6 +189,8 @@ async function writePushRows(
           platform: PLATFORM,
           platform_contact_id: outcome.leadId,
           pushed_at: pushedAt,
+          pushed_by_user_id: actor.id,
+          pushed_by_email: actor.email,
         },
         { onConflict: "person_id,client_id,platform" }
       );
@@ -246,6 +250,7 @@ async function upsertCandidatesToWorkspace(
   candidates: EmailBisonPushCandidate[],
   label: string,
   client: ClientRow,
+  actor: Pick<SessionUser, "id" | "email">,
   credentials: EmailBisonCredentials,
   customVariables: EmailBisonCustomVariableEntry[],
   existingLeadBehavior: "patch" | "put",
@@ -281,7 +286,7 @@ async function upsertCandidatesToWorkspace(
         continue;
       }
 
-      const { written, failed: writeFailed } = await writePushRows(outcome.value.pushed, client);
+      const { written, failed: writeFailed } = await writePushRows(outcome.value.pushed, client, actor);
       pushed += written.length;
       for (const w of written) {
         leadIdByPersonId.set(w.candidate.id, w.leadId);
@@ -310,6 +315,7 @@ async function runEmailBisonAddToWorkspace<TFilters>(
   entity: EmailBisonEntity<TFilters>,
   filters: TFilters,
   client: ClientRow,
+  actor: Pick<SessionUser, "id" | "email">,
   deps: RunEmailBisonPushDeps = {}
 ): Promise<EmailBisonPushResult> {
   if (!client.emailbisonApiKey || !client.emailbisonWorkspaceId) {
@@ -343,6 +349,7 @@ async function runEmailBisonAddToWorkspace<TFilters>(
     candidates,
     entity.label,
     client,
+    actor,
     credentials,
     customVariables,
     existingLeadBehavior,
@@ -360,12 +367,14 @@ async function runEmailBisonAddToWorkspace<TFilters>(
 export function runPeopleAddToEmailBison(
   filters: PersonListFilters,
   client: ClientRow,
+  actor: Pick<SessionUser, "id" | "email">,
   deps: RunEmailBisonPushDeps = {}
 ): Promise<EmailBisonPushResult> {
   return runEmailBisonAddToWorkspace(
     { label: "people", loadRecords: getPeopleForEmailBison },
     filters,
     client,
+    actor,
     deps
   );
 }
@@ -376,12 +385,14 @@ export function runPeopleAddToEmailBison(
 export function runCompaniesAddToEmailBison(
   filters: CompanyListFilters,
   client: ClientRow,
+  actor: Pick<SessionUser, "id" | "email">,
   deps: RunEmailBisonPushDeps = {}
 ): Promise<EmailBisonPushResult> {
   return runEmailBisonAddToWorkspace(
     { label: "companies", loadRecords: getPeopleForEmailBisonByCompanyFilters },
     filters,
     client,
+    actor,
     deps
   );
 }
@@ -432,6 +443,7 @@ async function runEmailBisonAddToCampaign<TFilters>(
   filters: TFilters,
   client: ClientRow,
   campaignId: string,
+  actor: Pick<SessionUser, "id" | "email">,
   deps: RunEmailBisonCampaignPushDeps = {}
 ): Promise<EmailBisonCampaignPushResult> {
   if (!client.emailbisonApiKey || !client.emailbisonWorkspaceId) {
@@ -488,6 +500,7 @@ async function runEmailBisonAddToCampaign<TFilters>(
       needsUpsert,
       entity.label,
       client,
+      actor,
       credentials,
       customVariables,
       existingLeadBehavior,
@@ -523,7 +536,12 @@ async function runEmailBisonAddToCampaign<TFilters>(
     const pushedAt = new Date().toISOString();
     const { error: updateError } = await supabaseAdmin
       .from("platform_pushes")
-      .update({ campaign_tag: campaignId, pushed_at: pushedAt })
+      .update({
+        campaign_tag: campaignId,
+        pushed_at: pushedAt,
+        pushed_by_user_id: actor.id,
+        pushed_by_email: actor.email,
+      })
       .eq("client_id", client.id)
       .eq("platform", PLATFORM)
       .in(
@@ -550,6 +568,7 @@ export function runPeopleAddToCampaign(
   filters: PersonListFilters,
   client: ClientRow,
   campaignId: string,
+  actor: Pick<SessionUser, "id" | "email">,
   deps: RunEmailBisonCampaignPushDeps = {}
 ): Promise<EmailBisonCampaignPushResult> {
   return runEmailBisonAddToCampaign(
@@ -557,6 +576,7 @@ export function runPeopleAddToCampaign(
     filters,
     client,
     campaignId,
+    actor,
     deps
   );
 }
@@ -568,6 +588,7 @@ export function runCompaniesAddToCampaign(
   filters: CompanyListFilters,
   client: ClientRow,
   campaignId: string,
+  actor: Pick<SessionUser, "id" | "email">,
   deps: RunEmailBisonCampaignPushDeps = {}
 ): Promise<EmailBisonCampaignPushResult> {
   return runEmailBisonAddToCampaign(
@@ -575,6 +596,7 @@ export function runCompaniesAddToCampaign(
     filters,
     client,
     campaignId,
+    actor,
     deps
   );
 }
