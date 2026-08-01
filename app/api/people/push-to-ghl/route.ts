@@ -61,7 +61,7 @@ export async function POST(request: NextRequest) {
     async start(controller) {
       const lastProgress: { current: GhlPushProgress | null } = { current: null };
       try {
-        const result = await runPeopleGhlPush(filters, client, {
+        const result = await runPeopleGhlPush(filters, client, user, {
           fieldMapping,
           onProgress: (p: GhlPushProgress) => {
             lastProgress.current = p;

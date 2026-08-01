@@ -7,6 +7,7 @@ import { buildGhlTag } from "@/lib/ghl/tag";
 import { buildGhlContactPayload, buildGhlCustomFields } from "@/lib/ghl/contact-payload";
 import type { ClientRow } from "@/lib/data/clients";
 import type { GhlFieldMapping } from "@/lib/ghl/types";
+import type { SessionUser } from "@/lib/auth/dal";
 
 export const GHL_PUSH_CONCURRENCY = 8;
 const PLATFORM = "ghl";
@@ -88,6 +89,7 @@ type PushOneResult = { ok: true; deduped: boolean } | { ok: false; error: string
 async function pushOne(
   candidate: GhlPushCandidate,
   client: ClientRow,
+  actor: Pick<SessionUser, "id" | "email">,
   credentials: GhlCredentials,
   fetchImpl: typeof fetch,
   fieldMapping: GhlFieldMapping[]
@@ -123,6 +125,8 @@ async function pushOne(
         platform_contact_id: contactId,
         campaign_tag: tag,
         pushed_at: pushedAt,
+        pushed_by_user_id: actor.id,
+        pushed_by_email: actor.email,
       },
       { onConflict: "person_id,client_id,platform" }
     );
@@ -155,6 +159,7 @@ async function pushOne(
 export async function runPeopleGhlPush(
   filters: PersonListFilters,
   client: ClientRow,
+  actor: Pick<SessionUser, "id" | "email">,
   deps: RunGhlPushDeps = {}
 ): Promise<GhlPushResult> {
   if (!client.ghlApiKey || !client.ghlLocationId) {
@@ -201,7 +206,7 @@ export async function runPeopleGhlPush(
     const results = await Promise.allSettled(
       group.map(async (candidate) => ({
         candidate,
-        result: await pushOne(candidate, client, credentials, fetchImpl, fieldMapping),
+        result: await pushOne(candidate, client, actor, credentials, fetchImpl, fieldMapping),
       }))
     );
 

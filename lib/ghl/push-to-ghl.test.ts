@@ -34,8 +34,21 @@ async function cleanupAll() {
   await supabaseAdmin.from("clients").delete().like("slug", `${TEST_PREFIX}%`);
 }
 
-beforeAll(cleanupAll);
-afterAll(cleanupAll);
+let testActor: { id: string; email: string };
+
+beforeAll(async () => {
+  await cleanupAll();
+  const { data, error } = await supabaseAdmin.auth.admin.createUser({
+    email: `${TEST_PREFIX}actor-${Date.now()}@example.com`,
+    email_confirm: true,
+  });
+  if (error || !data.user) throw error ?? new Error("failed to create test actor");
+  testActor = { id: data.user.id, email: data.user.email! };
+});
+afterAll(async () => {
+  await cleanupAll();
+  if (testActor) await supabaseAdmin.auth.admin.deleteUser(testActor.id);
+});
 
 let counter = 0;
 function unique(label: string): string {
@@ -191,6 +204,7 @@ describe("runPeopleGhlPush", () => {
     const result = await runPeopleGhlPush(
       { niche: includeOnly([niche]) },
       client,
+      testActor,
       { fetchImpl }
     );
 
@@ -210,7 +224,7 @@ describe("runPeopleGhlPush", () => {
     const client = await insertClient();
     const fetchImpl = okFetch();
 
-    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, { fetchImpl });
+    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
     const { data: person } = await supabaseAdmin
       .from("people")
@@ -222,13 +236,15 @@ describe("runPeopleGhlPush", () => {
 
     const { data: pushRows } = await supabaseAdmin
       .from("platform_pushes")
-      .select("platform,platform_contact_id,campaign_tag,client_id,person_id")
+      .select("platform,platform_contact_id,campaign_tag,client_id,person_id,pushed_by_user_id,pushed_by_email")
       .eq("person_id", person!.id as string);
     expect(pushRows).toHaveLength(1);
     expect(pushRows![0].platform).toBe("ghl");
     expect(pushRows![0].client_id).toBe(client.id);
     expect(pushRows![0].campaign_tag).toContain(client.name);
     expect(pushRows![0].platform_contact_id).toBeTruthy();
+    expect(pushRows![0].pushed_by_user_id).toBe(testActor.id);
+    expect(pushRows![0].pushed_by_email).toBe(testActor.email);
   });
 
   it("re-pushes on a second run and overwrites the platform_pushes row (no dedupe)", async () => {
@@ -236,13 +252,13 @@ describe("runPeopleGhlPush", () => {
     await seedPeople(niche, [{ slug: "a", phoneType: "mobile" }]);
     const client = await insertClient();
 
-    const first = await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, {
+    const first = await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, {
       fetchImpl: okFetch(),
     });
     expect(first.pushed).toBe(1);
 
     const secondFetch = okFetch();
-    const second = await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, {
+    const second = await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, {
       fetchImpl: secondFetch,
     });
 
@@ -287,7 +303,7 @@ describe("runPeopleGhlPush", () => {
       } as unknown as Response;
     }) as unknown as typeof fetch;
 
-    const result = await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, { fetchImpl });
+    const result = await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
     expect(result.total_matched).toBe(3);
     expect(result.eligible).toBe(3);
@@ -303,7 +319,7 @@ describe("runPeopleGhlPush", () => {
     const client = await insertClient();
     const fetchImpl = okFetch();
 
-    const result = await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, { fetchImpl });
+    const result = await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
     expect(result).toEqual({
       total_matched: 0,
@@ -323,7 +339,7 @@ describe("runPeopleGhlPush", () => {
     const client = await insertClient({ ghl_api_key: null, ghl_location_id: null });
 
     await expect(
-      runPeopleGhlPush({ niche: includeOnly([niche]) }, client)
+      runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor)
     ).rejects.toThrow("GHL credentials");
   });
 
@@ -354,7 +370,7 @@ describe("runPeopleGhlPush", () => {
       } as unknown as Response;
     }) as unknown as typeof fetch;
 
-    const result = await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, { fetchImpl });
+    const result = await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
     expect(result.pushed).toBe(2);
     expect(result.created).toBe(1);
@@ -380,7 +396,7 @@ describe("runPeopleGhlPush", () => {
       } as unknown as Response;
     }) as unknown as typeof fetch;
 
-    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, {
+    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, {
       fetchImpl,
       fieldMapping: [{ virtualColumnKey: "lead_score", ghlFieldId: "f1" }],
     });
@@ -407,7 +423,7 @@ describe("runPeopleGhlPush", () => {
       } as unknown as Response;
     }) as unknown as typeof fetch;
 
-    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, { fetchImpl });
+    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
     expect(bodies[0].customField).toBeUndefined();
   });
@@ -422,7 +438,7 @@ describe("runPeopleGhlPush", () => {
     const fetchImpl = okFetch();
     const progress: Array<{ phase: string; done: number; total: number }> = [];
 
-    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, {
+    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, {
       fetchImpl,
       onProgress: (p) => progress.push({ phase: p.phase, done: p.done, total: p.total }),
     });
