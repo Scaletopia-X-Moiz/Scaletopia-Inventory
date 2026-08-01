@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import { runPeopleAddToEmailBison, runCompaniesAddToEmailBison } from "@/lib/emailbison/push-to-emailbison";
+import {
+  runPeopleAddToEmailBison,
+  runCompaniesAddToEmailBison,
+  runPeopleAddToCampaign,
+  runCompaniesAddToCampaign,
+} from "@/lib/emailbison/push-to-emailbison";
 import { includeOnly } from "@/lib/data/include-exclude";
 import type { ClientRow } from "@/lib/data/clients";
 
@@ -372,5 +377,187 @@ describe("runCompaniesAddToEmailBison", () => {
     const result = await runCompaniesAddToEmailBison({ niche: includeOnly([niche]) }, client, { fetchImpl });
 
     expect(result).toEqual({ total_matched: 0, pushed: 0, errors: 0, failed_people: [] });
+  });
+});
+
+const CAMPAIGN_ID = "42";
+
+/** okFetch() plus the attach-leads endpoint, recording each attach call's
+ * lead ids and `parallel` flag for assertions. */
+function okFetchWithCampaign(attachCalls: Array<{ leadIds: string[]; parallel: unknown }>): typeof fetch {
+  const base = okFetch();
+  return vi.fn().mockImplementation(async (url: unknown, init?: RequestInit) => {
+    const u = String(url);
+    if (u.endsWith(`/api/campaigns/${CAMPAIGN_ID}/leads/attach-leads`)) {
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      attachCalls.push({ leadIds: body.lead_ids, parallel: body.parallel });
+      return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+    }
+    return (base as unknown as (u: unknown, i?: RequestInit) => Promise<Response>)(url, init);
+  }) as unknown as typeof fetch;
+}
+
+describe("runPeopleAddToCampaign", () => {
+  it("auto-runs Add to EmailBison first when no prior platform_pushes row exists", async () => {
+    const niche = unique("campaign-auto");
+    await seedPeople(niche, [{ slug: "a" }, { slug: "b" }]);
+    const client = await insertClient();
+    const attachCalls: Array<{ leadIds: string[]; parallel: unknown }> = [];
+
+    const result = await runPeopleAddToCampaign(
+      { niche: includeOnly([niche]) },
+      client,
+      CAMPAIGN_ID,
+      { fetchImpl: okFetchWithCampaign(attachCalls) }
+    );
+
+    expect(result.total_matched).toBe(2);
+    expect(result.attached).toBe(2);
+    expect(result.errors).toBe(0);
+    expect(attachCalls).toHaveLength(1);
+    expect(attachCalls[0].leadIds).toHaveLength(2);
+
+    const { data: people } = await supabaseAdmin
+      .from("people")
+      .select("id")
+      .like("linkedin_url", `%${niche}%`);
+    const personIds = (people ?? []).map((p) => p.id as string);
+    const { data: pushRows } = await supabaseAdmin
+      .from("platform_pushes")
+      .select("platform_contact_id,campaign_tag,pushed_at")
+      .in("person_id", personIds);
+    expect(pushRows).toHaveLength(2);
+    for (const row of pushRows!) {
+      expect(row.platform_contact_id).toBeTruthy();
+      expect(row.campaign_tag).toBe(CAMPAIGN_ID);
+      expect(row.pushed_at).toBeTruthy();
+    }
+  });
+
+  it("skips the Add to EmailBison step when a platform_contact_id already exists", async () => {
+    const niche = unique("campaign-skip");
+    await seedPeople(niche, [{ slug: "a" }]);
+    const client = await insertClient();
+
+    const upsertResult = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, {
+      fetchImpl: okFetch(),
+    });
+    expect(upsertResult.pushed).toBe(1);
+
+    const { data: person } = await supabaseAdmin
+      .from("people")
+      .select("id")
+      .eq("linkedin_url", testLinkedin(`${niche}-a`))
+      .single();
+    const { data: beforeRow } = await supabaseAdmin
+      .from("platform_pushes")
+      .select("platform_contact_id")
+      .eq("person_id", person!.id as string)
+      .single();
+
+    const upsertFetchSpy = vi.fn().mockImplementation(async () => {
+      throw new Error("Add-to-EmailBison endpoint should not be called when a lead id already exists");
+    });
+    const attachCalls: Array<{ leadIds: string[]; parallel: unknown }> = [];
+    const fetchImpl = vi.fn().mockImplementation(async (url: unknown, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith(`/api/campaigns/${CAMPAIGN_ID}/leads/attach-leads`)) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        attachCalls.push({ leadIds: body.lead_ids, parallel: body.parallel });
+        return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+      }
+      return upsertFetchSpy();
+    }) as unknown as typeof fetch;
+
+    const result = await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, {
+      fetchImpl,
+    });
+
+    expect(result.attached).toBe(1);
+    expect(result.errors).toBe(0);
+    expect(upsertFetchSpy).not.toHaveBeenCalled();
+    expect(attachCalls).toEqual([{ leadIds: [beforeRow!.platform_contact_id], parallel: undefined }]);
+  });
+
+  it("respects the parallel vs. sequential attach setting", async () => {
+    const niche = unique("campaign-parallel");
+    await seedPeople(niche, [{ slug: "a" }]);
+    const client = await insertClient();
+    const attachCalls: Array<{ leadIds: string[]; parallel: unknown }> = [];
+
+    await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, {
+      fetchImpl: okFetchWithCampaign(attachCalls),
+      parallel: true,
+    });
+
+    expect(attachCalls).toEqual([{ leadIds: expect.any(Array), parallel: true }]);
+  });
+
+  it("does not abort on a failed campaign attach call, and does not touch platform_pushes", async () => {
+    const niche = unique("campaign-attach-fail");
+    await seedPeople(niche, [{ slug: "a" }]);
+    const client = await insertClient();
+    const fetchImpl = vi.fn().mockImplementation(async (url: unknown, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith(`/api/campaigns/${CAMPAIGN_ID}/leads/attach-leads`)) {
+        return { ok: false, status: 500, json: async () => ({ message: "down" }) } as unknown as Response;
+      }
+      return (okFetch() as unknown as (u: unknown, i?: RequestInit) => Promise<Response>)(url, init);
+    }) as unknown as typeof fetch;
+
+    const result = await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, {
+      fetchImpl,
+    });
+
+    expect(result.total_matched).toBe(1);
+    expect(result.attached).toBe(0);
+    expect(result.errors).toBe(1);
+
+    const { data: person } = await supabaseAdmin
+      .from("people")
+      .select("id")
+      .eq("linkedin_url", testLinkedin(`${niche}-a`))
+      .single();
+    const { data: pushRow } = await supabaseAdmin
+      .from("platform_pushes")
+      .select("platform_contact_id,campaign_tag")
+      .eq("person_id", person!.id as string)
+      .single();
+    expect(pushRow!.platform_contact_id).toBeTruthy();
+    expect(pushRow!.campaign_tag).toBeNull();
+  });
+
+  it("returns an all-zero result for an empty filter match", async () => {
+    const niche = unique("campaign-empty");
+    const client = await insertClient();
+    const attachCalls: Array<{ leadIds: string[]; parallel: unknown }> = [];
+
+    const result = await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, {
+      fetchImpl: okFetchWithCampaign(attachCalls),
+    });
+
+    expect(result).toEqual({ total_matched: 0, attached: 0, errors: 0, failed_people: [] });
+    expect(attachCalls).toEqual([]);
+  });
+});
+
+describe("runCompaniesAddToCampaign", () => {
+  it("resolves matching Companies to every linked Person and attaches them", async () => {
+    const niche = unique("campaign-companies");
+    const companyId = await insertCompany(niche, "campaign-with-people");
+    await seedPeople(niche, [
+      { slug: "linked-a", companyId },
+      { slug: "linked-b", companyId },
+    ]);
+    const client = await insertClient();
+    const attachCalls: Array<{ leadIds: string[]; parallel: unknown }> = [];
+
+    const result = await runCompaniesAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, {
+      fetchImpl: okFetchWithCampaign(attachCalls),
+    });
+
+    expect(result.total_matched).toBe(2);
+    expect(result.attached).toBe(2);
+    expect(result.errors).toBe(0);
   });
 });
