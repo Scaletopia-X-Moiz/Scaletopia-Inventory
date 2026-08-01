@@ -65,6 +65,20 @@ export async function listClients(): Promise<ClientRow[]> {
   return ((data ?? []) as unknown as RawClientRow[]).map(toClientRow);
 }
 
+export interface ClientOption {
+  id: string;
+  name: string;
+}
+
+/** Lists every client as a minimal {id, name} pair, ordered by name. For UI
+ * pickers (e.g. the push-history filter) that don't need credentials. */
+export async function listClientOptions(): Promise<ClientOption[]> {
+  const { data, error } = await supabaseAdmin.from("clients").select("id,name").order("name", { ascending: true });
+
+  if (error) throw error;
+  return (data ?? []) as ClientOption[];
+}
+
 /** Fetches a single client by id. Returns null if it doesn't exist. */
 export async function getClientById(id: string): Promise<ClientRow | null> {
   const { data, error } = await supabaseAdmin
