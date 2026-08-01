@@ -23,3 +23,10 @@ CREATE INDEX IF NOT EXISTS platform_pushes_person_id_idx
 
 ALTER TABLE people ADD COLUMN IF NOT EXISTS pushed_to_ghl boolean NOT NULL DEFAULT false;
 ALTER TABLE people ADD COLUMN IF NOT EXISTS pushed_to_ghl_at timestamptz;
+
+-- Ticket #65: actor-tracking columns on platform_pushes, mirroring the
+-- user_id/user_email pattern on activity_log (see supabase-auth.sql).
+-- Nullable because existing rows have no actor recorded and this ticket
+-- doesn't backfill them (that's tickets #2 and #3).
+ALTER TABLE platform_pushes ADD COLUMN IF NOT EXISTS pushed_by_user_id uuid REFERENCES auth.users(id);
+ALTER TABLE platform_pushes ADD COLUMN IF NOT EXISTS pushed_by_email text;
