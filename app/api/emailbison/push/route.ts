@@ -53,7 +53,8 @@ function isExistingLeadBehavior(value: unknown): value is "patch" | "put" {
 function isCustomVariableEntry(value: unknown): value is EmailBisonCustomVariableEntry {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
-  return typeof v.name === "string" && typeof v.value === "string";
+  if (typeof v.name !== "string" || typeof v.value !== "string") return false;
+  return v.columnKey === undefined || typeof v.columnKey === "string";
 }
 
 /** Parses the manually-entered custom-variable rows (issue #52's panel) off

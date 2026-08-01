@@ -14,7 +14,7 @@ import {
   attachLeadsToCampaign,
   type EmailBisonLeadResult,
 } from "@/lib/emailbison/client";
-import { buildEmailBisonLeadPayload } from "@/lib/emailbison/lead-payload";
+import { buildEmailBisonLeadPayload, resolveCustomVariables } from "@/lib/emailbison/lead-payload";
 import type { ClientRow } from "@/lib/data/clients";
 import type { EmailBisonCredentials, EmailBisonCustomVariableEntry } from "@/lib/emailbison/types";
 
@@ -127,7 +127,13 @@ async function pushChunk(
   try {
     results = await upsertLeadsBulk(
       credentials,
-      withEmail.map((c) => buildEmailBisonLeadPayload(c.record, customVariables, existingLeadBehavior)),
+      withEmail.map((c) =>
+        buildEmailBisonLeadPayload(
+          c.record,
+          resolveCustomVariables(customVariables, c.record, c.customData),
+          existingLeadBehavior
+        )
+      ),
       { fetchImpl }
     );
   } catch (err) {

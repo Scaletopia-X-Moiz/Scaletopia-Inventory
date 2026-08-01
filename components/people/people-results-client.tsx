@@ -11,6 +11,7 @@ import { Pagination } from "@/components/companies/pagination";
 import { ExportButton } from "@/components/people/export-button";
 import { PushToClayButton } from "@/components/people/push-to-clay-button";
 import { PushToGhlButton } from "@/components/people/push-to-ghl-button";
+import { PushToEmailBisonButton } from "@/components/people/push-to-emailbison-button";
 import { ReverifyFilteredButton } from "@/components/shared/reverify-filtered-button";
 import { SkeletonTable } from "@/components/shared/skeleton-loaders";
 
@@ -142,6 +143,12 @@ export function PeopleResultsClient() {
           />
           <PushToClayButton paramsStr={paramsStr} total={result.total} onDone={handlePushDone} />
           <PushToGhlButton
+            paramsStr={paramsStr}
+            total={result.total}
+            virtualColumns={virtualColumns}
+            onDone={handlePushDone}
+          />
+          <PushToEmailBisonButton
             paramsStr={paramsStr}
             total={result.total}
             virtualColumns={virtualColumns}

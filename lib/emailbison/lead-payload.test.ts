@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildEmailBisonLeadPayload } from "@/lib/emailbison/lead-payload";
+import { buildEmailBisonLeadPayload, resolveCustomVariables } from "@/lib/emailbison/lead-payload";
 
 const fullRecord = {
   firstName: "Jane",
@@ -76,5 +76,53 @@ describe("buildEmailBisonLeadPayload", () => {
   it("supports zero custom-variable entries", () => {
     const result = buildEmailBisonLeadPayload(fullRecord, []);
     expect(result.customVariables).toEqual([]);
+  });
+});
+
+describe("resolveCustomVariables", () => {
+  const customData = { lead_score: 87, is_decision_maker: true, tags: ["a", "b"], empty: null };
+
+  it("passes literal entries through untouched", () => {
+    const entries = [{ name: "plan", value: "pro" }];
+    expect(resolveCustomVariables(entries, fullRecord, null)).toEqual(entries);
+  });
+
+  it("resolves a column-bound entry from a known EmailBison record field", () => {
+    const entries = [{ name: "company", value: "", columnKey: "companyName" }];
+    expect(resolveCustomVariables(entries, fullRecord, null)).toEqual([
+      { name: "company", value: "Acme Inc" },
+    ]);
+  });
+
+  it("resolves a column-bound entry from custom_data (virtual column)", () => {
+    const entries = [{ name: "score", value: "", columnKey: "lead_score" }];
+    expect(resolveCustomVariables(entries, fullRecord, customData)).toEqual([
+      { name: "score", value: "87" },
+    ]);
+  });
+
+  it("stringifies booleans, numbers, and arrays from custom_data", () => {
+    const entries = [
+      { name: "dm", value: "", columnKey: "is_decision_maker" },
+      { name: "tags", value: "", columnKey: "tags" },
+    ];
+    expect(resolveCustomVariables(entries, fullRecord, customData)).toEqual([
+      { name: "dm", value: "true" },
+      { name: "tags", value: '["a","b"]' },
+    ]);
+  });
+
+  it("omits a column-bound entry whose resolved value is null or missing", () => {
+    const entries = [
+      { name: "empty", value: "", columnKey: "empty" },
+      { name: "missing", value: "", columnKey: "does_not_exist" },
+      { name: "plan", value: "pro" },
+    ];
+    expect(resolveCustomVariables(entries, fullRecord, customData)).toEqual([{ name: "plan", value: "pro" }]);
+  });
+
+  it("omits a column-bound entry when custom_data is null", () => {
+    const entries = [{ name: "score", value: "", columnKey: "lead_score" }];
+    expect(resolveCustomVariables(entries, fullRecord, null)).toEqual([]);
   });
 });

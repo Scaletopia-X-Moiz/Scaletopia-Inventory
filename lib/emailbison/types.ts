@@ -40,8 +40,15 @@ export interface EmailBisonLeadPayload {
 /** One manually-added custom-variable row from the Add-to-EmailBison step's
  * UI (issue #52) — analogous to GhlFieldMapping (lib/ghl/types.ts) but a
  * direct name/value entry rather than a virtual-column-to-field mapping,
- * matching Clay's own custom-variable panel. */
+ * matching Clay's own custom-variable panel. A row's value is either a
+ * literal (`value`, the default) or bound to a People-table column/virtual
+ * column (`columnKey` set, `value` ignored) — resolved per-candidate at push
+ * time by lib/emailbison/lead-payload.ts's resolveCustomVariables, reading
+ * from the candidate's record fields or custom_data. Unset/omitted
+ * `columnKey` keeps this a pass-through literal, matching how earlier
+ * tickets (#56-#60) already produce/consume this shape. */
 export interface EmailBisonCustomVariableEntry {
   name: string;
   value: string;
+  columnKey?: string;
 }

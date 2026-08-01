@@ -17,6 +17,7 @@ export async function GET() {
       id: c.id,
       name: c.name,
       hasGhlCredentials: Boolean(c.ghlApiKey && c.ghlLocationId),
+      hasEmailBisonCredentials: Boolean(c.emailbisonApiKey && c.emailbisonWorkspaceId),
     })),
   });
 }
