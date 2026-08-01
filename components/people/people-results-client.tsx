@@ -12,6 +12,7 @@ import { ExportButton } from "@/components/people/export-button";
 import { PushToClayButton } from "@/components/people/push-to-clay-button";
 import { PushToGhlButton } from "@/components/people/push-to-ghl-button";
 import { PushToEmailBisonButton } from "@/components/people/push-to-emailbison-button";
+import { PushToEmailBisonCampaignButton } from "@/components/people/push-to-emailbison-campaign-button";
 import { ReverifyFilteredButton } from "@/components/shared/reverify-filtered-button";
 import { SkeletonTable } from "@/components/shared/skeleton-loaders";
 
@@ -152,6 +153,11 @@ export function PeopleResultsClient() {
             paramsStr={paramsStr}
             total={result.total}
             virtualColumns={virtualColumns}
+            onDone={handlePushDone}
+          />
+          <PushToEmailBisonCampaignButton
+            paramsStr={paramsStr}
+            total={result.total}
             onDone={handlePushDone}
           />
           <ExportButton href={exportHref} />
