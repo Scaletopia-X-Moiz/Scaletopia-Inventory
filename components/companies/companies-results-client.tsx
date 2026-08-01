@@ -10,6 +10,7 @@ import { useVirtualColumnsState } from "@/components/companies/use-virtual-colum
 import { Pagination } from "@/components/companies/pagination";
 import { ExportButton } from "@/components/companies/export-button";
 import { PushToClayButton } from "@/components/companies/push-to-clay-button";
+import { PushToEmailBisonButton } from "@/components/companies/push-to-emailbison-button";
 import { CleanNamesButton } from "@/components/companies/clean-names-button";
 import { ReverifyFilteredButton } from "@/components/shared/reverify-filtered-button";
 import { SkeletonTable } from "@/components/shared/skeleton-loaders";
@@ -132,6 +133,12 @@ export function CompaniesResultsClient() {
           />
           <CleanNamesButton paramsStr={paramsStr} total={result.total} onDone={load} />
           <PushToClayButton paramsStr={paramsStr} total={result.total} onDone={handlePushDone} />
+          <PushToEmailBisonButton
+            paramsStr={paramsStr}
+            total={result.total}
+            virtualColumns={virtualColumns}
+            onDone={handlePushDone}
+          />
           <ExportButton href={exportHref} />
         </div>
       </div>
