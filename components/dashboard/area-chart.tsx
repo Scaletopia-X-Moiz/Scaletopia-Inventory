@@ -1,11 +1,13 @@
 "use client";
 
 import { useCallback, useId, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { motion, AnimatePresence, useInView } from "framer-motion";
 import { cn, humanizeSlug } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export interface ChartPoint {
+  id?: string;
   label: string;
   count: number;
 }
@@ -13,6 +15,7 @@ export interface ChartSeries {
   key: string;
   label: string;
   points: ChartPoint[];
+  filterParam?: string;
 }
 
 const GRADIENTS = [
@@ -75,11 +78,22 @@ export function AreaChart({ title, series }: { title: string; series: ChartSerie
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<HTMLDivElement>(null);
   const isInView = useInView(containerRef, { once: true, margin: "-20px" });
+  const router = useRouter();
 
   const active = series.find((s) => s.key === activeKey) ?? series[0];
   const seriesIndex = series.indexOf(active);
   const gradInfo = GRADIENTS[seriesIndex % GRADIENTS.length];
   const c = coords(active.points);
+  const clickable = !!active.filterParam;
+
+  const handleDotClick = useCallback(
+    (pt: ChartPoint) => {
+      if (!active.filterParam) return;
+      const id = pt.id ?? pt.label;
+      router.push(`/companies?${active.filterParam}=${encodeURIComponent(id)}`);
+    },
+    [active, router],
+  );
 
   const handleDotHover = useCallback(
     (pt: ChartPoint, idx: number, color: string) => {
@@ -227,13 +241,28 @@ export function AreaChart({ title, series }: { title: string; series: ChartSerie
                   transform: "translate(-50%, -50%)",
                   backgroundColor: "var(--card)",
                   border: `1.5px solid ${gradInfo.stop}`,
-                  cursor: "pointer",
+                  cursor: clickable ? "pointer" : "default",
                 }}
                 initial={{ scale: 0, opacity: 0 }}
                 animate={isInView ? { scale: 1, opacity: 1 } : {}}
+                whileHover={clickable ? { scale: 1.5 } : undefined}
                 transition={{ delay: 0.3 + i * 0.05, duration: 0.3, type: "spring", stiffness: 300, damping: 20 }}
                 onMouseEnter={() => handleDotHover(d.point, i, gradInfo.stop)}
                 onMouseLeave={() => setTooltip(null)}
+                onClick={clickable ? () => handleDotClick(d.point) : undefined}
+                role={clickable ? "button" : undefined}
+                tabIndex={clickable ? 0 : undefined}
+                title={clickable ? `Filter by ${humanizeSlug(d.point.label)}` : undefined}
+                onKeyDown={
+                  clickable
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          handleDotClick(d.point);
+                        }
+                      }
+                    : undefined
+                }
               />
             ))}
 

@@ -37,8 +37,8 @@ async function DashboardSections({ from, to }: { from?: string; to?: string }) {
             <AreaChart
               title="Catalog Distribution"
               series={[
-                { key: "niches", label: "By Niche", points: data.niches },
-                { key: "sources", label: "By Source", points: data.sources },
+                { key: "niches", label: "By Niche", points: data.niches, filterParam: "niche" },
+                { key: "sources", label: "By Source", points: data.sources, filterParam: "source" },
               ]}
             />
           </div>
