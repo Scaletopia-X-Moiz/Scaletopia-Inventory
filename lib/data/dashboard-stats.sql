@@ -13,7 +13,10 @@
 -- duplicated in SQL. `recentCompanies` returns the raw `country` text (not
 -- country_id) so getDashboard can keep applying normalizeCountry() to it
 -- exactly as before, preserving the existing recent-companies label
--- behavior bit-for-bit.
+-- behavior bit-for-bit. `totalPushes` (issue #71) is deliberately an
+-- all-time count of platform_pushes, ignoring range_from/range_to — unlike
+-- totalCompanies/totalPeople it isn't scoped to the dashboard's date-range
+-- picker.
 CREATE OR REPLACE FUNCTION dashboard_stats(range_from timestamptz DEFAULT NULL, range_to timestamptz DEFAULT NULL)
 RETURNS jsonb LANGUAGE sql STABLE AS $$
 WITH company_base AS MATERIALIZED (
@@ -56,10 +59,15 @@ people_total AS (
   FROM people
   WHERE (range_from IS NULL OR created_at >= range_from)
     AND (range_to IS NULL OR created_at < range_to)
+),
+pushes_total AS (
+  SELECT count(*) AS count
+  FROM platform_pushes
 )
 SELECT jsonb_build_object(
   'totalCompanies', (SELECT count(*) FROM company_base),
   'totalPeople', (SELECT count FROM people_total),
+  'totalPushes', (SELECT count FROM pushes_total),
   'niches', COALESCE((SELECT jsonb_agg(jsonb_build_object('id', id, 'count', count)) FROM niches), '[]'::jsonb),
   'sources', COALESCE((SELECT jsonb_agg(jsonb_build_object('id', id, 'count', count)) FROM sources), '[]'::jsonb),
   'industries', COALESCE((SELECT jsonb_agg(jsonb_build_object('id', id, 'count', count)) FROM industries), '[]'::jsonb),

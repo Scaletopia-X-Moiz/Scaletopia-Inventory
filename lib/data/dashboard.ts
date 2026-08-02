@@ -21,6 +21,7 @@ export interface RecentCompany {
 export interface Dashboard {
   totalCompanies: number;
   totalPeople: number;
+  totalPushes: number;
   niches: BreakdownEntry[];
   sources: BreakdownEntry[];
   industries: BreakdownEntry[];
@@ -47,6 +48,7 @@ interface FacetIdCount {
 interface DashboardStatsRpcResult {
   totalCompanies: number;
   totalPeople: number;
+  totalPushes: number;
   niches: FacetIdCount[];
   sources: FacetIdCount[];
   industries: FacetIdCount[];
@@ -89,6 +91,7 @@ async function getDashboardUncached(range: DashboardDateRange = {}): Promise<Das
   return {
     totalCompanies: result.totalCompanies,
     totalPeople: result.totalPeople,
+    totalPushes: result.totalPushes,
     niches: result.niches.map(({ id, count }) => ({ id, label: id, count })).sort(sortByCountDesc),
     sources: result.sources
       .map(({ id, count }) => ({ id, label: sourceLabel(id), count }))

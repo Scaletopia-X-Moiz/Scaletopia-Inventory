@@ -54,7 +54,7 @@ interface CompanyScanRow {
 }
 
 async function getDashboardLegacy(range: DashboardDateRange = {}): Promise<Dashboard> {
-  const [companiesCount, peopleCount, rows, recentCompaniesRes] = await Promise.all([
+  const [companiesCount, peopleCount, pushesCount, rows, recentCompaniesRes] = await Promise.all([
     (() => {
       let q = supabaseAdmin.from("companies").select("id", { count: "exact", head: true });
       if (range.from) q = q.gte("created_at", range.from);
@@ -67,6 +67,8 @@ async function getDashboardLegacy(range: DashboardDateRange = {}): Promise<Dashb
       if (range.to) q = q.lt("created_at", range.to);
       return q;
     })(),
+    // totalPushes is deliberately all-time (issue #71), not scoped by `range`.
+    supabaseAdmin.from("platform_pushes").select("id", { count: "exact", head: true }),
     fetchAllRows<CompanyScanRow>("companies", "niche,source,industry,country", (query) => {
       let q = query;
       if (range.from) q = q.gte("created_at", range.from);
@@ -87,6 +89,7 @@ async function getDashboardLegacy(range: DashboardDateRange = {}): Promise<Dashb
 
   if (companiesCount.error) throw companiesCount.error;
   if (peopleCount.error) throw peopleCount.error;
+  if (pushesCount.error) throw pushesCount.error;
   if (recentCompaniesRes.error) throw recentCompaniesRes.error;
 
   const niches = new Map<string, { label: string; count: number }>();
@@ -118,6 +121,7 @@ async function getDashboardLegacy(range: DashboardDateRange = {}): Promise<Dashb
   return {
     totalCompanies: companiesCount.count ?? 0,
     totalPeople: peopleCount.count ?? 0,
+    totalPushes: pushesCount.count ?? 0,
     niches: sortedBreakdown(niches),
     sources: sortedBreakdown(sources),
     industries: sortedBreakdown(industries),
@@ -133,6 +137,7 @@ function byId<T extends { id: string }>(entries: T[]): T[] {
 function expectBreakdownsEqual(actual: Dashboard, expected: Dashboard) {
   expect(actual.totalCompanies).toBe(expected.totalCompanies);
   expect(actual.totalPeople).toBe(expected.totalPeople);
+  expect(actual.totalPushes).toBe(expected.totalPushes);
   expect(byId(actual.niches)).toEqual(byId(expected.niches));
   expect(byId(actual.sources)).toEqual(byId(expected.sources));
   expect(byId(actual.industries)).toEqual(byId(expected.industries));
