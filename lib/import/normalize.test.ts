@@ -4,6 +4,7 @@ import {
   normalizeLinkedInUrl,
   scrubJunkDomain,
   fuzzyMatchColumn,
+  deriveFullName,
   dedupeCompanies,
   dedupePeople,
   JUNK_DOMAINS,
@@ -176,6 +177,51 @@ describe("fuzzyMatchColumn", () => {
     // "# Employees" won't hit alias map directly but "employees" is an alias
     const result = fuzzyMatchColumn("Employees", companyCandidates);
     expect(result?.field).toBe("employee_count");
+  });
+});
+
+describe("deriveFullName", () => {
+  it("joins first and last name when full_name is missing", () => {
+    expect(deriveFullName(undefined, "Jane", "Doe")).toBe("Jane Doe");
+  });
+
+  it("joins first and last name when full_name is null", () => {
+    expect(deriveFullName(null, "Jane", "Doe")).toBe("Jane Doe");
+  });
+
+  it("joins first and last name when full_name is an empty string", () => {
+    expect(deriveFullName("", "Jane", "Doe")).toBe("Jane Doe");
+  });
+
+  it("falls back to first name only when last name is absent", () => {
+    expect(deriveFullName(undefined, "Jane", undefined)).toBe("Jane");
+  });
+
+  it("falls back to last name only when first name is absent", () => {
+    expect(deriveFullName(undefined, undefined, "Doe")).toBe("Doe");
+  });
+
+  it("trims whitespace from first/last before joining", () => {
+    expect(deriveFullName(undefined, "  Jane  ", "  Doe  ")).toBe("Jane Doe");
+  });
+
+  it("does not overwrite an explicit non-empty full_name", () => {
+    expect(deriveFullName("Explicit Name", "Jane", "Doe")).toBe("Explicit Name");
+  });
+
+  it("does not overwrite an explicit full_name even without first/last", () => {
+    expect(deriveFullName("Explicit Name", undefined, undefined)).toBe(
+      "Explicit Name"
+    );
+  });
+
+  it("does not produce a lone space or empty string when both parts are absent", () => {
+    expect(deriveFullName(undefined, undefined, undefined)).toBeUndefined();
+    expect(deriveFullName(null, null, null)).toBeNull();
+  });
+
+  it("does not produce a lone space when both first and last are blank strings", () => {
+    expect(deriveFullName("", "   ", "   ")).toBe("");
   });
 });
 

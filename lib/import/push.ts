@@ -4,6 +4,7 @@ import {
   normalizeDomain,
   normalizeLinkedInUrl,
   scrubJunkDomain,
+  deriveFullName,
   dedupeCompanies,
   dedupePeople,
 } from "@/lib/import/normalize";
@@ -673,6 +674,19 @@ export async function pushRecords(
 
       out.domain = derivedDomain;
       out.linkedin_url = normalizedLinkedin;
+
+      // Ticket 74: when a people source (e.g. Manual CSV) provides First
+      // Name / Last Name but no explicit Full Name column, full_name would
+      // otherwise land as null — blank in the People list and unfindable via
+      // the name search box (lib/data/search.ts only searches
+      // full_name/email). Never overwrites an explicit Full Name value.
+      if (targetTable === "people") {
+        out.full_name = deriveFullName(
+          out.full_name as string | null | undefined,
+          out.first_name as string | null | undefined,
+          out.last_name as string | null | undefined
+        );
+      }
 
       return out;
     });

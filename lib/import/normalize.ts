@@ -47,6 +47,34 @@ export function scrubJunkDomain(domain: string | null): string | null {
   return JUNK_DOMAINS.has(domain) ? null : domain;
 }
 
+/**
+ * Derive a person's `full_name` from First Name / Last Name when the source
+ * (e.g. a Manual CSV import) supplied those columns but no explicit Full Name
+ * column — see ticket 74. `normalize.ts` maps "First Name"/"Last Name"
+ * headers to `first_name`/`last_name`, but without this step `full_name`
+ * lands as null, leaving the People list blank and the name search box
+ * unable to find the row (it only searches `full_name`/`email`).
+ *
+ * Never overwrites an already-populated `full_name` (an explicit Full Name
+ * column always wins, unmangled), joins first+last with a single space when
+ * both are present, falls back to whichever single part is present, and
+ * leaves `full_name` untouched (not coerced to `""`) when neither part is
+ * present.
+ */
+export function deriveFullName(
+  fullName: string | null | undefined,
+  firstName: string | null | undefined,
+  lastName: string | null | undefined
+): string | null | undefined {
+  if (typeof fullName === "string" && fullName.trim() !== "") return fullName;
+
+  const first = typeof firstName === "string" ? firstName.trim() : "";
+  const last = typeof lastName === "string" ? lastName.trim() : "";
+  const combined = [first, last].filter(Boolean).join(" ");
+
+  return combined || fullName;
+}
+
 const COLUMN_ALIAS_MAP: Record<string, string> = {
   website: "website_url",
   "website url": "website_url",
