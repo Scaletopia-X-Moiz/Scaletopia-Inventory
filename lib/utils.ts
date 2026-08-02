@@ -35,6 +35,24 @@ export function timeAgo(iso: string | null | undefined, now: Date = new Date()):
   return `${yr} year${yr === 1 ? "" : "s"} ago`;
 }
 
+/**
+ * Absolute date+time string, e.g. for a `title` tooltip on a relative
+ * ("3 hours ago") timestamp. Locale is pinned explicitly (matching the
+ * "en-US" convention used for numbers elsewhere in this app) so server and
+ * client render byte-identical output — `toLocaleString(undefined, ...)`
+ * falls back to the runtime's default locale, which differs between Node's
+ * server locale and the browser's locale and causes a hydration mismatch.
+ */
+export function formatAbsoluteDateTime(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString("en-US", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
 export function humanizeSlug(slug: string): string {
   return slug
     .split(/[-_]/)

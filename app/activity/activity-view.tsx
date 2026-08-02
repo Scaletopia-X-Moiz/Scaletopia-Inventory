@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Loader2 } from "lucide-react";
-import { timeAgo } from "@/lib/utils";
+import { formatAbsoluteDateTime, timeAgo } from "@/lib/utils";
 
 export interface ActivityRow {
   id: number;
@@ -94,13 +94,6 @@ function summarize(action: string, d: Record<string, unknown>): string {
   return parts.filter(Boolean).join(" · ");
 }
 
-function fmtAbsolute(iso: string) {
-  return new Date(iso).toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}
-
 export function ActivityView({
   rows: initialRows,
   initialHasMore,
@@ -161,7 +154,7 @@ export function ActivityView({
                 <td className="px-4 py-3 text-ink-soft">
                   {summarize(r.action, r.details ?? {}) || "—"}
                 </td>
-                <td className="whitespace-nowrap px-4 py-3 text-ink-soft" title={fmtAbsolute(r.created_at)}>
+                <td className="whitespace-nowrap px-4 py-3 text-ink-soft" title={formatAbsoluteDateTime(r.created_at)}>
                   {timeAgo(r.created_at)}
                 </td>
               </tr>

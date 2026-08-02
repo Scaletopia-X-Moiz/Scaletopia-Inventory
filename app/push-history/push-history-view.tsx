@@ -3,7 +3,7 @@
 import { useRef, useState } from "react";
 import Link from "next/link";
 import { Loader2 } from "lucide-react";
-import { timeAgo } from "@/lib/utils";
+import { formatAbsoluteDateTime, timeAgo } from "@/lib/utils";
 import type { PushHistoryRow } from "@/lib/data/push-history";
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -18,13 +18,6 @@ const PLATFORM_OPTIONS = Object.entries(PLATFORM_LABELS).map(([value, label]) =>
 
 function platformLabel(platform: string): string {
   return PLATFORM_LABELS[platform] ?? platform;
-}
-
-function fmtAbsolute(iso: string) {
-  return new Date(iso).toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
 }
 
 export function PushHistoryView({
@@ -151,7 +144,7 @@ export function PushHistoryView({
                   <td className="px-4 py-3 text-ink-soft">{r.pushedByEmail ?? "—"}</td>
                   <td
                     className="whitespace-nowrap px-4 py-3 text-ink-soft"
-                    title={fmtAbsolute(r.pushedAt)}
+                    title={formatAbsoluteDateTime(r.pushedAt)}
                   >
                     {timeAgo(r.pushedAt)}
                   </td>

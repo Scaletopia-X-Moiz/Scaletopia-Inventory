@@ -3,7 +3,7 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import { AppShell } from "@/components/dashboard/app-shell";
 import { Topbar } from "@/components/dashboard/topbar";
-import { cn, timeAgo } from "@/lib/utils";
+import { cn, formatAbsoluteDateTime, timeAgo } from "@/lib/utils";
 import {
   BUILTIN_PROVIDERS,
   COMPANIES_FIELDS,
@@ -1411,9 +1411,7 @@ function HistoryTab() {
             const isExpanded = expanded === row.id;
             const hasFailures = row.failed_count > 0;
             const rowFailedRecords = failedRecordsById[row.id];
-            const absoluteDate = row.completed_at
-              ? new Date(row.completed_at).toLocaleString()
-              : new Date(row.started_at).toLocaleString();
+            const absoluteDate = formatAbsoluteDateTime(row.completed_at ?? row.started_at);
             const relativeDate = timeAgo(row.completed_at ?? row.started_at);
 
             return (
