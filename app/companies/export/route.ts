@@ -8,8 +8,9 @@ export async function GET(request: NextRequest) {
   const user = await getUser();
   const filters = parseCompanyFilters(request.nextUrl.searchParams);
   const csv = await exportCompaniesCsv(filters);
-  // Header line + one line per row, no trailing newline (see buildCsv).
-  const rowCount = csv.length === 0 ? 0 : csv.split("\n").length - 1;
+  // buildCsv terminates every line (including the last) with "\n", so the
+  // number of newline characters equals the header line plus every data row.
+  const rowCount = csv.length === 0 ? 0 : (csv.match(/\n/g)?.length ?? 0) - 1;
 
   await logActivity("companies.export", { rowCount, filters }, user ?? undefined);
 

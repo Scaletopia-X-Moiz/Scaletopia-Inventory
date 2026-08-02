@@ -23,7 +23,16 @@ export function stringifyCsvValue(value: unknown): string {
 /** Builds a CSV where `fixedHeaders` always lead (in the given order) and any
  * extra keys present on the records are appended as columns in first-seen
  * order — that's how per-row enrichment keys become their own columns without
- * every row having to share the same set. */
+ * every row having to share the same set.
+ *
+ * Every line, including the last data row, ends with "\n" (RFC 4180 §2.2 —
+ * "the last record in the file may or may not have an ending line break," but
+ * omitting it broke row counting for consumers that count rows by counting
+ * line terminators, e.g. `wc -l`: with no trailing newline the final data row
+ * has no terminator to count, so `wc -l` (or any equivalent split-on-newline
+ * count) reports exactly one row fewer than are actually in the file. This
+ * was the CSV export's off-by-one (ticket 75) — the query/pagination layers
+ * underneath were already returning the full row set. */
 export function buildCsv(
   fixedHeaders: string[],
   records: Array<Record<string, string>>
@@ -44,5 +53,5 @@ export function buildCsv(
   for (const record of records) {
     lines.push(headers.map((h) => csvCell(record[h] ?? "")).join(","));
   }
-  return lines.join("\n");
+  return lines.join("\n") + "\n";
 }
