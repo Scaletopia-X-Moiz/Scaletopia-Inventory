@@ -11,7 +11,13 @@ import { logActivity } from "@/lib/activity/log";
 
 export type ClientCredentialField = keyof UpdateClientCredentialsInput;
 
-const EDITABLE_FIELDS: ClientCredentialField[] = ["ghlApiKey", "ghlLocationId", "isActive"];
+const EDITABLE_FIELDS: ClientCredentialField[] = [
+  "ghlApiKey",
+  "ghlLocationId",
+  "emailbisonApiKey",
+  "emailbisonWorkspaceId",
+  "isActive",
+];
 
 export interface UpdateClientFieldState {
   error?: string;

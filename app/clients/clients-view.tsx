@@ -11,19 +11,25 @@ import {
   type CreateClientState,
 } from "./actions";
 
-const TEXT_FIELDS: { field: "ghlApiKey" | "ghlLocationId"; label: string }[] = [
-  { field: "ghlApiKey", label: "GHL API key" },
+type TextField = Exclude<ClientCredentialField, "isActive">;
+
+const TEXT_FIELDS: { field: TextField; label: string; sensitive?: boolean }[] = [
+  { field: "ghlApiKey", label: "GHL API key", sensitive: true },
   { field: "ghlLocationId", label: "GHL location ID" },
+  { field: "emailbisonApiKey", label: "EmailBison API key", sensitive: true },
+  { field: "emailbisonWorkspaceId", label: "EmailBison workspace ID" },
 ];
 
 function EditableCell({
   clientId,
   field,
   initialValue,
+  sensitive,
 }: {
   clientId: string;
   field: ClientCredentialField;
   initialValue: string | null;
+  sensitive?: boolean;
 }) {
   const [value, setValue] = useState(initialValue ?? "");
   const [lastSaved, setLastSaved] = useState(initialValue ?? "");
@@ -49,11 +55,12 @@ function EditableCell({
   return (
     <div className="flex items-center gap-1.5">
       <input
-        type="text"
+        type={sensitive ? "password" : "text"}
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onBlur={save}
         placeholder="—"
+        autoComplete="off"
         className="w-full min-w-[160px] rounded-md border border-rule bg-paper px-2 py-1 text-sm text-ink outline-none focus:border-stamp"
       />
       {isPending && <Loader2 size={14} className="shrink-0 animate-spin text-ink-mute" />}
@@ -239,12 +246,13 @@ export function ClientsView({ clients }: { clients: ClientRow[] }) {
                   {client.name}
                   <span className="ml-2 text-xs text-ink-mute">{client.slug}</span>
                 </td>
-                {TEXT_FIELDS.map(({ field }) => (
+                {TEXT_FIELDS.map(({ field, sensitive }) => (
                   <td key={field} className="px-4 py-3">
                     <EditableCell
                       clientId={client.id}
                       field={field}
                       initialValue={client[field]}
+                      sensitive={sensitive}
                     />
                   </td>
                 ))}
