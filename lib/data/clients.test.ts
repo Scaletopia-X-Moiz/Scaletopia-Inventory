@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import {
+  createClient,
   getClientById,
   listActiveClients,
   listClients,
@@ -106,6 +107,35 @@ describe("clients data layer", () => {
     it("returns null for a nonexistent id", async () => {
       const client = await getClientById("00000000-0000-0000-0000-000000000000");
       expect(client).toBeNull();
+    });
+  });
+
+  describe("createClient", () => {
+    it("creates a new active row with credentials left null", async () => {
+      const slug = `${TEST_SLUG_PREFIX}${Math.random().toString(36).slice(2)}`;
+      const created = await createClient({ slug, name: "Acme Agency" });
+      insertedIds.push(created.id);
+
+      expect(created).toMatchObject({
+        slug,
+        name: "Acme Agency",
+        ghlApiKey: null,
+        ghlLocationId: null,
+        isActive: true,
+      });
+
+      const fetched = await getClientById(created.id);
+      expect(fetched).toMatchObject({ slug, name: "Acme Agency" });
+    });
+
+    it("throws a unique-violation (23505) when the slug already exists", async () => {
+      const slug = `${TEST_SLUG_PREFIX}${Math.random().toString(36).slice(2)}`;
+      const first = await createClient({ slug, name: "First" });
+      insertedIds.push(first.id);
+
+      await expect(createClient({ slug, name: "Second" })).rejects.toMatchObject({
+        code: "23505",
+      });
     });
   });
 

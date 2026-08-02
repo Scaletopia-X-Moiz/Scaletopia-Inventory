@@ -92,6 +92,26 @@ export async function getClientById(id: string): Promise<ClientRow | null> {
   return toClientRow(data as unknown as RawClientRow);
 }
 
+export interface CreateClientInput {
+  slug: string;
+  name: string;
+}
+
+/** Creates a new client row with credentials left null and is_active
+ * defaulting to true. Throws the raw Supabase error on failure — callers
+ * (e.g. the create-client action) are responsible for translating a
+ * unique-violation on `slug` (code 23505) into a user-facing message. */
+export async function createClient(input: CreateClientInput): Promise<ClientRow> {
+  const { data, error } = await supabaseAdmin
+    .from("clients")
+    .insert({ slug: input.slug, name: input.name })
+    .select(CLIENT_COLUMNS)
+    .single();
+
+  if (error) throw error;
+  return toClientRow(data as unknown as RawClientRow);
+}
+
 export interface UpdateClientCredentialsInput {
   ghlApiKey?: string | null;
   ghlLocationId?: string | null;
