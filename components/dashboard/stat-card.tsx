@@ -3,7 +3,7 @@
 import { useRef, useState } from "react";
 import Link from "next/link";
 import { motion, useInView } from "framer-motion";
-import { ArrowUpRight, Building2, Users, Layers, Cable } from "lucide-react";
+import { ArrowUpRight, Building2, Users, Layers, Cable, Send } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
 
@@ -32,6 +32,7 @@ const ICON_MAP: Record<string, React.ReactNode> = {
   people: <Users className="w-5 h-5" />,
   niches: <Layers className="w-5 h-5" />,
   sources: <Cable className="w-5 h-5" />,
+  pushes: <Send className="w-5 h-5" />,
 };
 
 function CardInner({

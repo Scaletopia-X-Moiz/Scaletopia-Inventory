@@ -21,11 +21,12 @@ async function DashboardSections({ from, to }: { from?: string; to?: string }) {
     <>
       <section className="space-y-3">
         <p className="text-xs font-semibold text-ink-mute uppercase tracking-widest">Key Metrics</p>
-        <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
+        <div className="grid grid-cols-2 gap-4 xl:grid-cols-5">
           <StatCard label="Companies" value={data.totalCompanies} variant="blue" icon="companies" href="/companies" />
           <StatCard label="People" value={data.totalPeople} variant="plain" icon="people" href="/people" />
           <StatCard label="Niches" value={data.niches.length} variant="plain" icon="niches" />
           <StatCard label="Sources" value={data.sources.length} variant="purple" icon="sources" />
+          <StatCard label="Pushes" value={data.totalPushes} variant="plain" icon="pushes" href="/push-history" />
         </div>
       </section>
 
@@ -66,8 +67,8 @@ function DashboardSkeleton() {
     <>
       <section className="space-y-3">
         <div className="h-3 w-24 rounded bg-rule animate-pulse" />
-        <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
-          {[...Array(4)].map((_, i) => <SkeletonCard key={i} />)}
+        <div className="grid grid-cols-2 gap-4 xl:grid-cols-5">
+          {[...Array(5)].map((_, i) => <SkeletonCard key={i} />)}
         </div>
       </section>
       <section className="space-y-3">
