@@ -2,6 +2,7 @@ import { Star } from "lucide-react";
 import { ThemeToggle } from "@/components/shared/theme-toggle";
 import { MobileNav } from "@/components/dashboard/mobile-nav";
 import { CommandPalette } from "@/components/shared/command-palette";
+import { HelpVideo } from "@/components/shared/help-video";
 
 export function Topbar({ section = "Dashboards", page }: { section?: string; page: string }) {
   return (
@@ -18,6 +19,7 @@ export function Topbar({ section = "Dashboards", page }: { section?: string; pag
 
       <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
         <CommandPalette />
+        <HelpVideo />
         <ThemeToggle />
       </div>
     </header>
