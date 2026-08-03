@@ -56,6 +56,23 @@ List / Date**. Because the same key can hold different shapes across rows, the
 type is **inferred by sampling** the dominant shape and is user-overridable — it
 is a property of the key *most of the time*, not a schema fact.
 
+### Push action
+A user-triggered operation that sends selected People to an external platform and
+records the result in `platform_pushes`. Not all platforms have the same shape:
+GHL has **one** push action ("Push to GHL", create-or-update contact + tag).
+EmailBison has **two independent** push actions — "Add to EmailBison" (create-or-update
+lead in the workspace) and "Add to Campaign" (attach an existing/auto-created lead to a
+chosen campaign) — mirroring Clay's own two separate EmailBison enrichments rather than
+being collapsed into one combined button. "Add to Campaign" silently runs "Add to
+EmailBison" first for anyone missing a `platform_pushes` row, so it never requires the
+other action to have been run manually first.
+
+### Companies-table push
+Triggering any push action (GHL or EmailBison) from the **Companies** table is not a
+distinct code path — it resolves to running the same People-table push action against
+every Person linked to the selected/filtered Company rows. There is no such thing as a
+"company-level lead"; EmailBison and GHL both operate on People.
+
 ### Empty (enrichment value)
 For filtering purposes, an enrichment value counts as empty when it is `null`,
 `""`, whitespace-only, an empty array, the sentinel `"-"`, or an **unrendered

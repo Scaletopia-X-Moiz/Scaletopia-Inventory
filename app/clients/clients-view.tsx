@@ -13,6 +13,48 @@ import {
 
 type TextField = Exclude<ClientCredentialField, "isActive">;
 
+function useSyncedHorizontalScroll() {
+  const topRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLElement>(null);
+  const spacerRef = useRef<HTMLDivElement>(null);
+  const syncingFrom = useRef<"top" | "bottom" | null>(null);
+
+  useEffect(() => {
+    const bottom = bottomRef.current;
+    const spacer = spacerRef.current;
+    if (!bottom || !spacer) return;
+    const syncWidth = () => {
+      spacer.style.width = `${bottom.scrollWidth}px`;
+    };
+    syncWidth();
+    const observer = new ResizeObserver(syncWidth);
+    observer.observe(bottom);
+    return () => observer.disconnect();
+  }, []);
+
+  function onTopScroll() {
+    if (syncingFrom.current === "bottom") {
+      syncingFrom.current = null;
+      return;
+    }
+    if (!topRef.current || !bottomRef.current) return;
+    syncingFrom.current = "top";
+    bottomRef.current.scrollLeft = topRef.current.scrollLeft;
+  }
+
+  function onBottomScroll() {
+    if (syncingFrom.current === "top") {
+      syncingFrom.current = null;
+      return;
+    }
+    if (!topRef.current || !bottomRef.current) return;
+    syncingFrom.current = "bottom";
+    topRef.current.scrollLeft = bottomRef.current.scrollLeft;
+  }
+
+  return { topRef, bottomRef, spacerRef, onTopScroll, onBottomScroll };
+}
+
 const TEXT_FIELDS: { field: TextField; label: string; sensitive?: boolean }[] = [
   { field: "ghlApiKey", label: "GHL API key", sensitive: true },
   { field: "ghlLocationId", label: "GHL location ID" },
@@ -212,6 +254,8 @@ function AddClientDialog() {
 }
 
 export function ClientsView({ clients }: { clients: ClientRow[] }) {
+  const { topRef, bottomRef, spacerRef, onTopScroll, onBottomScroll } = useSyncedHorizontalScroll();
+
   if (clients.length === 0) {
     return (
       <div className="flex flex-col items-start gap-4 rounded-xl border border-rule bg-card p-6 text-sm text-ink-soft">
@@ -226,7 +270,14 @@ export function ClientsView({ clients }: { clients: ClientRow[] }) {
       <div className="flex justify-end">
         <AddClientDialog />
       </div>
-      <section className="overflow-x-auto rounded-xl border border-rule bg-card">
+      <div ref={topRef} onScroll={onTopScroll} className="scroll-x-visible overflow-x-auto overflow-y-hidden">
+        <div ref={spacerRef} className="h-px" />
+      </div>
+      <section
+        ref={bottomRef}
+        onScroll={onBottomScroll}
+        className="scroll-x-visible overflow-x-auto rounded-xl border border-rule bg-card"
+      >
         <table className="w-full min-w-[720px] text-sm">
           <thead>
             <tr className="border-b border-rule text-left text-xs text-ink-mute">

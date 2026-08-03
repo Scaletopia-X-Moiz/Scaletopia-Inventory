@@ -9,6 +9,27 @@
   display: none;
 }
 
+/* Opt-in visible scrollbar for horizontally-scrollable tables, where the
+   hidden-scrollbar default leaves overflowing columns with no scroll affordance. */
+.scroll-x-visible {
+  scrollbar-width: thin;
+  -ms-overflow-style: auto;
+}
+
+.scroll-x-visible::-webkit-scrollbar {
+  display: block;
+  height: 6px;
+}
+
+.scroll-x-visible::-webkit-scrollbar-thumb {
+  background: var(--rule);
+  border-radius: 3px;
+}
+
+.scroll-x-visible::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 :root {
   /* Traditional AMOLED-style dark mode surfaces */
   --paper: #000000;
