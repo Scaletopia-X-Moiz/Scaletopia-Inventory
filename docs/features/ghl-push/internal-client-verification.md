@@ -143,6 +143,85 @@ designed.
 - Left both Push History rows from this session in place, consistent with session 2's precedent —
   they're an audit log of real pushes, not test residue.
 
+## Session 4 — production re-verification of the `customFields` fix, plus edge-case probing
+
+Re-verification session, run entirely against **live production** (`https://inventory.scaletopia.io/`,
+not the dev server), after commit `1dc0db2` (the `customField` → `customFields` rename from session 3)
+was pushed to `main` and Vercel finished deploying it (confirmed via a fresh `X-Vercel-Id` header).
+Goal: treat the session-3 fix with skepticism and actively try to break it, not just re-run the happy
+path.
+
+**Test data**: the two reusable QA fixture people (`claude-qa-test-1@scaletopia.local`,
+`claude-qa-test-2@scaletopia.local`), confirmed at baseline first (`phone_type`/`phone_status` null,
+`custom_data: {}`, `pushed_to_ghl: false`) via a throwaway Supabase script. Created two throwaway GHL
+custom fields on the Internal location for this session: `QA Lead Score S4` and `QA Priority Tier S4`.
+
+### What was exercised
+
+1. **Mixed-batch mapping (missing value on one person)** — set `claude-qa-test-1` to `phone_type:
+   mobile`, `phone_status: verified`, `custom_data.qa_lead_score: "92"`; set `claude-qa-test-2` to
+   `phone_type: toll_free`, `phone_status: verified`, with **no** `qa_lead_score` in `custom_data`
+   (empty object). Added the `qa_lead_score` enrichment column on `/people`, mapped it to `QA Lead
+   Score S4` in the Push-to-GHL mapping step, and pushed both. Result: **Created: 2, Failed: 0**.
+   Confirmed directly against the live GHL API: person 1's contact carries
+   `customFields: [{"id":"Il27BfPloqPfK5ldryo3","value":"92"}]`; person 2's contact carries
+   `customFields: []` — the missing value was correctly omitted rather than sent as `null`/`""` or
+   causing a failure.
+2. **Mapping step's "Skip" default** — reopened the mapping dialog twice (once per push in this
+   session) and confirmed it always defaults back to "Skip" for every enrichment column, never
+   remembering a previous mapping choice.
+3. **Repeat push / tag-append-dedupe path with an active mapping** — pushed the same two people again
+   (mapping still active, mapped to the same field) immediately after the first push. Result:
+   **Created: 0, Tag appended (already in GHL): 2, Failed: 0**. Re-fetched both contacts from GHL
+   afterward and confirmed they were untouched (same contact IDs, same `customFields` values, no
+   duplicate contacts created) — the fix doesn't regress the duplicate-detection/tag-append path, and
+   GHL's dedupe-triggered `400` doesn't get misread as a `customFields`-shape failure.
+4. **Multiple simultaneous field mappings** — added a second custom_data field (`qa_priority_tier`:
+   `"gold"` on person 1, `"silver"` on person 2) and a second GHL custom field (`QA Priority Tier
+   S4`), deleted the two prior test contacts to force fresh creates, added both enrichment columns on
+   `/people`, and mapped both (`qa_lead_score` → `QA Lead Score S4`, `qa_priority_tier` → `QA Priority
+   Tier S4`) in the same push. Result: **Created: 2, Failed: 0**. Confirmed against GHL: person 1's
+   contact carries both `customFields` entries (`gold` and `92`); person 2's contact carries only the
+   `qa_priority_tier` entry (`silver`) — the missing `qa_lead_score` was again correctly omitted, not
+   sent as garbage.
+5. **Client picker / stray-duplicate regression check** — reconfirmed only a single "Internal" row
+   appears in both the `/clients` table and the Push-to-GHL client picker (the session-2 duplicate-row
+   bug stayed fixed).
+
+### Non-bug finding: mapping dropdown only shows custom fields present at page load
+
+When the second GHL custom field (`QA Priority Tier S4`) was created via the API *after* `/people` had
+already loaded, the mapping dropdown only listed the first field (`QA Lead Score S4`) — the second
+field wasn't available to map until the page was reloaded. This is expected behavior for a
+fetch-once-per-page-load list, not a bug: a real user creates the GHL custom field ahead of time (in
+GHL directly), so the field would already exist before they ever load `/people`. Noting it here in
+case it's ever worth an "invalidate/refetch on mapping-dialog-open" improvement, but not filing it as a
+defect.
+
+### Result: original bug confirmed fixed
+
+No `422`s, no `customField`/`customFields` shape errors, across all four scenarios above (plain mapped
+push, missing-value mixed batch, repeat/tag-append push, and dual-field mapping). The session-3 fix is
+holding up on live production under adversarial-ish conditions, not just the original happy path.
+
+### Cleanup performed
+
+- Deleted all 4 GHL test contacts created this session (`dnFBay5RGQAkQUrK5pCl`, `pxRcN8Bm9114D2GxN72e`,
+  `5ZQEXdaFSPhJa0Qp854g`, `tZjeiZiCnWySUEjKDD9a`) — verified via `GET /contacts/{id}`, which for a
+  deleted contact returns HTTP `400` with `{"message":"Contact not found for id:...", "error":"Bad
+  Request"}` (GHL's actual behavior for this endpoint; it doesn't return `404`, consistent with the
+  `400 + meta.contactId` behavior noted for duplicate-detection in session 1).
+- Deleted both throwaway GHL custom fields (`QA Lead Score S4`, `QA Priority Tier S4`) from the
+  Internal location.
+- Reverted both QA fixture people's `phone_type`, `phone_status`, `custom_data`, `pushed_to_ghl`, and
+  `pushed_to_ghl_at` back to baseline (`null`/`{}`/`false`/`null`), confirmed via a direct re-query
+  matching the pre-session snapshot exactly.
+- Removed both temporary enrichment columns (`qa_lead_score`, `qa_priority_tier`) from the `/people`
+  view via the app's own "remove temporary columns?" prompt.
+- Deleted all throwaway `.scratch/ghl-*.mjs` scripts created this session.
+- Left all Push History rows from this session in place, consistent with sessions 2 and 3's
+  precedent.
+
 ## Outstanding (not covered by any session)
 
 - No route-level automated test exists for `app/api/people/push-to-ghl/route.ts` or
