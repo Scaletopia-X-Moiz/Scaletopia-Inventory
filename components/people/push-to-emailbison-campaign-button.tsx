@@ -6,6 +6,7 @@ import { Loader2, Rocket } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
 import { runSse } from "@/components/shared/use-sse-run";
+import { fetchActiveClients } from "@/lib/data/active-clients-client";
 import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
 import type {
   EmailBisonCampaignPushResult,
@@ -97,9 +98,7 @@ export function PushToEmailBisonCampaignButton({
     setSelectedClientId(null);
 
     try {
-      const res = await fetch("/api/clients/active");
-      if (!res.ok) throw new Error("Failed to load clients");
-      const data = (await res.json()) as { clients: ActiveClient[] };
+      const data = await fetchActiveClients<{ clients: ActiveClient[] }>();
       setClients(data.clients);
     } catch (error) {
       setClientsError((error as Error).message || "Failed to load clients.");

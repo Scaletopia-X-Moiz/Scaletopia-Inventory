@@ -6,6 +6,8 @@ import { Loader2, Send } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
 import { runSse } from "@/components/shared/use-sse-run";
+import { fetchActiveClients } from "@/lib/data/active-clients-client";
+import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
 import type { GhlPushResult } from "@/lib/ghl/push-to-ghl";
 import type { GhlCustomField } from "@/lib/ghl/custom-fields";
 import type { GhlFieldMapping } from "@/lib/ghl/types";
@@ -70,6 +72,12 @@ export function PushToGhlButton({
   const busy = status === "pushing";
   const selectedClient = clients?.find((c) => c.id === selectedClientId) ?? null;
 
+  // Registers this dialog (including its persistent "Push complete" summary
+  // step) with the shared dialog stack so other prompts — e.g. the post-push
+  // "remove temporary columns?" prompt — know not to open on top of it
+  // (issue #89).
+  useRegisterDialogOpen(status !== "idle");
+
   function reset() {
     setStatus("idle");
     setStep("picker");
@@ -98,9 +106,7 @@ export function PushToGhlButton({
     setSelectedClientId(null);
 
     try {
-      const res = await fetch("/api/clients/active");
-      if (!res.ok) throw new Error("Failed to load clients");
-      const data = (await res.json()) as { clients: ActiveClient[] };
+      const data = await fetchActiveClients<{ clients: ActiveClient[] }>();
       setClients(data.clients);
     } catch (error) {
       setClientsError((error as Error).message || "Failed to load clients.");

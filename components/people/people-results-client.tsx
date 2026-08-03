@@ -15,6 +15,7 @@ import { PushToEmailBisonButton } from "@/components/people/push-to-emailbison-b
 import { PushToEmailBisonCampaignButton } from "@/components/people/push-to-emailbison-campaign-button";
 import { ReverifyFilteredButton } from "@/components/shared/reverify-filtered-button";
 import { SkeletonTable } from "@/components/shared/skeleton-loaders";
+import { isAnyDialogOpen, subscribeToDialogStack } from "@/components/shared/dialog-stack";
 
 const cache = new Map<string, PersonListResult>();
 
@@ -77,9 +78,29 @@ export function PeopleResultsClient() {
   // (ticket #41, mirroring ticket #40's Companies wiring) — a no-op prompt if
   // none are active.
   const [showRemoveColumnsPrompt, setShowRemoveColumnsPrompt] = useState(false);
+  // A push's `onDone` can fire while that push button's own dialog is still
+  // showing its "Push complete" summary (GHL/EmailBison/EmailBison
+  // Campaign) — opening this prompt right away would stack it on top and
+  // obscure the summary (issue #89). If something else is open when onDone
+  // fires, defer via pendingRemovePromptRef and open once the dialog stack
+  // notifies us it has drained, rather than opening unconditionally.
+  const pendingRemovePromptRef = useRef(false);
   const handlePushDone = useCallback(() => {
-    if (virtualColumns.length > 0) setShowRemoveColumnsPrompt(true);
+    if (virtualColumns.length === 0) return;
+    if (isAnyDialogOpen()) {
+      pendingRemovePromptRef.current = true;
+    } else {
+      setShowRemoveColumnsPrompt(true);
+    }
   }, [virtualColumns.length]);
+  useEffect(() => {
+    return subscribeToDialogStack(() => {
+      if (pendingRemovePromptRef.current && !isAnyDialogOpen()) {
+        pendingRemovePromptRef.current = false;
+        setShowRemoveColumnsPrompt(true);
+      }
+    });
+  }, []);
 
   /** Distinct values already on screen per virtual column — the instant seed
    * the Text `is` value picker shows before the discovery RPC resolves the

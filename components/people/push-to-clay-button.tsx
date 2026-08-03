@@ -5,6 +5,7 @@ import { AlertDialog } from "radix-ui";
 import { Loader2, Send } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
+import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
 
 const WEBHOOK_STORAGE_KEY = "clay-webhook-url-people";
 
@@ -49,6 +50,11 @@ export function PushToClayButton({
 
   const busy = status === "pushing";
   const urlValid = isValidHttps(webhookUrl);
+
+  // Registers this dialog with the shared dialog stack so other prompts —
+  // e.g. the post-push "remove temporary columns?" prompt — know not to open
+  // on top of it (issue #89). Mirrors the AlertDialog.Root's own `open` below.
+  useRegisterDialogOpen(status === "confirming");
 
   function handleClick() {
     if (busy) return;
