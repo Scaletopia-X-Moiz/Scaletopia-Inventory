@@ -2,7 +2,7 @@ import type { GhlContactPayloadShape, GhlFieldMapping, GhlPushRecord } from "@/l
 
 /** Shapes a person record into a GHL contact-creation payload. Tags are
  * supplied by the caller (built via buildGhlTag) rather than derived here,
- * since a single push can attach more than one tag to a contact. `customField`
+ * since a single push can attach more than one tag to a contact. `customFields`
  * is likewise pre-built by the caller (via buildGhlCustomFields) — this
  * function just carries it through, defaulting to empty when the push has no
  * active field mapping (ticket #51). */
@@ -12,7 +12,7 @@ export function buildGhlContactPayload(
     "firstName" | "lastName" | "email" | "phone" | "companyName" | "city" | "country"
   >,
   tags: string[],
-  customField: { id: string; value: string }[] = []
+  customFields: { id: string; value: string }[] = []
 ): GhlContactPayloadShape {
   return {
     firstName: record.firstName,
@@ -23,7 +23,7 @@ export function buildGhlContactPayload(
     city: record.city,
     country: record.country,
     tags,
-    customField,
+    customFields,
   };
 }
 
@@ -38,7 +38,7 @@ function stringifyCustomFieldValue(value: unknown): string {
 
 /** Resolves a mapping step's chosen virtual-column → GHL-field pairs
  * (ticket #51) against one candidate's raw custom_data, producing the
- * `{id, value}` entries GHL expects on `customField`. A mapping is skipped
+ * `{id, value}` entries GHL expects on `customFields`. A mapping is skipped
  * (not sent as an empty string) when its key is missing from custom_data,
  * or its value is null/undefined/empty — matching how the rest of the push
  * treats "no data" as "omit" rather than "send blank". Values are stringified

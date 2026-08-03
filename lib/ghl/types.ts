@@ -31,8 +31,9 @@ export interface GhlContactPayloadShape {
   tags: string[];
   /** GHL custom-field values built from the field-mapping step (ticket #51) —
    * one entry per mapped virtual column that had a non-empty value on this
-   * candidate. Empty when no virtual columns are active or none are mapped. */
-  customField: { id: string; value: string }[];
+   * candidate. Empty when no virtual columns are active or none are mapped.
+   * Sent to GHL on the wire as `customFields` (plural, see lib/ghl/client.ts). */
+  customFields: { id: string; value: string }[];
 }
 
 /** One user-chosen mapping from an active virtual column (People table

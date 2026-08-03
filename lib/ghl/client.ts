@@ -28,8 +28,9 @@ export interface GhlContactPayload {
   country?: string;
   tags?: string[];
   /** Custom-field values, keyed by GHL field id — GHL's contact-create API
-   * accepts `{id, value}` pairs here (ticket #51). */
-  customField?: { id: string; value: string }[];
+   * accepts `{id, value}` pairs on `customFields` (plural; `customField`
+   * 422s with "property customField should not exist") (ticket #51). */
+  customFields?: { id: string; value: string }[];
 }
 
 export interface PushContactResult {

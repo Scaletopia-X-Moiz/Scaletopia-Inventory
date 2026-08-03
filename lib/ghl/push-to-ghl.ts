@@ -95,8 +95,8 @@ async function pushOne(
   fieldMapping: GhlFieldMapping[]
 ): Promise<PushOneResult> {
   const tag = buildGhlTag(client.name, candidate.record);
-  const customField = buildGhlCustomFields(candidate.customData, fieldMapping);
-  const payload = buildGhlContactPayload(candidate.record, [tag], customField);
+  const customFields = buildGhlCustomFields(candidate.customData, fieldMapping);
+  const payload = buildGhlContactPayload(candidate.record, [tag], customFields);
 
   try {
     const { contactId, deduped } = await pushContactToGhl(
@@ -110,7 +110,7 @@ async function pushOne(
         city: payload.city ?? undefined,
         country: payload.country ?? undefined,
         tags: payload.tags,
-        ...(payload.customField.length > 0 ? { customField: payload.customField } : {}),
+        ...(payload.customFields.length > 0 ? { customFields: payload.customFields } : {}),
       },
       { fetchImpl }
     );

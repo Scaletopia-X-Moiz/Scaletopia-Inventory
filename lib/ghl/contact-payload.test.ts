@@ -23,7 +23,7 @@ describe("buildGhlContactPayload", () => {
         city: "Austin",
         country: "US",
         tags: ["Acme - dtc-beauty | 11-50 | US | apollo"],
-        customField: [],
+        customFields: [],
       }
     );
   });
@@ -47,7 +47,7 @@ describe("buildGhlContactPayload", () => {
       city: null,
       country: null,
       tags: [],
-      customField: [],
+      customFields: [],
     });
   });
 
@@ -61,15 +61,15 @@ describe("buildGhlContactPayload", () => {
     expect(result.tags).toEqual([]);
   });
 
-  it("carries a supplied customField array through untouched", () => {
-    const customField = [{ id: "f1", value: "42" }];
-    const result = buildGhlContactPayload(fullRecord, [], customField);
-    expect(result.customField).toEqual(customField);
+  it("carries a supplied customFields array through untouched", () => {
+    const customFields = [{ id: "f1", value: "42" }];
+    const result = buildGhlContactPayload(fullRecord, [], customFields);
+    expect(result.customFields).toEqual(customFields);
   });
 
-  it("defaults customField to an empty array when omitted", () => {
+  it("defaults customFields to an empty array when omitted", () => {
     const result = buildGhlContactPayload(fullRecord, []);
-    expect(result.customField).toEqual([]);
+    expect(result.customFields).toEqual([]);
   });
 });
 

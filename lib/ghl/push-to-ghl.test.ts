@@ -378,7 +378,7 @@ describe("runPeopleGhlPush", () => {
     expect(result.errors).toBe(0);
   });
 
-  it("includes mapped virtual-column values as customField on the push payload", async () => {
+  it("includes mapped virtual-column values as customFields on the push payload", async () => {
     const niche = unique("field-mapping");
     await seedPeople(niche, [
       { slug: "a", phoneType: "mobile", customData: { lead_score: 87, plan: "pro" } },
@@ -401,14 +401,14 @@ describe("runPeopleGhlPush", () => {
       fieldMapping: [{ virtualColumnKey: "lead_score", ghlFieldId: "f1" }],
     });
 
-    const customFields = bodies.map((b) => b.customField);
+    const customFields = bodies.map((b) => b.customFields);
     expect(customFields).toContainEqual([{ id: "f1", value: "87" }]);
-    // The second person's lead_score is null, so its customField is omitted
+    // The second person's lead_score is null, so its customFields is omitted
     // entirely from the wire payload rather than sent as an empty array.
     expect(customFields.some((c) => c === undefined)).toBe(true);
   });
 
-  it("sends no customField at all when no field mapping is supplied", async () => {
+  it("sends no customFields at all when no field mapping is supplied", async () => {
     const niche = unique("no-mapping");
     await seedPeople(niche, [{ slug: "a", phoneType: "mobile", customData: { lead_score: 87 } }]);
     const client = await insertClient();
@@ -425,7 +425,7 @@ describe("runPeopleGhlPush", () => {
 
     await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
-    expect(bodies[0].customField).toBeUndefined();
+    expect(bodies[0].customFields).toBeUndefined();
   });
 
   it("reports progress through resolving, pushing, and done phases", async () => {
