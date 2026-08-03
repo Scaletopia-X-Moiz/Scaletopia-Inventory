@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { Search } from "lucide-react";
 import { FilterChipGroup, type ChipOption } from "@/components/companies/filter-chip-group";
 import { FilterPopover } from "@/components/shared/filter-popover";
@@ -27,6 +27,25 @@ export function FilterSlip({ options }: { options: CompanyFilterOptions }) {
   const [search, setSearch] = useState(searchParams.get("q") ?? "");
   const [empMin, setEmpMin] = useState(searchParams.get("empmin") ?? "");
   const [empMax, setEmpMax] = useState(searchParams.get("empmax") ?? "");
+
+  // Free-text search navigates on every keystroke, which fires an RSC
+  // round-trip per character while typing (issue #91 — a third of the
+  // intermediate per-keystroke requests were observed 503ing, though the
+  // final settled request always succeeds). Debouncing the commit — not the
+  // input's own value, which stays instant — cuts that down to one request
+  // per typing pause regardless of whether those intermediate requests are a
+  // real server issue or a benign cancelled-prefetch artifact.
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+  }, []);
+
+  function commitSearchDebounced(value: string) {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      commitSearch(value);
+    }, 300);
+  }
 
   function getAll(param: string): string[] {
     return searchParams.getAll(param);
@@ -103,6 +122,7 @@ export function FilterSlip({ options }: { options: CompanyFilterOptions }) {
   }
 
   function clearAll() {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
     setSearch("");
     setEmpMin("");
     setEmpMax("");
@@ -135,7 +155,7 @@ export function FilterSlip({ options }: { options: CompanyFilterOptions }) {
             value={search}
             onChange={(e) => {
               setSearch(e.target.value);
-              commitSearch(e.target.value);
+              commitSearchDebounced(e.target.value);
             }}
             placeholder="Search name or domain"
             className="w-full rounded-md border border-rule bg-card py-1.5 pl-8 pr-3 text-sm text-ink outline-none placeholder:text-ink-soft/70 focus:border-stamp"
