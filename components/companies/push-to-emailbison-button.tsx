@@ -608,10 +608,16 @@ export function PushToEmailBisonButton({
                     <li>
                       Failed: <strong className="text-ink">{result.errors}</strong>
                     </li>
-                    {result.failed_people.length > 0 ? (
-                      <li className="mt-1 text-xs text-ink-mute">
-                        Failed: {result.failed_people.slice(0, 5).join(", ")}
-                        {result.failed_people.length > 5 ? "…" : ""}
+                    {result.failed.length > 0 ? (
+                      <li className="mt-1 flex flex-col gap-0.5 text-xs text-ink-mute">
+                        {result.failed.slice(0, 5).map((f, i) => (
+                          <span key={i}>
+                            Failed: {f.name} — {f.reason}
+                          </span>
+                        ))}
+                        {result.failed.length > 5 ? (
+                          <span>…and {result.failed.length - 5} more</span>
+                        ) : null}
                       </li>
                     ) : null}
                     {note ? <li className="mt-2 text-xs text-ink-mute">{note}</li> : null}
