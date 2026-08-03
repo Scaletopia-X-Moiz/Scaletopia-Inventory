@@ -6,6 +6,7 @@ import { Loader2, Rocket } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
 import { runSse } from "@/components/shared/use-sse-run";
+import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
 import type {
   EmailBisonCampaignPushResult,
   EmailBisonCampaignPushProgress,
@@ -61,6 +62,12 @@ export function PushToEmailBisonCampaignButton({
   const busy = status === "pushing";
   const selectedClient = clients?.find((c) => c.id === selectedClientId) ?? null;
   const selectedCampaign = campaigns?.find((c) => c.id === selectedCampaignId) ?? null;
+
+  // Registers this dialog (including its persistent "Push complete" summary
+  // step) with the shared dialog stack so other prompts — e.g. the post-push
+  // "remove temporary columns?" prompt — know not to open on top of it
+  // (issue #89).
+  useRegisterDialogOpen(status !== "idle");
 
   function reset() {
     setStatus("idle");
@@ -199,7 +206,7 @@ export function PushToEmailBisonCampaignButton({
     }
   }
 
-  const label = status === "pushing" && pushLabel ? pushLabel : "Add to Campaign";
+  const label = status === "pushing" && pushLabel ? pushLabel : "Add to EmailBison Campaign";
 
   return (
     <AlertDialog.Root open={status !== "idle"} onOpenChange={(open) => !open && handleCancel()}>
@@ -212,7 +219,7 @@ export function PushToEmailBisonCampaignButton({
             ? "opacity-50 cursor-not-allowed"
             : "text-ink hover:bg-hover active:bg-hover/75 focus-visible:ring-2 focus-visible:ring-stamp/50"
         )}
-        aria-label="Add to Campaign"
+        aria-label="Add to EmailBison Campaign"
       >
         {busy ? <Loader2 size={14} className="animate-spin" /> : <Rocket size={14} />}
         {label}
@@ -421,10 +428,16 @@ export function PushToEmailBisonCampaignButton({
                     <li>
                       Failed: <strong className="text-ink">{result.errors}</strong>
                     </li>
-                    {result.failed_people.length > 0 ? (
-                      <li className="mt-1 text-xs text-ink-mute">
-                        Failed: {result.failed_people.slice(0, 5).join(", ")}
-                        {result.failed_people.length > 5 ? "…" : ""}
+                    {result.failed.length > 0 ? (
+                      <li className="mt-1 flex flex-col gap-0.5 text-xs text-ink-mute">
+                        {result.failed.slice(0, 5).map((f, i) => (
+                          <span key={i}>
+                            Failed: {f.name} — {f.reason}
+                          </span>
+                        ))}
+                        {result.failed.length > 5 ? (
+                          <span>…and {result.failed.length - 5} more</span>
+                        ) : null}
                       </li>
                     ) : null}
                     {note ? <li className="mt-2 text-xs text-ink-mute">{note}</li> : null}

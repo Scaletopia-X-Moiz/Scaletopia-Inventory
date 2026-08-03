@@ -261,6 +261,10 @@ describe("runPeopleAddToEmailBison", () => {
     expect(result.pushed).toBe(1);
     expect(result.errors).toBe(1);
     expect(result.failed_people).toContain("No Email Person");
+    expect(result.failed).toContainEqual({
+      name: "No Email Person",
+      reason: "no email on record — EmailBison upserts leads by email",
+    });
   });
 
   it("does not abort the batch when the bulk upsert call itself fails", async () => {
@@ -280,6 +284,8 @@ describe("runPeopleAddToEmailBison", () => {
     expect(result.total_matched).toBe(1);
     expect(result.pushed).toBe(0);
     expect(result.errors).toBe(1);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0].reason).toBeTruthy();
   });
 
   it("creates missing custom-variable names once per push, not once per person", async () => {
@@ -340,7 +346,7 @@ describe("runPeopleAddToEmailBison", () => {
 
     const result = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
-    expect(result).toEqual({ total_matched: 0, pushed: 0, errors: 0, failed_people: [] });
+    expect(result).toEqual({ total_matched: 0, pushed: 0, errors: 0, failed_people: [], failed: [] });
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
@@ -398,7 +404,7 @@ describe("runCompaniesAddToEmailBison", () => {
 
     const result = await runCompaniesAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
-    expect(result).toEqual({ total_matched: 0, pushed: 0, errors: 0, failed_people: [] });
+    expect(result).toEqual({ total_matched: 0, pushed: 0, errors: 0, failed_people: [], failed: [] });
   });
 });
 
@@ -545,6 +551,8 @@ describe("runPeopleAddToCampaign", () => {
     expect(result.total_matched).toBe(1);
     expect(result.attached).toBe(0);
     expect(result.errors).toBe(1);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0].reason).toBeTruthy();
 
     const { data: person } = await supabaseAdmin
       .from("people")
@@ -569,7 +577,7 @@ describe("runPeopleAddToCampaign", () => {
       fetchImpl: okFetchWithCampaign(attachCalls),
     });
 
-    expect(result).toEqual({ total_matched: 0, attached: 0, errors: 0, failed_people: [] });
+    expect(result).toEqual({ total_matched: 0, attached: 0, errors: 0, failed_people: [], failed: [] });
     expect(attachCalls).toEqual([]);
   });
 });

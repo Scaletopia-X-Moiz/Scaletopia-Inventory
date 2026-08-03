@@ -27,12 +27,24 @@ export const EMAILBISON_CHUNK_SIZE = 200;
 /** Concurrent upsertLeadsBulk calls in flight — mirrors CLAY_CONCURRENCY. */
 export const EMAILBISON_PUSH_CONCURRENCY = 8;
 
+/** One failed record's display name plus the concrete reason it failed —
+ * "no email on record", "not returned by EmailBison lead upsert", the bulk
+ * API's error message, or the platform_pushes write-back error. Lets the UI
+ * render "Failed: {name} — {reason}" instead of just the name (issue #87). */
+export interface EmailBisonPushFailure {
+  name: string;
+  reason: string;
+}
+
 export interface EmailBisonPushResult {
   total_matched: number;
   pushed: number;
   errors: number;
   /** Display names of people whose push failed, one per failed record. */
   failed_people: string[];
+  /** Same failed records as `failed_people`, paired with why each one
+   * failed. */
+  failed: EmailBisonPushFailure[];
 }
 
 export interface EmailBisonPushProgress {
@@ -236,6 +248,7 @@ interface WorkspaceUpsertOutcome {
   pushed: number;
   errors: number;
   failed_people: string[];
+  failed: EmailBisonPushFailure[];
 }
 
 /** Upserts `candidates` as EmailBison leads in EMAILBISON_CHUNK_SIZE-sized
@@ -262,6 +275,7 @@ async function upsertCandidatesToWorkspace(
   let errors = 0;
   let done = 0;
   const failed_people: string[] = [];
+  const failed: EmailBisonPushFailure[] = [];
 
   const chunks = chunk(candidates, EMAILBISON_CHUNK_SIZE);
 
@@ -279,8 +293,11 @@ async function upsertCandidatesToWorkspace(
 
       if (outcome.status === "rejected") {
         errors += chunkCandidates.length;
+        const reason = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
         for (const c of chunkCandidates) {
-          failed_people.push(c.displayName || "unknown");
+          const name = c.displayName || "unknown";
+          failed_people.push(name);
+          failed.push({ name, reason });
         }
         console.error(`EmailBison ${label} push: chunk failed: ${String(outcome.reason)}`);
         continue;
@@ -294,7 +311,9 @@ async function upsertCandidatesToWorkspace(
 
       for (const f of [...outcome.value.failed, ...writeFailed]) {
         errors++;
-        failed_people.push(f.name || "unknown");
+        const name = f.name || "unknown";
+        failed_people.push(name);
+        failed.push({ name, reason: f.error });
         console.error(`EmailBison ${label} push: failed for person ${f.id} (${f.name ?? "unknown"}): ${f.error}`);
       }
     }
@@ -302,7 +321,7 @@ async function upsertCandidatesToWorkspace(
     onChunkGroupDone?.(done, pushed, errors);
   }
 
-  return { leadIdByPersonId, pushed, errors, failed_people };
+  return { leadIdByPersonId, pushed, errors, failed_people, failed };
 }
 
 /** Creates or updates every candidate in the current filtered view as an
@@ -338,14 +357,14 @@ async function runEmailBisonAddToWorkspace<TFilters>(
 
   if (total_matched === 0) {
     onProgress?.({ phase: "done", done: 0, total: 0, pushed: 0, errors: 0 });
-    return { total_matched: 0, pushed: 0, errors: 0, failed_people: [] };
+    return { total_matched: 0, pushed: 0, errors: 0, failed_people: [], failed: [] };
   }
 
   await ensureCustomVariablesExist(credentials, customVariables, fetchImpl);
 
   onProgress?.({ phase: "pushing", done: 0, total: candidates.length, pushed: 0, errors: 0 });
 
-  const { pushed, errors, failed_people } = await upsertCandidatesToWorkspace(
+  const { pushed, errors, failed_people, failed } = await upsertCandidatesToWorkspace(
     candidates,
     entity.label,
     client,
@@ -360,7 +379,7 @@ async function runEmailBisonAddToWorkspace<TFilters>(
 
   onProgress?.({ phase: "done", done: candidates.length, total: candidates.length, pushed, errors });
 
-  return { total_matched, pushed, errors, failed_people };
+  return { total_matched, pushed, errors, failed_people, failed };
 }
 
 /** Add to EmailBison, triggered from the People table. */
@@ -404,6 +423,11 @@ export interface EmailBisonCampaignPushResult {
   /** Display names of people whose add-to-workspace step or campaign attach
    * failed, one per failed record. */
   failed_people: string[];
+  /** Same failed records as `failed_people`, paired with why each one
+   * failed — e.g. "no email on record", an EmailBison API error, or (for a
+   * whole-batch attach failure) the attachLeadsToCampaign error message
+   * shared by every candidate in that failed attach call. */
+  failed: EmailBisonPushFailure[];
 }
 
 export interface EmailBisonCampaignPushProgress {
@@ -466,7 +490,7 @@ async function runEmailBisonAddToCampaign<TFilters>(
 
   if (total_matched === 0) {
     onProgress?.({ phase: "done", done: 0, total: 0, attached: 0, errors: 0 });
-    return { total_matched: 0, attached: 0, errors: 0, failed_people: [] };
+    return { total_matched: 0, attached: 0, errors: 0, failed_people: [], failed: [] };
   }
 
   const { data: existingRows, error: lookupError } = await supabaseAdmin
@@ -491,6 +515,7 @@ async function runEmailBisonAddToCampaign<TFilters>(
 
   let errors = 0;
   const failed_people: string[] = [];
+  const failed: EmailBisonPushFailure[] = [];
 
   if (needsUpsert.length > 0) {
     onProgress?.({ phase: "adding-to-workspace", done: 0, total: needsUpsert.length, attached: 0, errors: 0 });
@@ -512,13 +537,14 @@ async function runEmailBisonAddToCampaign<TFilters>(
     }
     errors += upsertOutcome.errors;
     failed_people.push(...upsertOutcome.failed_people);
+    failed.push(...upsertOutcome.failed);
   }
 
   const attachable = candidates.filter((c) => leadIdByPersonId.has(c.id));
 
   if (attachable.length === 0) {
     onProgress?.({ phase: "done", done: total_matched, total: total_matched, attached: 0, errors });
-    return { total_matched, attached: 0, errors, failed_people };
+    return { total_matched, attached: 0, errors, failed_people, failed };
   }
 
   onProgress?.({ phase: "attaching", done: 0, total: attachable.length, attached: 0, errors });
@@ -554,13 +580,17 @@ async function runEmailBisonAddToCampaign<TFilters>(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     errors += attachable.length;
-    for (const c of attachable) failed_people.push(c.displayName || "unknown");
+    for (const c of attachable) {
+      const name = c.displayName || "unknown";
+      failed_people.push(name);
+      failed.push({ name, reason: message });
+    }
     console.error(`EmailBison ${entity.label} add-to-campaign: attach failed: ${message}`);
   }
 
   onProgress?.({ phase: "done", done: total_matched, total: total_matched, attached, errors });
 
-  return { total_matched, attached, errors, failed_people };
+  return { total_matched, attached, errors, failed_people, failed };
 }
 
 /** Add to Campaign, triggered from the People table. */
