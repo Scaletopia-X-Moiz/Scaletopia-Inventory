@@ -6,6 +6,8 @@ import { Loader2, Send, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
 import { runSse } from "@/components/shared/use-sse-run";
+import { fetchActiveClients } from "@/lib/data/active-clients-client";
+import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
 import type { EmailBisonPushResult, EmailBisonPushProgress } from "@/lib/emailbison/push-to-emailbison";
 import type { EmailBisonCustomVariableEntry } from "@/lib/emailbison/types";
 import type { EmailBisonCustomVariable } from "@/lib/emailbison/client";
@@ -89,6 +91,12 @@ export function PushToEmailBisonButton({
   const busy = status === "pushing";
   const selectedClient = clients?.find((c) => c.id === selectedClientId) ?? null;
 
+  // Registers this dialog (including its persistent "Push complete" summary
+  // step) with the shared dialog stack so other prompts — e.g. the post-push
+  // "remove temporary columns?" prompt — know not to open on top of it
+  // (issue #89).
+  useRegisterDialogOpen(status !== "idle");
+
   function reset() {
     setStatus("idle");
     setStep("picker");
@@ -117,9 +125,7 @@ export function PushToEmailBisonButton({
     setSelectedClientId(null);
 
     try {
-      const res = await fetch("/api/clients/active");
-      if (!res.ok) throw new Error("Failed to load clients");
-      const data = (await res.json()) as { clients: ActiveClient[] };
+      const data = await fetchActiveClients<{ clients: ActiveClient[] }>();
       setClients(data.clients);
     } catch (error) {
       setClientsError((error as Error).message || "Failed to load clients.");
@@ -163,6 +169,14 @@ export function PushToEmailBisonButton({
   function handleConfirmOptions() {
     setStep("confirm");
   }
+
+  // A custom-variable row is invalid if its name is blank, or it's bound to
+  // "Column" but no column has actually been chosen — either would silently
+  // get dropped by customVariablesForPush()'s filter, so gate Continue on it
+  // instead of letting the row vanish without explanation (issue #86).
+  const hasInvalidCustomVariableRow = rows.some(
+    (r) => r.name.trim() === "" || (r.source === "column" && r.columnKey === "")
+  );
 
   function customVariablesForPush(): EmailBisonCustomVariableEntry[] {
     return rows
@@ -404,58 +418,80 @@ export function PushToEmailBisonButton({
 
                   {rows.length > 0 ? (
                     <div className="mt-3 flex flex-col gap-2">
-                      {rows.map((row) => (
-                        <div key={row.id} className="flex items-center gap-2 rounded-md border border-rule p-2">
-                          <input
-                            type="text"
-                            placeholder="Variable name"
-                            value={row.name}
-                            onChange={(e) => updateRow(row.id, { name: e.target.value })}
-                            className="w-28 rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
-                          />
-                          <select
-                            value={row.source}
-                            onChange={(e) =>
-                              updateRow(row.id, { source: e.target.value as "literal" | "column" })
-                            }
-                            className="rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                      {rows.map((row) => {
+                        const nameInvalid = row.name.trim() === "";
+                        const columnInvalid = row.source === "column" && row.columnKey === "";
+                        return (
+                          <div
+                            key={row.id}
+                            className={cn(
+                              "flex items-center gap-2 rounded-md border p-2",
+                              nameInvalid || columnInvalid ? "border-danger/60" : "border-rule"
+                            )}
                           >
-                            <option value="literal">Literal</option>
-                            <option value="column">Column</option>
-                          </select>
-                          {row.source === "literal" ? (
                             <input
                               type="text"
-                              placeholder="Value"
-                              value={row.value}
-                              onChange={(e) => updateRow(row.id, { value: e.target.value })}
-                              className="flex-1 rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                              placeholder="Variable name"
+                              value={row.name}
+                              onChange={(e) => updateRow(row.id, { name: e.target.value })}
+                              className={cn(
+                                "w-28 rounded-md border bg-transparent px-2 py-1 text-xs text-ink",
+                                nameInvalid ? "border-danger/60" : "border-rule"
+                              )}
                             />
-                          ) : (
                             <select
-                              value={row.columnKey}
-                              onChange={(e) => updateRow(row.id, { columnKey: e.target.value })}
-                              className="flex-1 rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                              value={row.source}
+                              onChange={(e) =>
+                                updateRow(row.id, { source: e.target.value as "literal" | "column" })
+                              }
+                              className="rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
                             >
-                              <option value="">Choose a column…</option>
-                              {bindableColumns.map((col) => (
-                                <option key={col.key} value={col.key}>
-                                  {col.label}
-                                </option>
-                              ))}
+                              <option value="literal">Literal</option>
+                              <option value="column">Column</option>
                             </select>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => removeRow(row.id)}
-                            aria-label="Remove variable"
-                            className="text-ink-mute transition-smooth hover:text-danger"
-                          >
-                            <X size={14} />
-                          </button>
-                        </div>
-                      ))}
+                            {row.source === "literal" ? (
+                              <input
+                                type="text"
+                                placeholder="Value"
+                                value={row.value}
+                                onChange={(e) => updateRow(row.id, { value: e.target.value })}
+                                className="flex-1 rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                              />
+                            ) : (
+                              <select
+                                value={row.columnKey}
+                                onChange={(e) => updateRow(row.id, { columnKey: e.target.value })}
+                                className={cn(
+                                  "flex-1 rounded-md border bg-transparent px-2 py-1 text-xs text-ink",
+                                  columnInvalid ? "border-danger/60" : "border-rule"
+                                )}
+                              >
+                                <option value="">Choose a column…</option>
+                                {bindableColumns.map((col) => (
+                                  <option key={col.key} value={col.key}>
+                                    {col.label}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => removeRow(row.id)}
+                              aria-label="Remove variable"
+                              className="text-ink-mute transition-smooth hover:text-danger"
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        );
+                      })}
                     </div>
+                  ) : null}
+                  {hasInvalidCustomVariableRow ? (
+                    <p className="mt-2 text-xs text-danger">
+                      Give every custom variable a name, and choose a column for any row set to
+                      &quot;Column&quot;.
+                    </p>
                   ) : null}
                 </div>
 
@@ -502,7 +538,18 @@ export function PushToEmailBisonButton({
               <button
                 type="button"
                 onClick={handleConfirmOptions}
-                className="rounded-md bg-stamp px-3 py-1.5 text-xs font-medium text-white transition-smooth hover:opacity-90 focus-visible:ring-2 focus-visible:ring-stamp/50"
+                disabled={hasInvalidCustomVariableRow}
+                title={
+                  hasInvalidCustomVariableRow
+                    ? "Fix the incomplete custom variable row(s) before continuing"
+                    : undefined
+                }
+                className={cn(
+                  "rounded-md px-3 py-1.5 text-xs font-medium text-white transition-smooth focus-visible:ring-2 focus-visible:ring-stamp/50",
+                  hasInvalidCustomVariableRow
+                    ? "bg-stamp/40 cursor-not-allowed"
+                    : "bg-stamp hover:opacity-90"
+                )}
               >
                 Continue →
               </button>
