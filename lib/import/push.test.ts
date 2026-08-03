@@ -211,6 +211,58 @@ describe("pushRecords — canonical columns", () => {
     );
     expect(data?.source_tokens).toHaveLength(2);
   });
+
+  // Regression test for ticket #83: the Import wizard's Tag Metadata step
+  // (client + niche) showed correctly in the pre-push "TAGS TO APPLY"
+  // summary but was never written to companies.client/companies.niche on
+  // either insert or update — only the `tags` text[] column got them.
+  it("sets client/niche on insert", async () => {
+    const domain = testDomain("canonical-client-niche-insert");
+
+    await pushRecords(
+      {
+        records: [{ domain, company_name: "Client Niche Insert Co" }],
+        targetTable: "companies",
+        sourceKey: SOURCE_KEY,
+        tags: TAGS,
+      },
+      noopProgress
+    );
+
+    const { data } = await supabaseAdmin
+      .from("companies")
+      .select("client,niche")
+      .eq("domain", domain)
+      .single();
+
+    expect(data?.client).toBe(TAGS[0]);
+    expect(data?.niche).toBe(TAGS[1]);
+  });
+
+  it("updates client/niche on update", async () => {
+    const domain = testDomain("canonical-client-niche-update");
+    const oldTags: [string, string, string] = ["old-client", "old-niche", "2020-01-01"];
+
+    await pushRecords(
+      { records: [{ domain, company_name: "Client Niche Update Co" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: oldTags },
+      noopProgress
+    );
+
+    const newTags: [string, string, string] = ["new-client", "new-niche", "2026-06-01"];
+    await pushRecords(
+      { records: [{ domain, company_name: "Client Niche Update Co" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: newTags },
+      noopProgress
+    );
+
+    const { data } = await supabaseAdmin
+      .from("companies")
+      .select("client,niche")
+      .eq("domain", domain)
+      .single();
+
+    expect(data?.client).toBe("new-client");
+    expect(data?.niche).toBe("new-niche");
+  });
 });
 
 describe("pushRecords — people canonical columns", () => {
@@ -226,7 +278,6 @@ describe("pushRecords — people canonical columns", () => {
           {
             domain: companyDomain,
             company_name: "People Canonical Co",
-            niche: "fintech",
             industry: "Technology; Information and Internet",
             employee_count: 42,
             linkedin_url: testLinkedin("people-canonical-co"),
@@ -238,6 +289,18 @@ describe("pushRecords — people canonical columns", () => {
       },
       noopProgress
     );
+
+    // Ticket #83: companies.niche is now always sourced from a push's own
+    // tags[1] (canonicalColumnsFor sets it unconditionally, mirroring how
+    // company_name/industry/etc. work — there's no such thing as a per-record
+    // niche on insert, only a per-push one from the Tag Metadata step). Set
+    // it directly here, bypassing the push tags entirely, since this test is
+    // specifically about the company's OWN niche column winning over the
+    // person-side tag-parsed fallback, not about which tags produced it.
+    await supabaseAdmin
+      .from("companies")
+      .update({ niche: "fintech" })
+      .eq("domain", companyDomain);
 
     const linkedin = testPersonLinkedin("canonical-insert");
     await pushRecords(
@@ -367,7 +430,7 @@ describe("import_bulk_update_companies — propagates canonical fields to linked
       {
         records: [
           { domain, company_name: "Propagation Co", employee_count: 5 },
-          { domain: otherDomain, company_name: "Propagation Other Co", employee_count: 5, niche: "unrelated-niche" },
+          { domain: otherDomain, company_name: "Propagation Other Co", employee_count: 5 },
         ],
         targetTable: "companies",
         sourceKey: SOURCE_KEY,
@@ -375,6 +438,17 @@ describe("import_bulk_update_companies — propagates canonical fields to linked
       },
       noopProgress
     );
+
+    // Ticket #83: companies.niche is now sourced from this whole push's
+    // TAGS[1] ("test-niche") on insert, same as every other record above —
+    // so a raw per-record `niche` field would just get overwritten by that,
+    // like company_name etc. Set otherDomain's niche directly instead,
+    // mirroring the "enriched-niche" direct write further down, to simulate
+    // however else a company's niche can differ from a given push's tags.
+    await supabaseAdmin
+      .from("companies")
+      .update({ niche: "unrelated-niche" })
+      .eq("domain", otherDomain);
 
     const linkedin = testPersonLinkedin("propagation-linked");
     const otherLinkedin = testPersonLinkedin("propagation-unrelated");
@@ -398,13 +472,17 @@ describe("import_bulk_update_companies — propagates canonical fields to linked
       .single();
     expect(beforeOther?.niche_tokens).toEqual(["unrelated-niche"]);
 
-    // `niche` isn't one of import's updatable company fields (only set at
-    // insert time) — set it directly here to simulate however else a
-    // company's niche gets edited post-import, so the propagation step below
-    // is exercised against a real empty-to-set niche transition.
+    // Set it directly here to simulate however else a company's niche gets
+    // edited post-import (e.g. a manual edit, or a different push whose tags
+    // carry no niche — see NO_NICHE_TAGS below), so the propagation step
+    // below is exercised against a real empty-to-set niche transition.
     await supabaseAdmin.from("companies").update({ niche: "enriched-niche" }).eq("domain", domain);
 
-    // Enrich the company WITHOUT re-importing the linked person.
+    // Enrich the company WITHOUT re-importing the linked person. Uses tags
+    // with an empty niche/client so this push's own COALESCE-based write
+    // (ticket #83) doesn't clobber the "enriched-niche" set directly above —
+    // mirrors a real push whose Tag Metadata step was left blank.
+    const NO_NICHE_TAGS: [string, string, string] = ["", "", "2026-01-01"];
     await pushRecords(
       {
         records: [
@@ -418,7 +496,7 @@ describe("import_bulk_update_companies — propagates canonical fields to linked
         ],
         targetTable: "companies",
         sourceKey: SOURCE_KEY,
-        tags: TAGS,
+        tags: NO_NICHE_TAGS,
       },
       noopProgress
     );

@@ -119,6 +119,13 @@ $$;
 -- source_tokens to companies — this CREATE OR REPLACE now also maintains
 -- them; see docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md).
 --
+-- TICKET #83 (must be re-run again): companies.client/niche are COALESCEd
+-- from rec->>'client'/rec->>'niche' in both branches below, same semantics as
+-- the other enrichment fields. push.ts's bulkUpdate now always supplies these
+-- (they're this whole push's [client, niche] tags, not a per-record raw
+-- field) — previously this RPC never wrote them, so an update (unlike a fresh
+-- insert) silently left client/niche null/stale on an existing company row.
+--
 -- PEOPLE PROPAGATION (must be re-run again after lib/data/people-canonical-columns.sql
 -- has added industry_id/employee_count/company_linkedin_url/niche_tokens to
 -- people — ticket "Company updates propagate canonical fields to linked
@@ -161,6 +168,8 @@ BEGIN
         email         = COALESCE(rec->>'email',         email),
         description   = COALESCE(rec->>'description',   description),
         revenue       = COALESCE(rec->>'revenue',       revenue),
+        client        = COALESCE(rec->>'client',        client),
+        niche         = COALESCE(rec->>'niche',         niche),
         employee_count = COALESCE(
           CASE WHEN rec->>'employee_count' ~ '^[0-9]+$'
             THEN (rec->>'employee_count')::int ELSE NULL END,
@@ -246,6 +255,8 @@ BEGIN
         email         = COALESCE(rec->>'email',         email),
         description   = COALESCE(rec->>'description',   description),
         revenue       = COALESCE(rec->>'revenue',       revenue),
+        client        = COALESCE(rec->>'client',        client),
+        niche         = COALESCE(rec->>'niche',         niche),
         employee_count = COALESCE(
           CASE WHEN rec->>'employee_count' ~ '^[0-9]+$'
             THEN (rec->>'employee_count')::int ELSE NULL END,

@@ -303,6 +303,14 @@ async function bulkInsert(
         country_id: normalizeCountry(r.country as string | null | undefined)?.id ?? null,
         industry_id: normalizeIndustry(r.industry as string | null | undefined)?.id ?? null,
         source_tokens: normalizeSourceTokens(sourceKey),
+        // Ticket #83: `tags` is [client, niche, date] (app/api/import/autocomplete/
+        // route.ts). Companies has its own dedicated client/niche columns
+        // (unlike people, which only ever gets a derived niche_tokens array) —
+        // this was previously never written on insert, so the Tag Metadata
+        // step's values were silently dropped despite showing correctly in the
+        // pre-push "TAGS TO APPLY" summary.
+        client: tags[0] || null,
+        niche: tags[1] || null,
       };
     }
 
@@ -382,6 +390,15 @@ async function bulkUpdate(
       const cd = r.custom_data;
       if (cd && typeof cd === "object" && !Array.isArray(cd)) enrichment.custom_data = cd;
 
+      // Ticket #83: companies has dedicated client/niche columns that a
+      // fresh insert already sets (see bulkInsert's canonicalColumnsFor) but
+      // an update never wrote — the Tag Metadata step's values would show
+      // correctly in the pre-push summary yet never land on an existing
+      // record. `tags` is this whole push's [client, niche, date] tuple, so
+      // it's the same for every record here, not read off `r`.
+      if (tags[0]) enrichment.client = tags[0];
+      if (tags[1]) enrichment.niche = tags[1];
+
       // Canonical columns (docs/adr/0001-...). country_id/industry_id mirror
       // the COALESCE semantics of the raw string fields above — only included
       // (and re-normalized) when this record actually supplies a new raw
@@ -432,6 +449,10 @@ async function bulkUpdate(
             for (const f of ["employee_count", "founded_year"] as const) {
               if (rec[f] !== null && rec[f] !== undefined && rec[f] !== "") enrichment[f] = rec[f];
             }
+            // Ticket #83: mirror the primary RPC payload above — client/niche
+            // must land on this fallback path too, not just the happy path.
+            if (tags[0]) enrichment.client = tags[0];
+            if (tags[1]) enrichment.niche = tags[1];
             withCanonicalIdentityIds(enrichment);
 
             const query = supabaseAdmin.from("companies").update({
