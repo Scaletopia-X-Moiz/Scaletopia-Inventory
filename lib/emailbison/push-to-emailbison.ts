@@ -457,11 +457,16 @@ export interface RunEmailBisonCampaignPushDeps extends Omit<RunEmailBisonPushDep
  * ensure-custom-variables + chunked-upsert + write-back logic as
  * runEmailBisonAddToWorkspace, just scoped to the subset that needs it.
  * Every resolvable lead id (pre-existing or freshly obtained) is attached to
- * the campaign in a single attachLeadsToCampaign call; on success each
- * attached person's platform_pushes row gets campaign_tag (repurposed to
- * hold the campaign id, matching GHL's tag column) and pushed_at updated. A
- * failed attach call fails every candidate that would have been attached,
- * without touching the workspace-upsert results already written. */
+ * the campaign via a single attachLeadsToCampaign call, which reports
+ * per-lead outcomes (issue #106 — EmailBison silently no-ops leads already
+ * active in another campaign, so a bare 2xx for the batch can't be trusted).
+ * Only the candidates whose lead id actually attached get their
+ * platform_pushes row updated with campaign_tag (repurposed to hold the
+ * campaign id, matching GHL's tag column) and pushed_at; the rest are
+ * reported as failed with EmailBison's per-lead reason. An exception from
+ * the attach call itself (or the write-back) fails every candidate that
+ * would have been attached, without touching the workspace-upsert results
+ * already written. */
 async function runEmailBisonAddToCampaign<TFilters>(
   entity: EmailBisonEntity<TFilters>,
   filters: TFilters,
@@ -551,7 +556,7 @@ async function runEmailBisonAddToCampaign<TFilters>(
 
   let attached = 0;
   try {
-    await attachLeadsToCampaign(
+    const attachResult = await attachLeadsToCampaign(
       credentials,
       campaignId,
       attachable.map((c) => leadIdByPersonId.get(c.id)!),
@@ -559,24 +564,42 @@ async function runEmailBisonAddToCampaign<TFilters>(
       { fetchImpl }
     );
 
-    const pushedAt = new Date().toISOString();
-    const { error: updateError } = await supabaseAdmin
-      .from("platform_pushes")
-      .update({
-        campaign_tag: campaignId,
-        pushed_at: pushedAt,
-        pushed_by_user_id: actor.id,
-        pushed_by_email: actor.email,
-      })
-      .eq("client_id", client.id)
-      .eq("platform", PLATFORM)
-      .in(
-        "person_id",
-        attachable.map((c) => c.id)
-      );
-    if (updateError) throw updateError;
+    const attachedLeadIds = new Set(attachResult.attached);
+    const attachedCandidates = attachable.filter((c) => attachedLeadIds.has(leadIdByPersonId.get(c.id)!));
+    const unattachedCandidates = attachable.filter((c) => !attachedLeadIds.has(leadIdByPersonId.get(c.id)!));
 
-    attached = attachable.length;
+    if (attachedCandidates.length > 0) {
+      const pushedAt = new Date().toISOString();
+      const { error: updateError } = await supabaseAdmin
+        .from("platform_pushes")
+        .update({
+          campaign_tag: campaignId,
+          pushed_at: pushedAt,
+          pushed_by_user_id: actor.id,
+          pushed_by_email: actor.email,
+        })
+        .eq("client_id", client.id)
+        .eq("platform", PLATFORM)
+        .in(
+          "person_id",
+          attachedCandidates.map((c) => c.id)
+        );
+      if (updateError) throw updateError;
+    }
+
+    attached = attachedCandidates.length;
+
+    if (unattachedCandidates.length > 0) {
+      const reasonByLeadId = new Map(attachResult.failed.map((f) => [f.leadId, f.reason]));
+      errors += unattachedCandidates.length;
+      for (const c of unattachedCandidates) {
+        const name = c.displayName || "unknown";
+        const reason = reasonByLeadId.get(leadIdByPersonId.get(c.id)!) ?? "not attached by EmailBison";
+        failed_people.push(name);
+        failed.push({ name, reason });
+        console.error(`EmailBison ${entity.label} add-to-campaign: attach failed for person ${c.id} (${name}): ${reason}`);
+      }
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     errors += attachable.length;

@@ -265,30 +265,90 @@ export async function listCampaigns(
   return { campaigns, page, hasMore };
 }
 
+export interface EmailBisonAttachFailure {
+  leadId: string;
+  reason: string;
+}
+
+export interface EmailBisonAttachResult {
+  attached: string[];
+  failed: EmailBisonAttachFailure[];
+}
+
+/** Max concurrent attach-leads calls in flight — mirrors
+ * EMAILBISON_PUSH_CONCURRENCY (lib/emailbison/push-to-emailbison.ts). */
+const ATTACH_CONCURRENCY = 8;
+
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) {
+    chunks.push(arr.slice(i, i + size));
+  }
+  return chunks;
+}
+
 /** Attaches leads to a campaign by their EmailBison lead ids
  * (`POST /api/campaigns/{campaign_id}/leads/attach-leads`) — async on
- * EmailBison's side (up to ~5 minutes to sync), so callers should present
- * this as "queued" rather than immediate membership. `parallel` mirrors
- * Clay's "Allow parallel sending" toggle; wire field name is a best-effort
- * guess pending a live-token check. */
+ * EmailBison's side (up to ~5 minutes to sync), so callers should present a
+ * successful attach as "queued" rather than immediate membership.
+ *
+ * Issue #106: sending the whole batch in one call returns a blanket `2xx`
+ * even when some leads silently no-op (e.g. a lead already active in another
+ * campaign — EmailBison forbids a lead being in two sequences at once). A
+ * single-lead call for one of those returns a real `422` with a clear
+ * message, confirmed live — so this sends one request per lead (bounded to
+ * ATTACH_CONCURRENCY in flight) instead of one request per batch, and
+ * reports which lead ids actually attached vs. failed, rather than trusting
+ * a single status code for the whole set. `parallel` mirrors Clay's "Allow
+ * parallel sending" toggle; wire field name is a best-effort guess pending a
+ * live-token check. */
 export async function attachLeadsToCampaign(
   credentials: EmailBisonCredentials,
   campaignId: string,
   leadIds: string[],
   options: { parallel?: boolean } = {},
   deps: EmailBisonClientDeps = {}
-): Promise<void> {
+): Promise<EmailBisonAttachResult> {
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const { status, json } = await requestWithRetry(
-    fetchImpl,
-    credentials,
-    `/api/campaigns/${campaignId}/leads/attach-leads`,
-    {
-      lead_ids: leadIds,
-      ...(options.parallel !== undefined ? { parallel: options.parallel } : {}),
-    }
-  );
-  assertOk(status, json, "campaign attach");
+  const attached: string[] = [];
+  const failed: EmailBisonAttachFailure[] = [];
+
+  for (const group of chunkArray(leadIds, ATTACH_CONCURRENCY)) {
+    const settled = await Promise.allSettled(
+      group.map((leadId) =>
+        requestWithRetry(fetchImpl, credentials, `/api/campaigns/${campaignId}/leads/attach-leads`, {
+          lead_ids: [leadId],
+          ...(options.parallel !== undefined ? { parallel: options.parallel } : {}),
+        })
+      )
+    );
+
+    settled.forEach((result, i) => {
+      const leadId = group[i];
+      if (result.status === "rejected") {
+        const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        failed.push({ leadId, reason });
+        return;
+      }
+
+      const { status, json } = result.value;
+      if (status < 200 || status >= 300) {
+        failed.push({ leadId, reason: `EmailBison campaign attach failed with status ${status}: ${JSON.stringify(json)}` });
+        return;
+      }
+
+      const data = json && typeof json === "object" ? (json as Record<string, unknown>).data : null;
+      if (data && typeof data === "object" && (data as Record<string, unknown>).success === false) {
+        const message = (data as Record<string, unknown>).message;
+        failed.push({ leadId, reason: typeof message === "string" ? message : "unknown error" });
+        return;
+      }
+
+      attached.push(leadId);
+    });
+  }
+
+  return { attached, failed };
 }
 
 function toCustomVariable(raw: unknown): EmailBisonCustomVariable | null {

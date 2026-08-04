@@ -443,8 +443,10 @@ describe("runPeopleAddToCampaign", () => {
     expect(result.total_matched).toBe(2);
     expect(result.attached).toBe(2);
     expect(result.errors).toBe(0);
-    expect(attachCalls).toHaveLength(1);
-    expect(attachCalls[0].leadIds).toHaveLength(2);
+    expect(attachCalls).toHaveLength(2);
+    for (const call of attachCalls) {
+      expect(call.leadIds).toHaveLength(1);
+    }
 
     const { data: people } = await supabaseAdmin
       .from("people")
@@ -566,6 +568,57 @@ describe("runPeopleAddToCampaign", () => {
       .single();
     expect(pushRow!.platform_contact_id).toBeTruthy();
     expect(pushRow!.campaign_tag).toBeNull();
+  });
+
+  it("reports a per-lead attach failure without failing (or un-attaching) the leads that did attach (issue #106)", async () => {
+    const niche = unique("campaign-partial-attach");
+    await seedPeople(niche, [{ slug: "a" }, { slug: "b" }]);
+    const client = await insertClient();
+    const base = okFetch();
+    let attachCallCount = 0;
+    const fetchImpl = vi.fn().mockImplementation(async (url: unknown, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith(`/api/campaigns/${CAMPAIGN_ID}/leads/attach-leads`)) {
+        attachCallCount++;
+        if (attachCallCount === 1) {
+          return {
+            ok: false,
+            status: 422,
+            json: async () => ({
+              data: { success: false, message: "No leads were added because they are in another sequence" },
+            }),
+          } as unknown as Response;
+        }
+        return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+      }
+      return (base as unknown as (u: unknown, i?: RequestInit) => Promise<Response>)(url, init);
+    }) as unknown as typeof fetch;
+
+    const result = await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, testActor, {
+      fetchImpl,
+    });
+
+    expect(result.total_matched).toBe(2);
+    expect(result.attached).toBe(1);
+    expect(result.errors).toBe(1);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0].reason).toContain("another sequence");
+
+    const { data: people } = await supabaseAdmin
+      .from("people")
+      .select("id")
+      .like("linkedin_url", `%${niche}%`);
+    const personIds = (people ?? []).map((p) => p.id as string);
+    const { data: pushRows } = await supabaseAdmin
+      .from("platform_pushes")
+      .select("platform_contact_id,campaign_tag")
+      .in("person_id", personIds);
+    expect(pushRows).toHaveLength(2);
+    for (const row of pushRows!) {
+      expect(row.platform_contact_id).toBeTruthy();
+    }
+    expect(pushRows!.filter((r) => r.campaign_tag === CAMPAIGN_ID)).toHaveLength(1);
+    expect(pushRows!.filter((r) => r.campaign_tag === null)).toHaveLength(1);
   });
 
   it("returns an all-zero result for an empty filter match", async () => {

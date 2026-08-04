@@ -196,14 +196,20 @@ describe("listCampaigns", () => {
 });
 
 describe("attachLeadsToCampaign", () => {
-  it("posts lead_ids to the attach-leads endpoint", async () => {
+  it("posts one lead_ids call per lead, carrying parallel through to each", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { message: "queued" }));
 
-    await attachLeadsToCampaign(CREDENTIALS, "camp_1", ["1", "2"], { parallel: true }, { fetchImpl });
+    const result = await attachLeadsToCampaign(CREDENTIALS, "camp_1", ["1", "2"], { parallel: true }, { fetchImpl });
 
-    const [url, init] = fetchImpl.mock.calls[0];
-    expect(url).toBe(`${CREDENTIALS.workspaceId}/api/campaigns/camp_1/leads/attach-leads`);
-    expect(JSON.parse(init.body)).toEqual({ lead_ids: ["1", "2"], parallel: true });
+    expect(result).toEqual({ attached: ["1", "2"], failed: [] });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const calls = fetchImpl.mock.calls.map(([url, init]) => [url, JSON.parse(init.body)]);
+    expect(calls).toEqual(
+      expect.arrayContaining([
+        [`${CREDENTIALS.workspaceId}/api/campaigns/camp_1/leads/attach-leads`, { lead_ids: ["1"], parallel: true }],
+        [`${CREDENTIALS.workspaceId}/api/campaigns/camp_1/leads/attach-leads`, { lead_ids: ["2"], parallel: true }],
+      ])
+    );
   });
 
   it("omits parallel from the body when not provided", async () => {
@@ -215,12 +221,39 @@ describe("attachLeadsToCampaign", () => {
     expect(JSON.parse(init.body)).toEqual({ lead_ids: ["1"] });
   });
 
-  it("throws a typed error on failure", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(404, { message: "campaign not found" }));
+  it("reports a per-lead failure without failing the leads that did attach (issue #106)", async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string, init: { body: string }) => {
+      const { lead_ids } = JSON.parse(init.body) as { lead_ids: string[] };
+      if (lead_ids[0] === "2") {
+        return jsonResponse(422, {
+          data: {
+            success: false,
+            message: "No leads were added because they are either in other sequences, have previously bounced, or unsubscribed",
+          },
+        });
+      }
+      return jsonResponse(200, { message: "queued" });
+    });
 
-    await expect(
-      attachLeadsToCampaign(CREDENTIALS, "missing", ["1"], {}, { fetchImpl })
-    ).rejects.toThrow(EmailBisonApiError);
+    const result = await attachLeadsToCampaign(CREDENTIALS, "camp_1", ["1", "2"], {}, { fetchImpl });
+
+    expect(result.attached).toEqual(["1"]);
+    expect(result.failed).toEqual([
+      {
+        leadId: "2",
+        reason: expect.stringContaining("422"),
+      },
+    ]);
+  });
+
+  it("treats a 2xx with a { data: { success: false } } body as a per-lead failure", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { data: { success: false, message: "already in another sequence" } }));
+
+    const result = await attachLeadsToCampaign(CREDENTIALS, "camp_1", ["1"], {}, { fetchImpl });
+
+    expect(result).toEqual({ attached: [], failed: [{ leadId: "1", reason: "already in another sequence" }] });
   });
 });
 
