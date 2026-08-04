@@ -3,8 +3,6 @@
 import { Dialog } from "radix-ui";
 import { HelpCircle } from "lucide-react";
 
-const LOOM_EMBED_URL = "https://www.loom.com/embed/6fcf9708990544279419fd3400c3400f";
-
 export function HelpVideo() {
   return (
     <Dialog.Root>
@@ -26,13 +24,8 @@ export function HelpVideo() {
           <Dialog.Description className="sr-only">
             A short video guide to using Scaletopia Inventory
           </Dialog.Description>
-          <div className="relative w-full overflow-hidden rounded-lg" style={{ paddingBottom: "62.5%" }}>
-            <iframe
-              src={LOOM_EMBED_URL}
-              title="Platform walkthrough"
-              allow="fullscreen"
-              className="absolute inset-0 h-full w-full"
-            />
+          <div className="flex w-full items-center justify-center rounded-lg border border-dashed border-rule bg-hover py-16 text-sm text-ink-soft">
+            Video coming soon — will be added here.
           </div>
         </Dialog.Content>
       </Dialog.Portal>

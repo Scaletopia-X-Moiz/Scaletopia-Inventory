@@ -222,6 +222,96 @@ holding up on live production under adversarial-ish conditions, not just the ori
 - Left all Push History rows from this session in place, consistent with sessions 2 and 3's
   precedent.
 
+## Session 5 — heavy multi-type enrichment, unicode/long-value stress test, and push-history cross-verification
+
+Follow-up UI verification session, run against the dev server (`localhost:3000`), aimed at closing
+the gaps sessions 1–4 left open: correctness of pushed data field-by-field (not just "push
+succeeded"), data-loss checks on a heavily-enriched subject, and a first real look at
+`/push-history`. Added a third reusable QA fixture person (`claude-qa-test-3@scaletopia.local`,
+company "Scaletopia QA Sandbox") to support 3-person batch-push testing; decision (confirmed with
+the user): keep it permanently alongside `claude-qa-test-1`/`-2` rather than deleting it after the
+session.
+
+**Test data**: all 3 QA fixture people set to `phone_type: mobile`, `phone_status: verified`
+(GHL-eligible), each with heavy multi-type `custom_data` exercising all 5 enrichment column types
+(text, number, boolean, list, date) plus deliberate edge cases on person 1 (unicode/emoji text, a
+500+ character long value, and empty-string/`null`/empty-list values that should be omitted from
+the GHL push) and a deliberately-missing key on person 2 (`qa_long_field` absent entirely, not just
+empty). Created 8 matching GHL custom fields on the Internal location for this session.
+
+### What was exercised
+
+1. **Full-mapping push of a 3-person batch with heavy enrichment** — mapped all 8 enrichment
+   columns to their GHL custom fields, confirmed eligibility showed 3/3, and pushed. Result:
+   **Created: 3, Failed: 0**, one new GHL contact per person (`claude-qa-test-1` →
+   `FDWruKYujwnxyK0OOCTY`, `-2` → `rZwfmolKh6T7U6K42853`, `-3` → `11GqjyvDeKj1cjDWFkuG`).
+2. **Field-by-field GHL cross-verification** — fetched all 3 contacts directly via
+   `GET /contacts/{id}` and diffed every field against the seeded data: firstName, lastName, email,
+   phone, companyName, city, country, tag (exact `buildGhlTag` shape), and every `customFields`
+   entry. All correct, including: list values joined with `", "`; boolean/number values stringified
+   correctly; unicode/emoji text (`qa_notes` on person 1) round-tripped byte-for-byte; the 500+ char
+   long value came through intact; and `qa_empty_field`, `qa_null_field`, `qa_empty_list`, and the
+   missing-key `qa_long_field` on person 2 were all correctly **absent** from the `customFields`
+   array rather than present with a blank value. No bugs found.
+3. **Partial-mapping re-push (data-loss check)** — re-pushed with only a subset of the 8 columns
+   mapped. Confirmed the previously-pushed full set of `customFields` on the existing GHL contacts
+   was left untouched (no data loss, no overwrite-with-blank) — cross-checked against `lib/ghl/client.ts`,
+   which confirmed by reading the code that the dedupe/tag-append path never sends a `customFields`
+   update at all, mapped or not. This matches the intentional "unmapped columns are simply not
+   included" design already documented in session 3/4, now confirmed to also apply cleanly on the
+   repeat-push path.
+4. **Repeat full-mapping push (3rd total push) / dedupe-preservation** — pushed the same 3 people
+   again with the full 8-field mapping active. Result: **Created: 0, Tag appended: 3, Failed: 0**;
+   tags were not duplicated and `customFields` on all 3 contacts remained exactly as set by the
+   first push — consistent with session 4's dedupe-path precedent, now confirmed under heavy
+   multi-type enrichment rather than a single field.
+5. **`/push-history` cross-verification** — confirmed the `platform_pushes` table (upsert on
+   `(person_id, client_id, platform)`) held exactly 3 rows for these people/Internal/GHL, and that
+   every row's GHL contact id and `pushed_by` (`claude-qa-test@scaletopia.local`) matched the live
+   GHL contacts exactly. Design note, not a bug: this table is a "latest state" log (one row per
+   person/client/platform, upserted), not an attempt-by-attempt audit trail — worth a ticket if
+   audit completeness (e.g. distinguishing a create from a later tag-append) is ever required; not
+   filed this session.
+6. **Client-picker regression check** — the Session 2 stray-duplicate-client-row bug stayed fixed
+   (only one "Internal" row) across 3 separate client-picker opens this session. A much larger
+   "dozens of stray `__test-emailbison-push_client-N` rows before the real list" observation from
+   earlier in the session did not reproduce on any of those 3 opens — treated as unconfirmed/not
+   reproducible; not filed as a ticket, noted here only for the record.
+
+### Non-bug findings, noted but not filed as tickets
+
+- **UX papercut**: after closing a push-result dialog, the "remove temporary columns?" prompt
+  appears immediately and can steal a click meant for re-clicking "Push to GHL" (e.g. to push
+  again right after reviewing a result). Low-priority; worth a ticket if it comes up again, not
+  filed this session.
+- **`/push-history` is a latest-state log, not an audit trail** (see item 5 above) — same
+  disposition, worth a ticket only if audit completeness becomes a real requirement.
+
+### Result
+
+No bugs found this session — the `customFields`-shape fix from session 3 continues to hold under
+heavy multi-type, unicode, long-value, and missing-key conditions, across create, partial-mapping,
+and dedupe/tag-append paths, with `/push-history` matching live GHL state exactly.
+
+### Cleanup performed
+
+- Deleted the 3 GHL test contacts created this session (`FDWruKYujwnxyK0OOCTY`,
+  `rZwfmolKh6T7U6K42853`, `11GqjyvDeKj1cjDWFkuG`) via `DELETE /contacts/{id}` — verified via a
+  follow-up `GET /contacts/{id}` on each, which returned `400 Contact not found`, matching the
+  established GHL delete-verification behavior from session 4.
+- Deleted all 8 GHL custom fields created this session from the Internal location via
+  `DELETE /locations/{locationId}/customFields/{id}` — verified via a follow-up
+  `GET /locations/{locationId}/customFields` showing none remaining.
+- Reverted `claude-qa-test-1` and `claude-qa-test-2` to baseline (`phone_type`, `phone_status`,
+  `custom_data`, `pushed_to_ghl`, `pushed_to_ghl_at` all back to `null`/`{}`/`false`/`null`).
+- Per the user's decision to keep `claude-qa-test-3` as a permanent 3rd fixture, reverted it to the
+  same bare-identity shape as `-1`/`-2` (including clearing the seeded `city: "Los Angeles"` value)
+  rather than deleting the row.
+- Removed all 8 enrichment columns from the `/people` view via the app's own "×" on each column
+  chip (not just a URL change) — confirmed the empty state survives a full page reload.
+- Deleted all throwaway `.scratch/ghl-session5-*.mjs` scripts used for seeding, field creation, and
+  the cleanup itself.
+
 ## Outstanding (not covered by any session)
 
 - No route-level automated test exists for `app/api/people/push-to-ghl/route.ts` or

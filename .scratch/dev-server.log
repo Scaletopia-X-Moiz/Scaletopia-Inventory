@@ -1,0 +1,84 @@
+
+> scaletopia-inventory@0.1.0 dev
+> next dev
+
+▲ Next.js 16.2.9 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://192.168.18.177:3000
+- Environments: .env.local
+✓ Ready in 412ms
+- Experiments (use with caution):
+  · serverActions
+
+Error [AuthApiError]: Invalid Refresh Token: Refresh Token Not Found
+    at ignore-listed frames {
+  __isAuthError: true,
+  status: 400,
+  code: 'refresh_token_not_found'
+}
+Error [AuthApiError]: Invalid Refresh Token: Refresh Token Not Found
+    at ignore-listed frames {
+  __isAuthError: true,
+  status: 400,
+  code: 'refresh_token_not_found'
+}
+ GET /login 200 in 1037ms (next.js: 128ms, proxy.ts: 618ms, application-code: 291ms)
+ GET /login 200 in 64ms (next.js: 4ms, proxy.ts: 2ms, application-code: 58ms)
+ GET /api/warm 204 in 1281ms (next.js: 83ms, proxy.ts: 3ms, application-code: 1195ms)
+ GET / 200 in 629ms (next.js: 26ms, proxy.ts: 263ms, application-code: 340ms)
+ POST /login 303 in 1411ms (next.js: 5ms, proxy.ts: 4ms, application-code: 1402ms)
+  └─ ƒ login(undefined, {}) in 757ms app/login/actions.ts
+ GET /people 200 in 533ms (next.js: 26ms, proxy.ts: 5ms, application-code: 502ms)
+ GET /api/people/results? 200 in 412ms (next.js: 26ms, proxy.ts: 8ms, application-code: 378ms)
+ GET /api/people/filter-options? 200 in 519ms (next.js: 54ms, proxy.ts: 9ms, application-code: 456ms)
+ GET /people?q=claude-qa-test 200 in 30ms (next.js: 4ms, proxy.ts: 5ms, application-code: 21ms)
+ GET /api/people/filter-options?q=claude-qa-test 200 in 385ms (next.js: 5ms, proxy.ts: 5ms, application-code: 375ms)
+ GET /api/people/results?q=claude-qa-test 200 in 461ms (next.js: 2ms, proxy.ts: 13ms, application-code: 445ms)
+ GET /api/clients/active 200 in 1383ms (next.js: 43ms, proxy.ts: 4ms, application-code: 1336ms)
+ GET /api/clients/a8dfe6bc-dd09-4146-b628-fc0eacce34f3/emailbison-campaigns 200 in 1734ms (next.js: 609ms, proxy.ts: 4ms, application-code: 1121ms)
+ GET /api/clients/a8dfe6bc-dd09-4146-b628-fc0eacce34f3/emailbison-sender-emails 200 in 3.7s (next.js: 610ms, proxy.ts: 4ms, application-code: 3.1s)
+ POST /api/clients/a8dfe6bc-dd09-4146-b628-fc0eacce34f3/emailbison-campaigns 200 in 2.0s (next.js: 9ms, proxy.ts: 5ms, application-code: 2.0s)
+ GET / 200 in 1074ms (next.js: 4ms, proxy.ts: 3ms, application-code: 1067ms)
+ GET /people?q=claude-qa-test 200 in 375ms (next.js: 4ms, proxy.ts: 3ms, application-code: 368ms)
+ GET /api/people/filter-options?q=claude-qa-test 200 in 355ms (next.js: 3ms, proxy.ts: 5ms, application-code: 348ms)
+ GET /api/people/results?q=claude-qa-test 200 in 404ms (next.js: 7ms, proxy.ts: 5ms, application-code: 392ms)
+ GET /api/clients/active 200 in 666ms (next.js: 3ms, proxy.ts: 4ms, application-code: 659ms)
+ GET /api/clients/a8dfe6bc-dd09-4146-b628-fc0eacce34f3/emailbison-campaigns 200 in 629ms (next.js: 8ms, proxy.ts: 3ms, application-code: 618ms)
+ POST /api/emailbison/push?q=claude-qa-test 200 in 3.3s (next.js: 156ms, proxy.ts: 3ms, application-code: 3.2s)
+ GET /companies 200 in 754ms (next.js: 24ms, proxy.ts: 298ms, application-code: 432ms)
+ GET /api/companies/filter-options? 200 in 857ms (next.js: 41ms, proxy.ts: 5ms, application-code: 811ms)
+ GET /api/companies/results? 200 in 1099ms (next.js: 19ms, proxy.ts: 5ms, application-code: 1074ms)
+ GET /companies?q=Scaletopia+QA+Sandbox 200 in 27ms (next.js: 4ms, proxy.ts: 4ms, application-code: 18ms)
+ GET /api/companies/filter-options?q=Scaletopia+QA+Sandbox 200 in 746ms (next.js: 2ms, proxy.ts: 4ms, application-code: 741ms)
+ GET /api/companies/results?q=Scaletopia+QA+Sandbox 200 in 949ms (next.js: 2ms, proxy.ts: 4ms, application-code: 943ms)
+ GET /companies?q=Claude+QA 200 in 23ms (next.js: 4ms, proxy.ts: 4ms, application-code: 15ms)
+ GET /api/companies/filter-options?q=Claude+QA 200 in 783ms (next.js: 3ms, proxy.ts: 4ms, application-code: 776ms)
+ GET /api/companies/results?q=Claude+QA 200 in 1271ms (next.js: 8ms, proxy.ts: 4ms, application-code: 1259ms)
+ GET /companies?q=Sandbox 200 in 23ms (next.js: 3ms, proxy.ts: 3ms, application-code: 16ms)
+ GET /api/companies/filter-options?q=Sandbox 200 in 677ms (next.js: 3ms, proxy.ts: 5ms, application-code: 670ms)
+ GET /api/companies/results?q=Sandbox 200 in 1202ms (next.js: 8ms, proxy.ts: 4ms, application-code: 1189ms)
+ GET /people?q=claude-qa-test 200 in 703ms (next.js: 4ms, proxy.ts: 3ms, application-code: 697ms)
+ GET /api/people/results?q=claude-qa-test 200 in 374ms (next.js: 8ms, proxy.ts: 4ms, application-code: 362ms)
+ GET /api/people/filter-options?q=claude-qa-test 200 in 378ms (next.js: 3ms, proxy.ts: 4ms, application-code: 371ms)
+ GET /companies?q=Claude+QA 200 in 416ms (next.js: 4ms, proxy.ts: 2ms, application-code: 410ms)
+ GET /api/companies/filter-options?q=Claude+QA 200 in 719ms (next.js: 3ms, proxy.ts: 7ms, application-code: 710ms)
+ GET /api/companies/results?q=Claude+QA 200 in 1184ms (next.js: 8ms, proxy.ts: 6ms, application-code: 1170ms)
+ GET /api/clients/active 200 in 731ms (next.js: 3ms, proxy.ts: 3ms, application-code: 726ms)
+ GET /api/clients/a8dfe6bc-dd09-4146-b628-fc0eacce34f3/emailbison-campaigns 200 in 603ms (next.js: 7ms, proxy.ts: 4ms, application-code: 592ms)
+ GET /api/clients/a8dfe6bc-dd09-4146-b628-fc0eacce34f3/emailbison-sender-emails 200 in 1105ms (next.js: 8ms, proxy.ts: 3ms, application-code: 1094ms)
+ POST /api/clients/a8dfe6bc-dd09-4146-b628-fc0eacce34f3/emailbison-campaigns 200 in 2.1s (next.js: 7ms, proxy.ts: 3ms, application-code: 2.1s)
+ GET /people?q=claude-qa-test 200 in 790ms (next.js: 74ms, proxy.ts: 499ms, application-code: 216ms)
+ GET /companies?q=Claude+QA 200 in 796ms (next.js: 11ms, proxy.ts: 626ms, application-code: 158ms)
+ GET /people?q=claude-qa-test 200 in 173ms (next.js: 10ms, proxy.ts: 33ms, application-code: 130ms)
+ GET /companies?q=Claude+QA 200 in 172ms (next.js: 8ms, proxy.ts: 35ms, application-code: 130ms)
+ GET /people?q=claude-qa-test 200 in 194ms (next.js: 32ms, proxy.ts: 28ms, application-code: 133ms)
+ GET /people?q=claude-qa-test 200 in 196ms (next.js: 10ms, proxy.ts: 30ms, application-code: 156ms)
+ GET /people?q=claude-qa-test 200 in 104ms (next.js: 5ms, proxy.ts: 5ms, application-code: 94ms)
+ GET /people?q=claude-qa-test 200 in 99ms (next.js: 6ms, proxy.ts: 37ms, application-code: 56ms)
+ GET /companies?q=Claude+QA 200 in 70ms (next.js: 28ms, proxy.ts: 10ms, application-code: 32ms)
+ GET /people?q=claude-qa-test 200 in 304ms (next.js: 75ms, proxy.ts: 101ms, application-code: 127ms)
+ GET /companies?q=Claude+QA 200 in 304ms (next.js: 12ms, proxy.ts: 228ms, application-code: 65ms)
+ GET /people?q=claude-qa-test 200 in 78ms (next.js: 40ms, proxy.ts: 5ms, application-code: 33ms)
+ GET /people?q=claude-qa-test 200 in 329ms (next.js: 68ms, proxy.ts: 123ms, application-code: 138ms)
+ GET /companies?q=Claude+QA 200 in 330ms (next.js: 12ms, proxy.ts: 246ms, application-code: 72ms)
+ GET /people?q=claude-qa-test 200 in 86ms (next.js: 20ms, proxy.ts: 38ms, application-code: 29ms)
