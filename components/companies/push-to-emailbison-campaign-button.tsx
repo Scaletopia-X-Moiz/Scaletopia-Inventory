@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { AlertDialog } from "radix-ui";
-import { Loader2, Rocket } from "lucide-react";
+import { Loader2, Rocket, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
 import { runSse } from "@/components/shared/use-sse-run";
@@ -12,7 +12,100 @@ import type {
   EmailBisonCampaignPushResult,
   EmailBisonCampaignPushProgress,
 } from "@/lib/emailbison/push-to-emailbison";
-import type { EmailBisonCampaign } from "@/lib/emailbison/client";
+import type { EmailBisonCampaign, EmailBisonSenderEmail } from "@/lib/emailbison/client";
+
+type DayKey = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
+
+const WEEKDAYS: { key: DayKey; label: string }[] = [
+  { key: "monday", label: "Mon" },
+  { key: "tuesday", label: "Tue" },
+  { key: "wednesday", label: "Wed" },
+  { key: "thursday", label: "Thu" },
+  { key: "friday", label: "Fri" },
+  { key: "saturday", label: "Sat" },
+  { key: "sunday", label: "Sun" },
+];
+
+const DEFAULT_DAYS: Record<DayKey, boolean> = {
+  monday: true,
+  tuesday: true,
+  wednesday: true,
+  thursday: true,
+  friday: true,
+  saturday: false,
+  sunday: false,
+};
+
+/** A short, curated list of common IANA timezones for the create-campaign
+ * form's schedule timezone <select> — EmailBison accepts any IANA zone name,
+ * this just keeps the picker to a reasonable default set rather than every
+ * zone Intl knows about. */
+const TIMEZONE_OPTIONS = [
+  "UTC",
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Los_Angeles",
+  "America/Sao_Paulo",
+  "Europe/London",
+  "Europe/Berlin",
+  "Europe/Madrid",
+  "Africa/Lagos",
+  "Africa/Cairo",
+  "Asia/Dubai",
+  "Asia/Karachi",
+  "Asia/Kolkata",
+  "Asia/Dhaka",
+  "Asia/Bangkok",
+  "Asia/Singapore",
+  "Asia/Shanghai",
+  "Asia/Tokyo",
+  "Australia/Sydney",
+  "Pacific/Auckland",
+];
+
+/** One sequence-step row in the create-campaign form (issue #94/#100),
+ * camelCase mirror of lib/emailbison/client.ts's EmailBisonSequenceStepInput
+ * plus a local `key` for React list identity independent of array index.
+ * `waitInDays` stays a string while the field is being edited so an empty
+ * input doesn't get coerced to 0 mid-typing. */
+interface SequenceStepForm {
+  key: string;
+  emailSubject: string;
+  emailBody: string;
+  waitInDays: string;
+}
+
+function newSequenceStep(): SequenceStepForm {
+  return {
+    key: Math.random().toString(36).slice(2),
+    emailSubject: "",
+    emailBody: "",
+    waitInDays: "0",
+  };
+}
+
+interface CreateCampaignForm {
+  name: string;
+  senderEmailIds: string[];
+  days: Record<DayKey, boolean>;
+  startTime: string;
+  endTime: string;
+  timezone: string;
+  steps: SequenceStepForm[];
+}
+
+function newCreateCampaignForm(): CreateCampaignForm {
+  return {
+    name: "",
+    senderEmailIds: [],
+    days: { ...DEFAULT_DAYS },
+    startTime: "09:00",
+    endTime: "17:00",
+    timezone: "UTC",
+    steps: [newSequenceStep()],
+  };
+}
 
 interface ActiveClient {
   id: string;
@@ -33,7 +126,13 @@ type Step = "picker" | "campaign" | "confirm" | "summary";
  * to every Person linked to the currently filtered Companies before enrolling
  * into a live-fetched campaign, mirroring #62's relationship to #61 (ADR
  * 0003, issue #64). Anyone missing a prior EmailBison lead id is silently
- * upserted first (runEmailBisonAddToCampaign, ticket #59). */
+ * upserted first (runEmailBisonAddToCampaign, ticket #59).
+ *
+ * The `campaign` step also hosts a "+ Create a campaign" inline form (issue
+ * #94/#100) that creates a brand-new EmailBison campaign without leaving
+ * this dialog — on success the new campaign is prepended to `campaigns` and
+ * the user lands back on the normal select, same as picking an existing
+ * campaign. It does not auto-continue the push (out of scope per #94). */
 export function PushToEmailBisonCampaignButton({
   paramsStr,
   total,
@@ -58,12 +157,27 @@ export function PushToEmailBisonCampaignButton({
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [parallel, setParallel] = useState(false);
 
+  // "+ Create a campaign" inline form state (issue #94/#100) — swapped in
+  // alongside the existing campaign <select> in the `campaign` step.
+  const [creatingCampaign, setCreatingCampaign] = useState(false);
+  const [createForm, setCreateForm] = useState<CreateCampaignForm>(newCreateCampaignForm);
+  const [senderEmails, setSenderEmails] = useState<EmailBisonSenderEmail[] | null>(null);
+  const [senderEmailsError, setSenderEmailsError] = useState<string | null>(null);
+  const [createCampaignError, setCreateCampaignError] = useState<string | null>(null);
+  const [createCampaignBusy, setCreateCampaignBusy] = useState<"draft" | "launch" | null>(null);
+
   const [result, setResult] = useState<EmailBisonCampaignPushResult | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
   const busy = status === "pushing";
   const selectedClient = clients?.find((c) => c.id === selectedClientId) ?? null;
   const selectedCampaign = campaigns?.find((c) => c.id === selectedCampaignId) ?? null;
+
+  const createFormValid =
+    createForm.name.trim().length > 0 &&
+    createForm.senderEmailIds.length > 0 &&
+    createForm.steps.length > 0 &&
+    createForm.steps.every((s) => s.emailSubject.trim().length > 0 && s.emailBody.trim().length > 0);
 
   // Registers this dialog (including its persistent "Push complete" summary
   // step) with the shared dialog stack so other prompts — e.g. the post-push
@@ -84,6 +198,12 @@ export function PushToEmailBisonCampaignButton({
     setParallel(false);
     setResult(null);
     setNote(null);
+    setCreatingCampaign(false);
+    setCreateForm(newCreateCampaignForm());
+    setSenderEmails(null);
+    setSenderEmailsError(null);
+    setCreateCampaignError(null);
+    setCreateCampaignBusy(null);
   }
 
   async function handleClick() {
@@ -132,6 +252,108 @@ export function PushToEmailBisonCampaignButton({
   function handleConfirmCampaign() {
     if (!selectedCampaign) return;
     setStep("confirm");
+  }
+
+  async function handleShowCreateCampaign() {
+    if (!selectedClient) return;
+    setCreatingCampaign(true);
+    setCreateForm(newCreateCampaignForm());
+    setCreateCampaignError(null);
+    setSenderEmails(null);
+    setSenderEmailsError(null);
+
+    try {
+      const res = await fetch(`/api/clients/${selectedClient.id}/emailbison-sender-emails`);
+      if (!res.ok) throw new Error("Failed to load sender emails");
+      const data = (await res.json()) as { senderEmails: EmailBisonSenderEmail[] };
+      setSenderEmails(data.senderEmails);
+    } catch (error) {
+      setSenderEmailsError((error as Error).message || "Failed to load sender emails.");
+    }
+  }
+
+  function handleCancelCreateCampaign() {
+    setCreatingCampaign(false);
+    setCreateForm(newCreateCampaignForm());
+    setCreateCampaignError(null);
+    setSenderEmails(null);
+    setSenderEmailsError(null);
+  }
+
+  function toggleSenderEmail(id: string) {
+    setCreateForm((form) => ({
+      ...form,
+      senderEmailIds: form.senderEmailIds.includes(id)
+        ? form.senderEmailIds.filter((existing) => existing !== id)
+        : [...form.senderEmailIds, id],
+    }));
+  }
+
+  function toggleDay(day: DayKey) {
+    setCreateForm((form) => ({ ...form, days: { ...form.days, [day]: !form.days[day] } }));
+  }
+
+  function updateStep(key: string, patch: Partial<SequenceStepForm>) {
+    setCreateForm((form) => ({
+      ...form,
+      steps: form.steps.map((step) => (step.key === key ? { ...step, ...patch } : step)),
+    }));
+  }
+
+  function addStep() {
+    setCreateForm((form) => ({ ...form, steps: [...form.steps, newSequenceStep()] }));
+  }
+
+  function removeStep(key: string) {
+    setCreateForm((form) => ({
+      ...form,
+      steps: form.steps.length > 1 ? form.steps.filter((step) => step.key !== key) : form.steps,
+    }));
+  }
+
+  async function handleSubmitCreateCampaign(launch: boolean) {
+    if (!selectedClient || !createFormValid || createCampaignBusy) return;
+    setCreateCampaignError(null);
+    setCreateCampaignBusy(launch ? "launch" : "draft");
+
+    try {
+      const res = await fetch(`/api/clients/${selectedClient.id}/emailbison-campaigns`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: createForm.name,
+          senderEmailIds: createForm.senderEmailIds,
+          schedule: {
+            ...createForm.days,
+            startTime: createForm.startTime,
+            endTime: createForm.endTime,
+            timezone: createForm.timezone,
+          },
+          sequenceSteps: createForm.steps.map((step) => ({
+            emailSubject: step.emailSubject,
+            emailBody: step.emailBody,
+            waitInDays: Number(step.waitInDays) || 0,
+            threadReply: false,
+          })),
+          launch,
+        }),
+      });
+      const data = (await res.json()) as { campaign?: EmailBisonCampaign; error?: string };
+      if (!res.ok || !data.campaign) {
+        throw new Error(data.error || "Failed to create campaign.");
+      }
+
+      const created = data.campaign;
+      setCampaigns((prev) => (prev ? [created, ...prev] : [created]));
+      setCreatingCampaign(false);
+      setCreateForm(newCreateCampaignForm());
+      setSenderEmails(null);
+      setSenderEmailsError(null);
+    } catch (error) {
+      setCreateCampaignError((error as Error).message || "Failed to create campaign.");
+    } finally {
+      setCreateCampaignBusy(null);
+    }
   }
 
   async function handleConfirm() {
@@ -303,84 +525,319 @@ export function PushToEmailBisonCampaignButton({
             </div>
           </AlertDialog.Content>
         ) : step === "campaign" ? (
-          <AlertDialog.Content className="fixed top-[20%] left-1/2 z-50 w-full max-w-lg -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
+          <AlertDialog.Content className="fixed top-[10%] left-1/2 z-50 max-h-[80vh] w-full max-w-lg -translate-x-1/2 overflow-y-auto rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
             <AlertDialog.Title className="text-sm font-semibold text-ink">
-              Campaign &amp; run settings
+              {creatingCampaign ? "Create a campaign" : "Campaign & run settings"}
             </AlertDialog.Title>
             <AlertDialog.Description asChild>
               <div className="mt-4 flex flex-col gap-5 text-sm text-ink-soft">
-                <div>
-                  <p className="text-xs font-medium text-ink">Campaign</p>
-                  <p className="mt-1 text-xs text-ink-mute">
-                    Live-fetched from {selectedClient?.name}&apos;s EmailBison workspace.
-                  </p>
-                  <div className="mt-2">
-                    {campaignsError ? (
-                      <p className="text-xs text-danger">{campaignsError}</p>
-                    ) : campaigns === null ? (
-                      <p className="flex items-center gap-2 text-xs text-ink-soft">
-                        <Loader2 size={12} className="animate-spin" />
-                        Loading campaigns…
-                      </p>
-                    ) : campaigns.length === 0 ? (
-                      <p className="text-xs text-ink-mute">No campaigns in this workspace yet.</p>
-                    ) : (
-                      <select
-                        value={selectedCampaignId ?? ""}
-                        onChange={(e) => setSelectedCampaignId(e.target.value || null)}
-                        className="w-full rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
-                      >
-                        <option value="">Select a campaign…</option>
-                        {campaigns.map((campaign) => (
-                          <option key={campaign.id} value={campaign.id}>
-                            {campaign.name}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                  </div>
-                </div>
+                {creatingCampaign ? (
+                  <>
+                    <div>
+                      <p className="text-xs font-medium text-ink">Name</p>
+                      <input
+                        type="text"
+                        value={createForm.name}
+                        onChange={(e) =>
+                          setCreateForm((form) => ({ ...form, name: e.target.value }))
+                        }
+                        placeholder="Campaign name"
+                        className="mt-1 w-full rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
+                      />
+                    </div>
 
-                <div>
-                  <label className="flex items-center justify-between gap-3">
-                    <span>
-                      <span className="text-xs font-medium text-ink">Allow parallel sending</span>
-                      <span className="mt-0.5 block text-xs text-ink-mute">
-                        Off sends this campaign&apos;s leads sequentially (default); on lets
-                        EmailBison send in parallel.
-                      </span>
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={parallel}
-                      onChange={(e) => setParallel(e.target.checked)}
-                      className="shrink-0"
-                    />
-                  </label>
-                </div>
+                    <div>
+                      <p className="text-xs font-medium text-ink">Sender emails</p>
+                      <p className="mt-1 text-xs text-ink-mute">
+                        Which of {selectedClient?.name}&apos;s connected mailboxes send from this
+                        campaign.
+                      </p>
+                      <div className="mt-2 flex max-h-32 flex-col gap-1 overflow-y-auto rounded-md border border-rule p-2">
+                        {senderEmailsError ? (
+                          <p className="text-xs text-danger">{senderEmailsError}</p>
+                        ) : senderEmails === null ? (
+                          <p className="flex items-center gap-2 text-xs text-ink-soft">
+                            <Loader2 size={12} className="animate-spin" />
+                            Loading sender emails…
+                          </p>
+                        ) : senderEmails.length === 0 ? (
+                          <p className="text-xs text-ink-mute">
+                            No sender emails connected in this workspace.
+                          </p>
+                        ) : (
+                          senderEmails.map((senderEmail) => (
+                            <label
+                              key={senderEmail.id}
+                              className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-xs hover:bg-hover"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={createForm.senderEmailIds.includes(senderEmail.id)}
+                                onChange={() => toggleSenderEmail(senderEmail.id)}
+                              />
+                              <span className="text-ink">{senderEmail.name}</span>
+                              <span className="text-ink-mute">{senderEmail.email}</span>
+                            </label>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    <div>
+                      <p className="text-xs font-medium text-ink">Schedule</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {WEEKDAYS.map((day) => (
+                          <label
+                            key={day.key}
+                            className={cn(
+                              "flex cursor-pointer items-center gap-1 rounded-md border border-rule px-2 py-1 text-xs",
+                              createForm.days[day.key] ? "bg-stamp/10 text-ink" : "text-ink-mute"
+                            )}
+                          >
+                            <input
+                              type="checkbox"
+                              className="sr-only"
+                              checked={createForm.days[day.key]}
+                              onChange={() => toggleDay(day.key)}
+                            />
+                            {day.label}
+                          </label>
+                        ))}
+                      </div>
+                      <div className="mt-2 flex items-center gap-2">
+                        <input
+                          type="time"
+                          value={createForm.startTime}
+                          onChange={(e) =>
+                            setCreateForm((form) => ({ ...form, startTime: e.target.value }))
+                          }
+                          className="rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
+                        />
+                        <span className="text-xs text-ink-mute">to</span>
+                        <input
+                          type="time"
+                          value={createForm.endTime}
+                          onChange={(e) =>
+                            setCreateForm((form) => ({ ...form, endTime: e.target.value }))
+                          }
+                          className="rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
+                        />
+                        <select
+                          value={createForm.timezone}
+                          onChange={(e) =>
+                            setCreateForm((form) => ({ ...form, timezone: e.target.value }))
+                          }
+                          className="flex-1 rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
+                        >
+                          {TIMEZONE_OPTIONS.map((tz) => (
+                            <option key={tz} value={tz}>
+                              {tz}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div>
+                      <p className="text-xs font-medium text-ink">Sequence steps</p>
+                      <div className="mt-2 flex flex-col gap-3">
+                        {createForm.steps.map((step, i) => (
+                          <div key={step.key} className="rounded-md border border-rule p-2">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-medium text-ink">Step {i + 1}</span>
+                              {createForm.steps.length > 1 ? (
+                                <button
+                                  type="button"
+                                  onClick={() => removeStep(step.key)}
+                                  className="text-xs text-ink-mute hover:text-danger"
+                                >
+                                  Remove
+                                </button>
+                              ) : null}
+                            </div>
+                            <input
+                              type="text"
+                              value={step.emailSubject}
+                              onChange={(e) => updateStep(step.key, { emailSubject: e.target.value })}
+                              placeholder="Subject"
+                              className="mt-2 w-full rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
+                            />
+                            <textarea
+                              value={step.emailBody}
+                              onChange={(e) => updateStep(step.key, { emailBody: e.target.value })}
+                              placeholder="Body"
+                              rows={3}
+                              className="mt-2 w-full rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
+                            />
+                            {i > 0 ? (
+                              <label className="mt-2 flex items-center gap-2 text-xs text-ink-mute">
+                                Wait
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={step.waitInDays}
+                                  onChange={(e) =>
+                                    updateStep(step.key, { waitInDays: e.target.value })
+                                  }
+                                  className="w-14 rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                                />
+                                days after the previous step
+                              </label>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={addStep}
+                        className="mt-2 text-xs font-medium text-stamp hover:underline"
+                      >
+                        + Add another step
+                      </button>
+                    </div>
+
+                    {createCampaignError ? (
+                      <p className="text-xs text-danger">{createCampaignError}</p>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    <div>
+                      <p className="text-xs font-medium text-ink">Campaign</p>
+                      <p className="mt-1 text-xs text-ink-mute">
+                        Live-fetched from {selectedClient?.name}&apos;s EmailBison workspace.
+                      </p>
+                      <div className="mt-2 flex flex-col gap-2">
+                        {campaignsError ? (
+                          <p className="text-xs text-danger">{campaignsError}</p>
+                        ) : campaigns === null ? (
+                          <p className="flex items-center gap-2 text-xs text-ink-soft">
+                            <Loader2 size={12} className="animate-spin" />
+                            Loading campaigns…
+                          </p>
+                        ) : (
+                          <>
+                            {campaigns.length === 0 ? (
+                              <p className="text-xs text-ink-mute">
+                                No campaigns in this workspace yet.
+                              </p>
+                            ) : (
+                              <select
+                                value={selectedCampaignId ?? ""}
+                                onChange={(e) => setSelectedCampaignId(e.target.value || null)}
+                                className="w-full rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
+                              >
+                                <option value="">Select a campaign…</option>
+                                {campaigns.map((campaign) => (
+                                  <option key={campaign.id} value={campaign.id}>
+                                    {campaign.name}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                            <button
+                              type="button"
+                              onClick={handleShowCreateCampaign}
+                              className="self-start text-xs font-medium text-stamp hover:underline"
+                            >
+                              + Create a campaign
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="flex items-center justify-between gap-3">
+                        <span>
+                          <span className="text-xs font-medium text-ink">Allow parallel sending</span>
+                          <span className="mt-0.5 block text-xs text-ink-mute">
+                            Off sends this campaign&apos;s leads sequentially (default); on lets
+                            EmailBison send in parallel.
+                          </span>
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={parallel}
+                          onChange={(e) => setParallel(e.target.checked)}
+                          className="shrink-0"
+                        />
+                      </label>
+                    </div>
+                  </>
+                )}
               </div>
             </AlertDialog.Description>
 
             <div className="mt-5 flex justify-end gap-2">
-              <AlertDialog.Cancel asChild>
-                <button
-                  type="button"
-                  className="rounded-md border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-smooth hover:bg-hover focus-visible:ring-2 focus-visible:ring-stamp/50"
-                >
-                  Cancel
-                </button>
-              </AlertDialog.Cancel>
-              <button
-                type="button"
-                onClick={handleConfirmCampaign}
-                disabled={!selectedCampaign}
-                className={cn(
-                  "rounded-md px-3 py-1.5 text-xs font-medium text-white transition-smooth focus-visible:ring-2 focus-visible:ring-stamp/50",
-                  selectedCampaign ? "bg-stamp hover:opacity-90" : "bg-stamp/40 cursor-not-allowed"
-                )}
-              >
-                Continue →
-              </button>
+              {creatingCampaign ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleCancelCreateCampaign}
+                    disabled={!!createCampaignBusy}
+                    className="rounded-md border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-smooth hover:bg-hover focus-visible:ring-2 focus-visible:ring-stamp/50 disabled:opacity-50"
+                  >
+                    ← Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSubmitCreateCampaign(false)}
+                    disabled={!createFormValid || !!createCampaignBusy}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-md border border-rule px-3 py-1.5 text-xs font-medium transition-smooth focus-visible:ring-2 focus-visible:ring-stamp/50",
+                      createFormValid && !createCampaignBusy
+                        ? "text-ink hover:bg-hover"
+                        : "cursor-not-allowed text-ink-mute opacity-50"
+                    )}
+                  >
+                    {createCampaignBusy === "draft" ? (
+                      <Loader2 size={12} className="animate-spin" />
+                    ) : null}
+                    Save as Draft
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSubmitCreateCampaign(true)}
+                    disabled={!createFormValid || !!createCampaignBusy}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-white transition-smooth focus-visible:ring-2 focus-visible:ring-amber-500/50",
+                      createFormValid && !createCampaignBusy
+                        ? "bg-amber-600 hover:opacity-90"
+                        : "cursor-not-allowed bg-amber-600/40"
+                    )}
+                  >
+                    {createCampaignBusy === "launch" ? (
+                      <Loader2 size={12} className="animate-spin" />
+                    ) : (
+                      <TriangleAlert size={12} />
+                    )}
+                    Launch Campaign
+                  </button>
+                </>
+              ) : (
+                <>
+                  <AlertDialog.Cancel asChild>
+                    <button
+                      type="button"
+                      className="rounded-md border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-smooth hover:bg-hover focus-visible:ring-2 focus-visible:ring-stamp/50"
+                    >
+                      Cancel
+                    </button>
+                  </AlertDialog.Cancel>
+                  <button
+                    type="button"
+                    onClick={handleConfirmCampaign}
+                    disabled={!selectedCampaign}
+                    className={cn(
+                      "rounded-md px-3 py-1.5 text-xs font-medium text-white transition-smooth focus-visible:ring-2 focus-visible:ring-stamp/50",
+                      selectedCampaign ? "bg-stamp hover:opacity-90" : "bg-stamp/40 cursor-not-allowed"
+                    )}
+                  >
+                    Continue →
+                  </button>
+                </>
+              )}
             </div>
           </AlertDialog.Content>
         ) : step === "confirm" ? (
