@@ -12,6 +12,7 @@ import type { EmailBisonPushResult, EmailBisonPushProgress } from "@/lib/emailbi
 import type { EmailBisonCustomVariableEntry } from "@/lib/emailbison/types";
 import type { EmailBisonCustomVariable } from "@/lib/emailbison/client";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
+import type { EnrichmentField } from "@/lib/data/enrichment-fields";
 
 interface ActiveClient {
   id: string;
@@ -88,6 +89,13 @@ export function PushToEmailBisonButton({
   const [referenceVariables, setReferenceVariables] = useState<EmailBisonCustomVariable[] | null>(null);
   const [referenceError, setReferenceError] = useState<string | null>(null);
 
+  // Custom_data enrichment fields present in the currently filtered/selected
+  // companies, offered as extra bind targets alongside BINDABLE_RECORD_COLUMNS
+  // and virtualColumns — same discovery endpoint the "Add column from
+  // enrichment" picker uses (app/api/companies/enrichment-fields), already
+  // scoped + housekeeping-key-filtered server-side.
+  const [enrichmentFields, setEnrichmentFields] = useState<EnrichmentField[]>([]);
+
   const [result, setResult] = useState<EmailBisonPushResult | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
@@ -111,6 +119,7 @@ export function PushToEmailBisonButton({
     setRows([]);
     setReferenceVariables(null);
     setReferenceError(null);
+    setEnrichmentFields([]);
     setResult(null);
     setNote(null);
   }
@@ -146,6 +155,7 @@ export function PushToEmailBisonButton({
     setStep("options");
     setReferenceVariables(null);
     setReferenceError(null);
+    setEnrichmentFields([]);
 
     try {
       const res = await fetch(`/api/clients/${selectedClient.id}/emailbison-custom-variables`);
@@ -154,6 +164,18 @@ export function PushToEmailBisonButton({
       setReferenceVariables(data.variables);
     } catch (error) {
       setReferenceError((error as Error).message || "Failed to load existing custom variables.");
+    }
+
+    // Best-effort: the column dropdown just falls back to the standard +
+    // active-virtual-column fields if this fails, so a fetch error here
+    // isn't worth its own error banner.
+    try {
+      const res = await fetch(`/api/companies/enrichment-fields?${paramsStr}`);
+      if (!res.ok) throw new Error(res.status.toString());
+      const data = (await res.json()) as { fields: EnrichmentField[] };
+      setEnrichmentFields(data.fields);
+    } catch {
+      setEnrichmentFields([]);
     }
   }
 
@@ -261,10 +283,22 @@ export function PushToEmailBisonButton({
 
   const label = status === "pushing" && pushLabel ? pushLabel : "Add to EmailBison";
 
-  const bindableColumns = [
-    ...BINDABLE_RECORD_COLUMNS,
-    ...virtualColumns.map((c) => ({ key: c.key, label: c.key })),
-  ];
+  // Standard fields, then active virtual columns, then every other
+  // enrichment (custom_data) key discovered on the current view — deduped by
+  // key so a field that's both an active virtual column and in the
+  // discovery sample isn't offered twice.
+  const bindableColumnKeys = new Set(BINDABLE_RECORD_COLUMNS.map((c) => c.key));
+  const bindableColumns = [...BINDABLE_RECORD_COLUMNS];
+  for (const c of virtualColumns) {
+    if (bindableColumnKeys.has(c.key)) continue;
+    bindableColumnKeys.add(c.key);
+    bindableColumns.push({ key: c.key, label: c.key });
+  }
+  for (const f of enrichmentFields) {
+    if (bindableColumnKeys.has(f.key)) continue;
+    bindableColumnKeys.add(f.key);
+    bindableColumns.push({ key: f.key, label: f.key });
+  }
 
   return (
     <AlertDialog.Root open={status !== "idle"} onOpenChange={(open) => !open && handleCancel()}>
