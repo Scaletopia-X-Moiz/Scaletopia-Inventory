@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EmailBisonApiError } from "@/lib/emailbison/client";
-import { clearEmailBisonCampaignsCache, getEmailBisonCampaigns } from "@/lib/emailbison/campaigns";
+import {
+  clearEmailBisonCampaignsCache,
+  getEmailBisonCampaigns,
+  createEmailBisonCampaign,
+  type CreateEmailBisonCampaignInput,
+} from "@/lib/emailbison/campaigns";
 
 const CLIENT_A = { id: "client-a", apiKey: "key-a", workspaceId: "https://a.emailbison.com" };
 const CLIENT_B = { id: "client-b", apiKey: "key-b", workspaceId: "https://b.emailbison.com" };
@@ -129,5 +134,198 @@ describe("getEmailBisonCampaigns", () => {
     const campaigns = await getEmailBisonCampaigns(CLIENT_A, { fetchImpl });
     expect(campaigns).toEqual([]);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+});
+
+const NEW_CAMPAIGN_ID = "100";
+
+function buildCreateInput(overrides: Partial<CreateEmailBisonCampaignInput> = {}): CreateEmailBisonCampaignInput {
+  return {
+    name: "New Campaign",
+    senderEmailIds: ["1", "2"],
+    schedule: {
+      monday: true,
+      tuesday: true,
+      wednesday: true,
+      thursday: true,
+      friday: true,
+      saturday: false,
+      sunday: false,
+      startTime: "09:00",
+      endTime: "17:00",
+      timezone: "UTC",
+    },
+    steps: [{ emailSubject: "Hi", emailBody: "Body", waitInDays: 0, threadReply: false }],
+    launch: false,
+    ...overrides,
+  };
+}
+
+/** A fetchImpl resolving every step of createEmailBisonCampaign's chain
+ * successfully, logging each call as "METHOD url" to `callLog`. */
+function fullSuccessFetch(callLog: string[]): typeof fetch {
+  return vi.fn().mockImplementation(async (url: unknown, init?: RequestInit) => {
+    const u = String(url);
+    const method = init?.method ?? "GET";
+    callLog.push(`${method} ${u}`);
+    if (u.endsWith("/api/campaigns") && method === "POST") {
+      return jsonResponse(201, { data: { id: 100, name: "New Campaign", status: "draft" } });
+    }
+    if (u.endsWith(`/api/campaigns/${NEW_CAMPAIGN_ID}/attach-sender-emails`)) {
+      return jsonResponse(200, { data: { success: true, message: "ok" } });
+    }
+    if (u.endsWith(`/api/campaigns/${NEW_CAMPAIGN_ID}/schedule`)) {
+      return jsonResponse(201, { data: { id: 5 } });
+    }
+    if (u.endsWith(`/api/campaigns/${NEW_CAMPAIGN_ID}/sequence-steps`)) {
+      return jsonResponse(201, { data: { id: 9, sequence_steps: [{ id: 1 }] } });
+    }
+    if (u.endsWith(`/api/campaigns/${NEW_CAMPAIGN_ID}/resume`)) {
+      return jsonResponse(200, { data: { success: true, message: "ok" } });
+    }
+    throw new Error(`unexpected fetch to ${method} ${u}`);
+  }) as unknown as typeof fetch;
+}
+
+/** Ordered list of the chain's steps after createCampaign, mirroring
+ * createEmailBisonCampaign's documented sequence. Used by fetchFailingAt to
+ * let every step before the failure point succeed normally. */
+const CHAIN_STEP_SUFFIXES = ["/attach-sender-emails", "/schedule", "/sequence-steps", "/resume"];
+
+/** A fetchImpl that resolves createCampaign and every chain step before
+ * `failAtSuffix` normally, fails `failAtSuffix` itself with a non-transient
+ * 401 (so client.ts's retry/backoff never kicks in and the test stays fast),
+ * and throws if any step after it is ever reached — proving the chain
+ * stopped at the failure point. */
+function fetchFailingAt(failAtSuffix: string): typeof fetch {
+  const failIndex = CHAIN_STEP_SUFFIXES.indexOf(failAtSuffix);
+  if (failIndex === -1) throw new Error(`unknown chain step suffix: ${failAtSuffix}`);
+
+  return vi.fn().mockImplementation(async (url: unknown, init?: RequestInit) => {
+    const u = String(url);
+    const method = init?.method ?? "GET";
+    if (u.endsWith("/api/campaigns") && method === "POST") {
+      return jsonResponse(201, { data: { id: 100, name: "New Campaign", status: "draft" } });
+    }
+    if (u.endsWith(failAtSuffix)) {
+      return jsonResponse(401, { message: "boom" });
+    }
+    const stepIndex = CHAIN_STEP_SUFFIXES.findIndex((suffix) => u.endsWith(suffix));
+    if (stepIndex !== -1 && stepIndex < failIndex) {
+      // A step before the failure point — resolve it as the happy-path fetch would.
+      if (stepIndex === 0) return jsonResponse(200, { data: { success: true, message: "ok" } });
+      if (stepIndex === 1) return jsonResponse(201, { data: { id: 5 } });
+      if (stepIndex === 2) return jsonResponse(201, { data: { id: 9, sequence_steps: [{ id: 1 }] } });
+      return jsonResponse(200, { data: { success: true, message: "ok" } });
+    }
+    if (stepIndex !== -1 && stepIndex > failIndex) {
+      throw new Error(`chain should have stopped before reaching ${method} ${u}`);
+    }
+    throw new Error(`unexpected fetch to ${method} ${u}`);
+  }) as unknown as typeof fetch;
+}
+
+describe("createEmailBisonCampaign", () => {
+  it("runs create -> attach -> schedule -> sequence-steps, skipping resume when launch is false", async () => {
+    const callLog: string[] = [];
+    const fetchImpl = fullSuccessFetch(callLog);
+
+    const campaign = await createEmailBisonCampaign(CLIENT_A, buildCreateInput({ launch: false }), { fetchImpl });
+
+    expect(campaign).toEqual({ id: "100", name: "New Campaign" });
+    expect(callLog).toEqual([
+      `POST ${CLIENT_A.workspaceId}/api/campaigns`,
+      `POST ${CLIENT_A.workspaceId}/api/campaigns/100/attach-sender-emails`,
+      `POST ${CLIENT_A.workspaceId}/api/campaigns/100/schedule`,
+      `POST ${CLIENT_A.workspaceId}/api/campaigns/100/sequence-steps`,
+    ]);
+  });
+
+  it("also calls resumeCampaign, as the final step, when launch is true", async () => {
+    const callLog: string[] = [];
+    const fetchImpl = fullSuccessFetch(callLog);
+
+    const campaign = await createEmailBisonCampaign(CLIENT_A, buildCreateInput({ launch: true }), { fetchImpl });
+
+    expect(campaign).toEqual({ id: "100", name: "New Campaign" });
+    expect(callLog).toEqual([
+      `POST ${CLIENT_A.workspaceId}/api/campaigns`,
+      `POST ${CLIENT_A.workspaceId}/api/campaigns/100/attach-sender-emails`,
+      `POST ${CLIENT_A.workspaceId}/api/campaigns/100/schedule`,
+      `POST ${CLIENT_A.workspaceId}/api/campaigns/100/sequence-steps`,
+      `PATCH ${CLIENT_A.workspaceId}/api/campaigns/100/resume`,
+    ]);
+  });
+
+  it("stops the chain and names attaching senders when attach-sender-emails fails", async () => {
+    const fetchImpl = fetchFailingAt("/attach-sender-emails");
+
+    await expect(createEmailBisonCampaign(CLIENT_A, buildCreateInput({ launch: true }), { fetchImpl })).rejects.toThrow(
+      "Campaign created but attaching senders failed"
+    );
+  });
+
+  it("stops the chain and names the schedule step when createCampaignSchedule fails", async () => {
+    const fetchImpl = fetchFailingAt("/schedule");
+
+    await expect(createEmailBisonCampaign(CLIENT_A, buildCreateInput({ launch: true }), { fetchImpl })).rejects.toThrow(
+      "Campaign created but creating the schedule failed"
+    );
+  });
+
+  it("stops the chain and names the sequence-steps step when createSequenceSteps fails", async () => {
+    const fetchImpl = fetchFailingAt("/sequence-steps");
+
+    await expect(createEmailBisonCampaign(CLIENT_A, buildCreateInput({ launch: true }), { fetchImpl })).rejects.toThrow(
+      "Campaign created but creating sequence steps failed"
+    );
+  });
+
+  it("stops the chain and names the resume step when resumeCampaign fails (launch: true only)", async () => {
+    const fetchImpl = fetchFailingAt("/resume");
+
+    await expect(createEmailBisonCampaign(CLIENT_A, buildCreateInput({ launch: true }), { fetchImpl })).rejects.toThrow(
+      "Campaign created but launching (resume) the campaign failed"
+    );
+  });
+
+  it("does not call resumeCampaign, and does not fail, when launch is false even though resume would fail", async () => {
+    // Using fetchFailingAt("/resume") but launch: false proves resume is never reached/called.
+    const fetchImpl = fetchFailingAt("/resume");
+
+    const campaign = await createEmailBisonCampaign(CLIENT_A, buildCreateInput({ launch: false }), { fetchImpl });
+
+    expect(campaign).toEqual({ id: "100", name: "New Campaign" });
+  });
+
+  it("appends the created campaign to an existing cached list in place, without a new getEmailBisonCampaigns fetch", async () => {
+    const listFetch = vi.fn().mockResolvedValue(
+      jsonResponse(200, { data: [{ id: 1, name: "Existing" }], meta: { current_page: 1, last_page: 1 } })
+    );
+    const existing = await getEmailBisonCampaigns(CLIENT_A, { fetchImpl: listFetch });
+    expect(existing).toEqual([{ id: "1", name: "Existing" }]);
+
+    const callLog: string[] = [];
+    await createEmailBisonCampaign(CLIENT_A, buildCreateInput({ launch: false }), { fetchImpl: fullSuccessFetch(callLog) });
+
+    const afterCreateFetch = vi.fn();
+    const after = await getEmailBisonCampaigns(CLIENT_A, { fetchImpl: afterCreateFetch });
+
+    expect(after).toEqual([
+      { id: "1", name: "Existing" },
+      { id: "100", name: "New Campaign" },
+    ]);
+    expect(afterCreateFetch).not.toHaveBeenCalled();
+  });
+
+  it("seeds the cache with the new campaign when nothing was cached yet for this client", async () => {
+    const callLog: string[] = [];
+    await createEmailBisonCampaign(CLIENT_B, buildCreateInput({ launch: false }), { fetchImpl: fullSuccessFetch(callLog) });
+
+    const afterCreateFetch = vi.fn();
+    const after = await getEmailBisonCampaigns(CLIENT_B, { fetchImpl: afterCreateFetch });
+
+    expect(after).toEqual([{ id: "100", name: "New Campaign" }]);
+    expect(afterCreateFetch).not.toHaveBeenCalled();
   });
 });
