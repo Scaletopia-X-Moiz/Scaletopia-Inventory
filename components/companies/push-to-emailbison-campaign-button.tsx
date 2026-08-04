@@ -41,7 +41,6 @@ const DEFAULT_DAYS: Record<DayKey, boolean> = {
  * this just keeps the picker to a reasonable default set rather than every
  * zone Intl knows about. */
 const TIMEZONE_OPTIONS = [
-  "UTC",
   "America/New_York",
   "America/Chicago",
   "America/Denver",
@@ -102,7 +101,7 @@ function newCreateCampaignForm(): CreateCampaignForm {
     days: { ...DEFAULT_DAYS },
     startTime: "09:00",
     endTime: "17:00",
-    timezone: "UTC",
+    timezone: "America/New_York",
     steps: [newSequenceStep()],
   };
 }
@@ -329,10 +328,15 @@ export function PushToEmailBisonCampaignButton({
             endTime: createForm.endTime,
             timezone: createForm.timezone,
           },
-          sequenceSteps: createForm.steps.map((step) => ({
+          sequenceSteps: createForm.steps.map((step, i) => ({
             emailSubject: step.emailSubject,
             emailBody: step.emailBody,
-            waitInDays: Number(step.waitInDays) || 0,
+            // EmailBison requires wait_in_days >= 1 for every step, including
+            // the first — but "wait days after the previous step" is
+            // meaningless for step 1 (no previous step), so the UI doesn't
+            // render a control for it (see `i > 0` below) and we force the
+            // wire value here rather than exposing a nonsensical input.
+            waitInDays: i === 0 ? 1 : Number(step.waitInDays) || 0,
             threadReply: false,
           })),
           launch,
