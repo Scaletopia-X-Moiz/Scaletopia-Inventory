@@ -45,6 +45,11 @@ export interface RunGhlPushDeps {
    * mapping step (ticket #51). Empty/omitted means no mapping was offered
    * (no virtual columns were active) or every column was skipped. */
   fieldMapping?: GhlFieldMapping[];
+  /** Optional extra identifier (e.g. "leadership", "marketing", a segment
+   * name) appended as one more pipe-delimited segment on every tag built for
+   * this run — see buildGhlTag. Left undefined/blank, the tag format is
+   * unchanged. */
+  customTagSuffix?: string | null;
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -92,9 +97,10 @@ async function pushOne(
   actor: Pick<SessionUser, "id" | "email">,
   credentials: GhlCredentials,
   fetchImpl: typeof fetch,
-  fieldMapping: GhlFieldMapping[]
+  fieldMapping: GhlFieldMapping[],
+  customTagSuffix?: string | null
 ): Promise<PushOneResult> {
-  const tag = buildGhlTag(client.name, candidate.record);
+  const tag = buildGhlTag(client.name, candidate.record, customTagSuffix);
   const customFields = buildGhlCustomFields(candidate.customData, fieldMapping);
   const payload = buildGhlContactPayload(candidate.record, [tag], customFields);
 
@@ -173,6 +179,7 @@ export async function runPeopleGhlPush(
   const fetchImpl = deps.fetchImpl ?? fetch;
   const onProgress = deps.onProgress;
   const fieldMapping = deps.fieldMapping ?? [];
+  const customTagSuffix = deps.customTagSuffix;
 
   onProgress?.({ phase: "resolving", done: 0, total: 0, pushed: 0, errors: 0 });
 
@@ -206,7 +213,15 @@ export async function runPeopleGhlPush(
     const results = await Promise.allSettled(
       group.map(async (candidate) => ({
         candidate,
-        result: await pushOne(candidate, client, actor, credentials, fetchImpl, fieldMapping),
+        result: await pushOne(
+          candidate,
+          client,
+          actor,
+          credentials,
+          fetchImpl,
+          fieldMapping,
+          customTagSuffix
+        ),
       }))
     );
 

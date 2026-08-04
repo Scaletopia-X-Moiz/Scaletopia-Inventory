@@ -85,4 +85,43 @@ describe("buildGhlTag", () => {
     });
     expect(tag).toBe(`Acme - Unknown | ${bucketLabel("1-10")} | Unknown | Unknown`);
   });
+
+  it("appends a custom suffix as an extra pipe-delimited segment", () => {
+    const tag = buildGhlTag(
+      "Acme",
+      { niche: "dtc-beauty", employeeCount: 35, country: "US", source: "apollo" },
+      "leadership"
+    );
+    expect(tag).toBe(`Acme - dtc-beauty | ${bucketLabel("11-50")} | US | apollo | leadership`);
+  });
+
+  it("trims whitespace around the custom suffix", () => {
+    const tag = buildGhlTag(
+      "Acme",
+      { niche: "n", employeeCount: 5, country: "US", source: "apollo" },
+      "  marketing  "
+    );
+    expect(tag).toBe(`Acme - n | ${bucketLabel("1-10")} | US | apollo | marketing`);
+  });
+
+  it("omits the suffix segment when the custom suffix is missing, null, or blank", () => {
+    const base = `Acme - n | ${bucketLabel("1-10")} | US | apollo`;
+    expect(
+      buildGhlTag("Acme", { niche: "n", employeeCount: 5, country: "US", source: "apollo" })
+    ).toBe(base);
+    expect(
+      buildGhlTag(
+        "Acme",
+        { niche: "n", employeeCount: 5, country: "US", source: "apollo" },
+        null
+      )
+    ).toBe(base);
+    expect(
+      buildGhlTag(
+        "Acme",
+        { niche: "n", employeeCount: 5, country: "US", source: "apollo" },
+        "   "
+      )
+    ).toBe(base);
+  });
 });

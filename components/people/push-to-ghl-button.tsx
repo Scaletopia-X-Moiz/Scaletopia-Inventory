@@ -67,6 +67,8 @@ export function PushToGhlButton({
   const [preview, setPreview] = useState<PreviewCounts | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
 
+  const [customTagSuffix, setCustomTagSuffix] = useState("");
+
   const [result, setResult] = useState<GhlPushResult | null>(null);
 
   const busy = status === "pushing";
@@ -90,6 +92,7 @@ export function PushToGhlButton({
     setMapping({});
     setPreview(null);
     setPreviewError(null);
+    setCustomTagSuffix("");
     setResult(null);
   }
 
@@ -172,7 +175,11 @@ export function PushToGhlButton({
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ clientId: selectedClient.id, fieldMapping }),
+          body: JSON.stringify({
+            clientId: selectedClient.id,
+            fieldMapping,
+            customTagSuffix: customTagSuffix.trim() || undefined,
+          }),
         },
         (event) => {
           if (event.type === "done") reachedDone = true;
@@ -403,6 +410,32 @@ export function PushToGhlButton({
                 </>
               )}
             </AlertDialog.Description>
+
+            <div className="mt-4 flex flex-col gap-1.5">
+              <label htmlFor="ghl-tag-suffix" className="text-xs font-medium text-ink">
+                Additional tag identifier (optional)
+              </label>
+              <input
+                id="ghl-tag-suffix"
+                type="text"
+                value={customTagSuffix}
+                onChange={(e) => setCustomTagSuffix(e.target.value)}
+                placeholder="e.g. leadership, marketing, a segment name"
+                className="rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink outline-none focus:border-stamp"
+              />
+              <p className="text-xs text-ink-mute">
+                Tag format: {selectedClient?.name ?? "Client"} - Niche | Employee Range | Country
+                | Source
+                {customTagSuffix.trim() ? (
+                  <>
+                    {" | "}
+                    <span className="text-ink">{customTagSuffix.trim()}</span>
+                  </>
+                ) : (
+                  <> — your addition goes here as one more segment</>
+                )}
+              </p>
+            </div>
 
             <div className="mt-5 flex justify-end gap-2">
               <AlertDialog.Cancel asChild>

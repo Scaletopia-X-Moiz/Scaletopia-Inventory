@@ -40,8 +40,10 @@ export async function POST(request: NextRequest) {
 
   let clientId: unknown;
   let fieldMappingRaw: unknown;
+  let customTagSuffixRaw: unknown;
   try {
-    ({ clientId, fieldMapping: fieldMappingRaw } = await request.json());
+    ({ clientId, fieldMapping: fieldMappingRaw, customTagSuffix: customTagSuffixRaw } =
+      await request.json());
   } catch {
     return Response.json({ error: "Invalid request body" }, { status: 400 });
   }
@@ -51,6 +53,7 @@ export async function POST(request: NextRequest) {
   }
 
   const fieldMapping = parseFieldMapping(fieldMappingRaw);
+  const customTagSuffix = typeof customTagSuffixRaw === "string" ? customTagSuffixRaw : undefined;
 
   const client = await getClientById(clientId);
   if (!client) {
@@ -63,6 +66,7 @@ export async function POST(request: NextRequest) {
       try {
         const result = await runPeopleGhlPush(filters, client, user, {
           fieldMapping,
+          customTagSuffix,
           onProgress: (p: GhlPushProgress) => {
             lastProgress.current = p;
             controller.enqueue(sseEvent({ type: "progress", ...p }));
