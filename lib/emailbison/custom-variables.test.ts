@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EmailBisonApiError } from "@/lib/emailbison/client";
-import { clearEmailBisonCustomVariablesCache, getEmailBisonCustomVariables } from "@/lib/emailbison/custom-variables";
+import {
+  appendEmailBisonCustomVariablesCache,
+  clearEmailBisonCustomVariablesCache,
+  getEmailBisonCustomVariables,
+} from "@/lib/emailbison/custom-variables";
 
 const WORKSPACE_A = { apiKey: "key-a", workspaceId: "https://a.emailbison.com" };
 const WORKSPACE_B = { apiKey: "key-b", workspaceId: "https://b.emailbison.com" };
@@ -71,5 +75,57 @@ describe("getEmailBisonCustomVariables", () => {
     const variables = await getEmailBisonCustomVariables(WORKSPACE_A, { fetchImpl });
     expect(variables).toEqual([]);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("appendEmailBisonCustomVariablesCache", () => {
+  it("seeds the cache when nothing has been fetched yet for the workspace", async () => {
+    const fetchImpl = vi.fn();
+
+    await appendEmailBisonCustomVariablesCache(WORKSPACE_A.workspaceId, [{ id: "v1", name: "new_var" }]);
+    const variables = await getEmailBisonCustomVariables(WORKSPACE_A, { fetchImpl });
+
+    expect(variables).toEqual([{ id: "v1", name: "new_var" }]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("appends to an already-resolved cache entry without refetching", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { data: [{ id: "v1", name: "existing" }] }));
+
+    const first = await getEmailBisonCustomVariables(WORKSPACE_A, { fetchImpl });
+    expect(first).toEqual([{ id: "v1", name: "existing" }]);
+
+    await appendEmailBisonCustomVariablesCache(WORKSPACE_A.workspaceId, [{ id: "v2", name: "brand_new" }]);
+    const second = await getEmailBisonCustomVariables(WORKSPACE_A, { fetchImpl });
+
+    expect(second).toEqual([
+      { id: "v1", name: "existing" },
+      { id: "v2", name: "brand_new" },
+    ]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("is a no-op when given an empty list", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { data: [] }));
+
+    await appendEmailBisonCustomVariablesCache(WORKSPACE_A.workspaceId, []);
+    const variables = await getEmailBisonCustomVariables(WORKSPACE_A, { fetchImpl });
+
+    expect(variables).toEqual([]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-seeds the cache after a prior failed fetch self-evicted it", async () => {
+    // 401 (not 5xx) so requestGetWithRetry's retry loop doesn't retry it —
+    // same non-retryable-status choice as the "does not cache the failure"
+    // case above.
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(401, { message: "invalid api key" }));
+    await expect(getEmailBisonCustomVariables(WORKSPACE_A, { fetchImpl })).rejects.toThrow(EmailBisonApiError);
+
+    await appendEmailBisonCustomVariablesCache(WORKSPACE_A.workspaceId, [{ id: "v1", name: "new_var" }]);
+    const variables = await getEmailBisonCustomVariables(WORKSPACE_A, { fetchImpl });
+
+    expect(variables).toEqual([{ id: "v1", name: "new_var" }]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
