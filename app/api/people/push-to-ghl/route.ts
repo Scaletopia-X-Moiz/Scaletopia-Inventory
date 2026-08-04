@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { parsePersonFilters } from "@/lib/data/people-search-params";
 import { getClientById } from "@/lib/data/clients";
 import { runPeopleGhlPush, type GhlPushProgress } from "@/lib/ghl/push-to-ghl";
-import type { GhlFieldMapping } from "@/lib/ghl/types";
+import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
 import { getUser } from "@/lib/auth/dal";
 import { logActivity } from "@/lib/activity/log";
 
@@ -28,6 +28,30 @@ function parseFieldMapping(value: unknown): GhlFieldMapping[] {
   return value.filter(isFieldMapping);
 }
 
+function isStandardFieldMapping(value: unknown): value is GhlStandardFieldMapping {
+  if (typeof value !== "object" || value === null) return false;
+  const m = value as Record<string, unknown>;
+  const isIncludeSkip = (v: unknown) => v === "include" || v === "skip";
+  return (
+    (m.companyName === "brand_name" || m.companyName === "company_name" || m.companyName === "skip") &&
+    isIncludeSkip(m.firstName) &&
+    isIncludeSkip(m.lastName) &&
+    isIncludeSkip(m.email) &&
+    isIncludeSkip(m.phone) &&
+    isIncludeSkip(m.city) &&
+    isIncludeSkip(m.country)
+  );
+}
+
+/** Parses the standard (non-custom) field mapping (ticket #109) off the
+ * request body. A malformed/missing mapping is dropped (returns undefined)
+ * rather than rejected, matching parseFieldMapping's degrade-gracefully
+ * convention — the orchestrator treats undefined as "no mapping" and keeps
+ * today's always-include, prefer-brand-name behavior. */
+function parseStandardFieldMapping(value: unknown): GhlStandardFieldMapping | undefined {
+  return isStandardFieldMapping(value) ? value : undefined;
+}
+
 export async function POST(request: NextRequest) {
   const user = await getUser();
   if (!user) {
@@ -40,10 +64,15 @@ export async function POST(request: NextRequest) {
 
   let clientId: unknown;
   let fieldMappingRaw: unknown;
+  let standardFieldMappingRaw: unknown;
   let customTagSuffixRaw: unknown;
   try {
-    ({ clientId, fieldMapping: fieldMappingRaw, customTagSuffix: customTagSuffixRaw } =
-      await request.json());
+    ({
+      clientId,
+      fieldMapping: fieldMappingRaw,
+      standardFieldMapping: standardFieldMappingRaw,
+      customTagSuffix: customTagSuffixRaw,
+    } = await request.json());
   } catch {
     return Response.json({ error: "Invalid request body" }, { status: 400 });
   }
@@ -53,6 +82,7 @@ export async function POST(request: NextRequest) {
   }
 
   const fieldMapping = parseFieldMapping(fieldMappingRaw);
+  const standardFieldMapping = parseStandardFieldMapping(standardFieldMappingRaw);
   const customTagSuffix = typeof customTagSuffixRaw === "string" ? customTagSuffixRaw : undefined;
 
   const client = await getClientById(clientId);
@@ -66,6 +96,7 @@ export async function POST(request: NextRequest) {
       try {
         const result = await runPeopleGhlPush(filters, client, user, {
           fieldMapping,
+          standardFieldMapping,
           customTagSuffix,
           onProgress: (p: GhlPushProgress) => {
             lastProgress.current = p;

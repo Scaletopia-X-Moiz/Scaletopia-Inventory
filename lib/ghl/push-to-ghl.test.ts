@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { runPeopleGhlPush, splitGhlEligibility } from "@/lib/ghl/push-to-ghl";
 import { includeOnly } from "@/lib/data/include-exclude";
+import { resolveDefaultFieldMapping } from "@/lib/push/resolve-default-field-mapping";
 import type { ClientRow } from "@/lib/data/clients";
 import type { GhlPushCandidate } from "@/lib/data/people";
 
@@ -427,6 +428,127 @@ describe("runPeopleGhlPush", () => {
     await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
     expect(bodies[0].customFields).toBeUndefined();
+  });
+
+  it("omits a field from the sent payload when standardFieldMapping marks it skip", async () => {
+    const niche = unique("std-skip");
+    await seedPeople(niche, [{ slug: "a", phoneType: "mobile" }]);
+    const client = await insertClient();
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse((init?.body as string) ?? "{}"));
+      contactCounter++;
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ contact: { id: `contact_${contactCounter}` } }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, {
+      fetchImpl,
+      standardFieldMapping: {
+        companyName: "brand_name",
+        firstName: "include",
+        lastName: "include",
+        email: "include",
+        phone: "include",
+        city: "skip",
+        country: "include",
+      },
+    });
+
+    expect(bodies[0].city).toBeUndefined();
+  });
+
+  it("sends the raw company_name (not brand_name) when standardFieldMapping picks company_name", async () => {
+    const niche = unique("std-company-name");
+    await seedPeople(niche, [{ slug: "a", phoneType: "mobile" }]);
+    const client = await insertClient();
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse((init?.body as string) ?? "{}"));
+      contactCounter++;
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ contact: { id: `contact_${contactCounter}` } }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, {
+      fetchImpl,
+      standardFieldMapping: {
+        companyName: "company_name",
+        firstName: "include",
+        lastName: "include",
+        email: "include",
+        phone: "include",
+        city: "include",
+        country: "include",
+      },
+    });
+
+    // Seeded people have no linked company (no brand_name), so company_name
+    // ("Acme Co") is the only candidate — this confirms the mapping routes
+    // through the raw field rather than silently falling back either way.
+    expect(bodies[0].companyName).toBe("Acme Co");
+  });
+
+  it("falls back to the auto-mapping default from resolveDefaultFieldMapping when no explicit mapping is chosen for a field", async () => {
+    const niche = unique("std-default");
+    await seedPeople(niche, [{ slug: "a", phoneType: "mobile" }]);
+    const client = await insertClient();
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse((init?.body as string) ?? "{}"));
+      contactCounter++;
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ contact: { id: `contact_${contactCounter}` } }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    // No brand_name anywhere in this pushed set, so #108's default resolves
+    // companyName to "company_name" — verify that default, threaded straight
+    // through to runPeopleGhlPush, produces the raw name on the wire.
+    const defaults = resolveDefaultFieldMapping({
+      platform: "ghl",
+      records: [{ companyName: "Acme Co", brandName: null }],
+      virtualColumns: [],
+      customFields: [],
+    });
+    expect(defaults.standardFields.companyName).toBe("company_name");
+
+    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, {
+      fetchImpl,
+      standardFieldMapping: defaults.standardFields,
+    });
+
+    expect(bodies[0].companyName).toBe("Acme Co");
+  });
+
+  it("reproduces today's behavior exactly when standardFieldMapping is omitted", async () => {
+    const niche = unique("std-omitted");
+    await seedPeople(niche, [{ slug: "a", phoneType: "mobile" }]);
+    const client = await insertClient();
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse((init?.body as string) ?? "{}"));
+      contactCounter++;
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ contact: { id: `contact_${contactCounter}` } }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
+
+    expect(bodies[0].companyName).toBe("Acme Co");
+    expect(bodies[0].city).toBe("Austin");
+    expect(bodies[0].country).toBe("US");
   });
 
   it("reports progress through resolving, pushing, and done phases", async () => {

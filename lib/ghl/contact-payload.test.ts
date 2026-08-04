@@ -86,6 +86,85 @@ describe("buildGhlContactPayload", () => {
     const result = buildGhlContactPayload(fullRecord, []);
     expect(result.customFields).toEqual([]);
   });
+
+  it("sends the raw company_name even when brand_name is present, given companyName: \"company_name\"", () => {
+    const result = buildGhlContactPayload(
+      { ...fullRecord, companyName: "ACME INC dba", brandName: "Acme" },
+      [],
+      [],
+      {
+        companyName: "company_name",
+        firstName: "include",
+        lastName: "include",
+        email: "include",
+        phone: "include",
+        city: "include",
+        country: "include",
+      }
+    );
+    expect(result.companyName).toBe("ACME INC dba");
+  });
+
+  it("omits company name entirely when the mapping is companyName: \"skip\"", () => {
+    const result = buildGhlContactPayload(fullRecord, [], [], {
+      companyName: "skip",
+      firstName: "include",
+      lastName: "include",
+      email: "include",
+      phone: "include",
+      city: "include",
+      country: "include",
+    });
+    expect(result.companyName).toBeNull();
+  });
+
+  it("still prefers brand_name over company_name when the mapping says brand_name", () => {
+    const result = buildGhlContactPayload(
+      { ...fullRecord, companyName: "ACME INC dba", brandName: "Acme" },
+      [],
+      [],
+      {
+        companyName: "brand_name",
+        firstName: "include",
+        lastName: "include",
+        email: "include",
+        phone: "include",
+        city: "include",
+        country: "include",
+      }
+    );
+    expect(result.companyName).toBe("Acme");
+  });
+
+  it("nulls out any field set to \"skip\"", () => {
+    const result = buildGhlContactPayload(fullRecord, [], [], {
+      companyName: "skip",
+      firstName: "skip",
+      lastName: "skip",
+      email: "skip",
+      phone: "skip",
+      city: "skip",
+      country: "skip",
+    });
+    expect(result).toEqual({
+      firstName: null,
+      lastName: null,
+      email: null,
+      phone: null,
+      companyName: null,
+      city: null,
+      country: null,
+      tags: [],
+      customFields: [],
+    });
+  });
+
+  it("reproduces today's behavior exactly when the mapping is omitted", () => {
+    const withoutMapping = buildGhlContactPayload(fullRecord, ["tag"], []);
+    const withUndefinedMapping = buildGhlContactPayload(fullRecord, ["tag"], [], undefined);
+    expect(withoutMapping).toEqual(withUndefinedMapping);
+    expect(withoutMapping.companyName).toBe(fullRecord.companyName);
+  });
 });
 
 describe("buildGhlCustomFields", () => {

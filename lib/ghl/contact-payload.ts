@@ -1,29 +1,45 @@
-import type { GhlContactPayloadShape, GhlFieldMapping, GhlPushRecord } from "@/lib/ghl/types";
+import type {
+  GhlContactPayloadShape,
+  GhlFieldMapping,
+  GhlPushRecord,
+  GhlStandardFieldMapping,
+} from "@/lib/ghl/types";
 
 /** Shapes a person record into a GHL contact-creation payload. Tags are
  * supplied by the caller (built via buildGhlTag) rather than derived here,
  * since a single push can attach more than one tag to a contact. `customFields`
  * is likewise pre-built by the caller (via buildGhlCustomFields) — this
  * function just carries it through, defaulting to empty when the push has no
- * active field mapping (ticket #51). */
+ * active field mapping (ticket #51). `standardFieldMapping` (ticket #109) is
+ * optional — omitting it reproduces today's behavior exactly (every standard
+ * field included, company name prefers brand_name falling back to
+ * company_name). When supplied, "skip" on any field nulls it out, and
+ * companyName: "company_name" sends the raw name even when brand_name is
+ * present. */
 export function buildGhlContactPayload(
   record: Pick<
     GhlPushRecord,
     "firstName" | "lastName" | "email" | "phone" | "companyName" | "brandName" | "city" | "country"
   >,
   tags: string[],
-  customFields: { id: string; value: string }[] = []
+  customFields: { id: string; value: string }[] = [],
+  standardFieldMapping?: GhlStandardFieldMapping
 ): GhlContactPayloadShape {
+  const companyName =
+    standardFieldMapping?.companyName === "skip"
+      ? null
+      : standardFieldMapping?.companyName === "company_name"
+        ? record.companyName
+        : record.brandName || record.companyName;
+
   return {
-    firstName: record.firstName,
-    lastName: record.lastName,
-    email: record.email,
-    phone: record.phone,
-    // Prefer the cleaned company name (companies.brand_name); fall back to
-    // the raw denormalized company_name for any company not yet cleaned.
-    companyName: record.brandName || record.companyName,
-    city: record.city,
-    country: record.country,
+    firstName: standardFieldMapping?.firstName === "skip" ? null : record.firstName,
+    lastName: standardFieldMapping?.lastName === "skip" ? null : record.lastName,
+    email: standardFieldMapping?.email === "skip" ? null : record.email,
+    phone: standardFieldMapping?.phone === "skip" ? null : record.phone,
+    companyName,
+    city: standardFieldMapping?.city === "skip" ? null : record.city,
+    country: standardFieldMapping?.country === "skip" ? null : record.country,
     tags,
     customFields,
   };

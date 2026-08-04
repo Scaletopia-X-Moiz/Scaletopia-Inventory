@@ -6,7 +6,7 @@ import { pushContactToGhl, GhlApiError, type GhlCredentials } from "@/lib/ghl/cl
 import { buildGhlTag } from "@/lib/ghl/tag";
 import { buildGhlContactPayload, buildGhlCustomFields } from "@/lib/ghl/contact-payload";
 import type { ClientRow } from "@/lib/data/clients";
-import type { GhlFieldMapping } from "@/lib/ghl/types";
+import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
 import type { SessionUser } from "@/lib/auth/dal";
 
 export const GHL_PUSH_CONCURRENCY = 8;
@@ -45,6 +45,11 @@ export interface RunGhlPushDeps {
    * mapping step (ticket #51). Empty/omitted means no mapping was offered
    * (no virtual columns were active) or every column was skipped. */
   fieldMapping?: GhlFieldMapping[];
+  /** Standard (non-custom) field mapping from the push button's mapping step
+   * (ticket #109), e.g. skipping city or choosing raw company_name over
+   * brand_name. Omitted means no mapping was offered — today's always-include,
+   * prefer-brand-name behavior is preserved. */
+  standardFieldMapping?: GhlStandardFieldMapping;
   /** Optional extra identifier (e.g. "leadership", "marketing", a segment
    * name) appended as one more pipe-delimited segment on every tag built for
    * this run — see buildGhlTag. Left undefined/blank, the tag format is
@@ -98,11 +103,12 @@ async function pushOne(
   credentials: GhlCredentials,
   fetchImpl: typeof fetch,
   fieldMapping: GhlFieldMapping[],
+  standardFieldMapping: GhlStandardFieldMapping | undefined,
   customTagSuffix?: string | null
 ): Promise<PushOneResult> {
   const tag = buildGhlTag(client.name, candidate.record, customTagSuffix);
   const customFields = buildGhlCustomFields(candidate.customData, fieldMapping);
-  const payload = buildGhlContactPayload(candidate.record, [tag], customFields);
+  const payload = buildGhlContactPayload(candidate.record, [tag], customFields, standardFieldMapping);
 
   try {
     const { contactId, deduped } = await pushContactToGhl(
@@ -179,6 +185,7 @@ export async function runPeopleGhlPush(
   const fetchImpl = deps.fetchImpl ?? fetch;
   const onProgress = deps.onProgress;
   const fieldMapping = deps.fieldMapping ?? [];
+  const standardFieldMapping = deps.standardFieldMapping;
   const customTagSuffix = deps.customTagSuffix;
 
   onProgress?.({ phase: "resolving", done: 0, total: 0, pushed: 0, errors: 0 });
@@ -220,6 +227,7 @@ export async function runPeopleGhlPush(
           credentials,
           fetchImpl,
           fieldMapping,
+          standardFieldMapping,
           customTagSuffix
         ),
       }))
