@@ -14,9 +14,14 @@ import {
   attachLeadsToCampaign,
   type EmailBisonLeadResult,
 } from "@/lib/emailbison/client";
+import { appendEmailBisonCustomVariablesCache } from "@/lib/emailbison/custom-variables";
 import { buildEmailBisonLeadPayload, resolveCustomVariables } from "@/lib/emailbison/lead-payload";
 import type { ClientRow } from "@/lib/data/clients";
-import type { EmailBisonCredentials, EmailBisonCustomVariableEntry } from "@/lib/emailbison/types";
+import type {
+  EmailBisonCredentials,
+  EmailBisonCustomVariableEntry,
+  EmailBisonStandardFieldMapping,
+} from "@/lib/emailbison/types";
 import type { SessionUser } from "@/lib/auth/dal";
 
 const PLATFORM = "emailbison";
@@ -64,6 +69,10 @@ export interface RunEmailBisonPushDeps {
   /** Partial-update vs full-replace when the lead already exists. Defaults to
    * "patch" per issue #52. */
   existingLeadBehavior?: "patch" | "put";
+  /** Which standard EmailBison fields to send and where companyName's value
+   * comes from (issue #110, types from #108). Omitting it reproduces
+   * today's behavior exactly — see buildEmailBisonLeadPayload. */
+  standardFieldMapping?: EmailBisonStandardFieldMapping;
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -77,7 +86,14 @@ function chunk<T>(arr: T[], size: number): T[][] {
 /** Ensures every custom-variable name referenced by `entries` exists in the
  * workspace, creating any that are missing. Runs once per push, ahead of the
  * batch upsert — not once per person, since the names are the same for every
- * lead in the push. */
+ * lead in the push.
+ *
+ * Any newly-created variables are patched into custom-variables.ts's
+ * in-memory cache in place (mirroring campaigns.ts's appendToCampaignCache),
+ * so the "existing workspace variables" reference panel (and any other
+ * getEmailBisonCustomVariables reader) reflects them on its next fetch
+ * without waiting for the cache to naturally expire — it never does, since
+ * the cache lives for the whole process lifetime. */
 async function ensureCustomVariablesExist(
   credentials: EmailBisonCredentials,
   entries: EmailBisonCustomVariableEntry[],
@@ -89,8 +105,10 @@ async function ensureCustomVariablesExist(
   const existing = await listCustomVariables(credentials, { fetchImpl });
   const existingNames = new Set(existing.map((v) => v.name));
   const missing = names.filter((name) => !existingNames.has(name));
+  if (missing.length === 0) return;
 
-  await Promise.all(missing.map((name) => createCustomVariable(credentials, name, { fetchImpl })));
+  const created = await Promise.all(missing.map((name) => createCustomVariable(credentials, name, { fetchImpl })));
+  await appendEmailBisonCustomVariablesCache(credentials.workspaceId, created);
 }
 
 interface FailedRecord {
@@ -121,7 +139,8 @@ async function pushChunk(
   credentials: EmailBisonCredentials,
   customVariables: EmailBisonCustomVariableEntry[],
   existingLeadBehavior: "patch" | "put",
-  fetchImpl: typeof fetch
+  fetchImpl: typeof fetch,
+  standardFieldMapping: EmailBisonStandardFieldMapping | undefined
 ): Promise<ChunkResult> {
   const withEmail = candidates.filter((c) => c.record.email);
   const withoutEmail = candidates.filter((c) => !c.record.email);
@@ -144,7 +163,8 @@ async function pushChunk(
         buildEmailBisonLeadPayload(
           c.record,
           resolveCustomVariables(customVariables, c.record, c.customData),
-          existingLeadBehavior
+          existingLeadBehavior,
+          standardFieldMapping
         )
       ),
       { fetchImpl }
@@ -268,6 +288,7 @@ async function upsertCandidatesToWorkspace(
   customVariables: EmailBisonCustomVariableEntry[],
   existingLeadBehavior: "patch" | "put",
   fetchImpl: typeof fetch,
+  standardFieldMapping: EmailBisonStandardFieldMapping | undefined,
   onChunkGroupDone?: (done: number, pushed: number, errors: number) => void
 ): Promise<WorkspaceUpsertOutcome> {
   const leadIdByPersonId = new Map<string, string>();
@@ -282,7 +303,7 @@ async function upsertCandidatesToWorkspace(
   for (const group of chunk(chunks, EMAILBISON_PUSH_CONCURRENCY)) {
     const settled = await Promise.allSettled(
       group.map((chunkCandidates) =>
-        pushChunk(chunkCandidates, credentials, customVariables, existingLeadBehavior, fetchImpl)
+        pushChunk(chunkCandidates, credentials, customVariables, existingLeadBehavior, fetchImpl, standardFieldMapping)
       )
     );
 
@@ -349,6 +370,7 @@ async function runEmailBisonAddToWorkspace<TFilters>(
   const onProgress = deps.onProgress;
   const customVariables = deps.customVariables ?? [];
   const existingLeadBehavior = deps.existingLeadBehavior ?? "patch";
+  const standardFieldMapping = deps.standardFieldMapping;
 
   onProgress?.({ phase: "resolving", done: 0, total: 0, pushed: 0, errors: 0 });
 
@@ -373,6 +395,7 @@ async function runEmailBisonAddToWorkspace<TFilters>(
     customVariables,
     existingLeadBehavior,
     fetchImpl,
+    standardFieldMapping,
     (done, chunkPushed, chunkErrors) =>
       onProgress?.({ phase: "pushing", done, total: candidates.length, pushed: chunkPushed, errors: chunkErrors })
   );
@@ -487,6 +510,7 @@ async function runEmailBisonAddToCampaign<TFilters>(
   const onProgress = deps.onProgress;
   const customVariables = deps.customVariables ?? [];
   const existingLeadBehavior = deps.existingLeadBehavior ?? "patch";
+  const standardFieldMapping = deps.standardFieldMapping;
 
   onProgress?.({ phase: "resolving", done: 0, total: 0, attached: 0, errors: 0 });
 
@@ -535,6 +559,7 @@ async function runEmailBisonAddToCampaign<TFilters>(
       customVariables,
       existingLeadBehavior,
       fetchImpl,
+      standardFieldMapping,
       (done) => onProgress?.({ phase: "adding-to-workspace", done, total: needsUpsert.length, attached: 0, errors: 0 })
     );
     for (const [personId, leadId] of upsertOutcome.leadIdByPersonId) {

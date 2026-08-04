@@ -93,6 +93,58 @@ describe("buildEmailBisonLeadPayload", () => {
     const result = buildEmailBisonLeadPayload({ ...fullRecord, brandName: null });
     expect(result.companyName).toBe("Acme Inc");
   });
+
+  const fullMapping = {
+    companyName: "brand_name" as const,
+    firstName: "include" as const,
+    lastName: "include" as const,
+    email: "include" as const,
+    phone: "include" as const,
+    title: "include" as const,
+    website: "include" as const,
+  };
+
+  it("reproduces today's default behavior when standardFieldMapping is omitted", () => {
+    const withMapping = buildEmailBisonLeadPayload(
+      { ...fullRecord, brandName: "Acme" },
+      [],
+      "patch",
+      fullMapping
+    );
+    const withoutMapping = buildEmailBisonLeadPayload({ ...fullRecord, brandName: "Acme" });
+    expect(withoutMapping).toEqual(withMapping);
+  });
+
+  it("sends the raw companyName when the mapping chooses company_name", () => {
+    const result = buildEmailBisonLeadPayload(
+      { ...fullRecord, companyName: "ACME INC dba", brandName: "Acme" },
+      [],
+      "patch",
+      { ...fullMapping, companyName: "company_name" }
+    );
+    expect(result.companyName).toBe("ACME INC dba");
+  });
+
+  it("omits companyName when the mapping skips it", () => {
+    const result = buildEmailBisonLeadPayload(fullRecord, [], "patch", {
+      ...fullMapping,
+      companyName: "skip",
+    });
+    expect(result.companyName).toBeNull();
+  });
+
+  it("omits any standard field the mapping sets to skip", () => {
+    const result = buildEmailBisonLeadPayload(fullRecord, [], "patch", {
+      ...fullMapping,
+      firstName: "skip",
+      phone: "skip",
+      website: "skip",
+    });
+    expect(result.firstName).toBeNull();
+    expect(result.phone).toBeNull();
+    expect(result.website).toBeNull();
+    expect(result.lastName).toBe("Doe");
+  });
 });
 
 describe("resolveCustomVariables", () => {

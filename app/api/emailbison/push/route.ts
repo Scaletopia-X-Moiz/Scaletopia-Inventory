@@ -12,7 +12,7 @@ import {
   type RunEmailBisonPushDeps,
   type RunEmailBisonCampaignPushDeps,
 } from "@/lib/emailbison/push-to-emailbison";
-import type { EmailBisonCustomVariableEntry } from "@/lib/emailbison/types";
+import type { EmailBisonCustomVariableEntry, EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
 import { getUser } from "@/lib/auth/dal";
 import { logActivity } from "@/lib/activity/log";
 
@@ -65,6 +65,36 @@ function parseCustomVariables(value: unknown): EmailBisonCustomVariableEntry[] {
   return value.filter(isCustomVariableEntry);
 }
 
+function isIncludeSkip(value: unknown): value is "include" | "skip" {
+  return value === "include" || value === "skip";
+}
+
+function isCompanyNameChoice(value: unknown): value is EmailBisonStandardFieldMapping["companyName"] {
+  return value === "brand_name" || value === "company_name" || value === "skip";
+}
+
+function isStandardFieldMapping(value: unknown): value is EmailBisonStandardFieldMapping {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    isCompanyNameChoice(v.companyName) &&
+    isIncludeSkip(v.firstName) &&
+    isIncludeSkip(v.lastName) &&
+    isIncludeSkip(v.email) &&
+    isIncludeSkip(v.phone) &&
+    isIncludeSkip(v.title) &&
+    isIncludeSkip(v.website)
+  );
+}
+
+/** Parses the standard-field mapping (issue #110, types from #108) off the
+ * request body. An absent or malformed value is dropped to `undefined` so
+ * buildEmailBisonLeadPayload falls back to today's default behavior, rather
+ * than rejecting the request. */
+function parseStandardFieldMapping(value: unknown): EmailBisonStandardFieldMapping | undefined {
+  return isStandardFieldMapping(value) ? value : undefined;
+}
+
 export async function POST(request: NextRequest) {
   const user = await getUser();
   if (!user) {
@@ -97,6 +127,7 @@ export async function POST(request: NextRequest) {
     ? body.existingLeadBehavior
     : undefined;
   const customVariables = parseCustomVariables(body.customVariables);
+  const standardFieldMapping = parseStandardFieldMapping(body.standardFieldMapping);
 
   const client = await getClientById(clientId);
   if (!client) {
@@ -121,7 +152,12 @@ export async function POST(request: NextRequest) {
       try {
         let result;
         if (action === "workspace") {
-          const deps: RunEmailBisonPushDeps = { existingLeadBehavior, customVariables, onProgress };
+          const deps: RunEmailBisonPushDeps = {
+            existingLeadBehavior,
+            customVariables,
+            standardFieldMapping,
+            onProgress,
+          };
           result =
             entity === "people"
               ? await runPeopleAddToEmailBison(personFilters!, client, user, deps)
@@ -130,6 +166,7 @@ export async function POST(request: NextRequest) {
           const deps: RunEmailBisonCampaignPushDeps = {
             existingLeadBehavior,
             customVariables,
+            standardFieldMapping,
             parallel: typeof parallel === "boolean" ? parallel : undefined,
             onProgress,
           };

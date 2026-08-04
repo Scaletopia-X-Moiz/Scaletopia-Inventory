@@ -9,10 +9,11 @@ import { runSse } from "@/components/shared/use-sse-run";
 import { fetchActiveClients } from "@/lib/data/active-clients-client";
 import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
 import type { EmailBisonPushResult, EmailBisonPushProgress } from "@/lib/emailbison/push-to-emailbison";
-import type { EmailBisonCustomVariableEntry } from "@/lib/emailbison/types";
+import type { EmailBisonCustomVariableEntry, EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
 import type { EmailBisonCustomVariable } from "@/lib/emailbison/client";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
 import type { EnrichmentField } from "@/lib/data/enrichment-fields";
+import { StandardFieldMappingTable } from "@/components/emailbison/standard-field-mapping-table";
 
 interface ActiveClient {
   id: string;
@@ -86,6 +87,14 @@ export function PushToEmailBisonButton({
   const [existingLeadBehavior, setExistingLeadBehavior] = useState<"patch" | "put">("patch");
   const [rows, setRows] = useState<CustomVariableRow[]>([]);
 
+  // Pre-populated via resolveDefaultFieldMapping (ticket #108) on step entry
+  // — null until that fetch resolves, at which point the standard-field
+  // table (above the custom-variable editor) renders and becomes overridable.
+  const [standardFieldMapping, setStandardFieldMapping] = useState<EmailBisonStandardFieldMapping | null>(
+    null
+  );
+  const [standardFieldMappingError, setStandardFieldMappingError] = useState<string | null>(null);
+
   const [referenceVariables, setReferenceVariables] = useState<EmailBisonCustomVariable[] | null>(null);
   const [referenceError, setReferenceError] = useState<string | null>(null);
 
@@ -117,6 +126,8 @@ export function PushToEmailBisonButton({
     setSelectedClientId(null);
     setExistingLeadBehavior("patch");
     setRows([]);
+    setStandardFieldMapping(null);
+    setStandardFieldMappingError(null);
     setReferenceVariables(null);
     setReferenceError(null);
     setEnrichmentFields([]);
@@ -153,9 +164,20 @@ export function PushToEmailBisonButton({
     if (!selectedClient || !selectedClient.hasEmailBisonCredentials) return;
 
     setStep("options");
+    setStandardFieldMapping(null);
+    setStandardFieldMappingError(null);
     setReferenceVariables(null);
     setReferenceError(null);
     setEnrichmentFields([]);
+
+    try {
+      const res = await fetch(`/api/emailbison/default-field-mapping?entity=companies&${paramsStr}`);
+      if (!res.ok) throw new Error("Failed to load default field mapping");
+      const data = (await res.json()) as { standardFields: EmailBisonStandardFieldMapping };
+      setStandardFieldMapping(data.standardFields);
+    } catch (error) {
+      setStandardFieldMappingError((error as Error).message || "Failed to load default field mapping.");
+    }
 
     try {
       const res = await fetch(`/api/clients/${selectedClient.id}/emailbison-custom-variables`);
@@ -234,6 +256,7 @@ export function PushToEmailBisonButton({
             clientId: selectedClient.id,
             existingLeadBehavior,
             customVariables: customVariablesForPush(),
+            standardFieldMapping: standardFieldMapping ?? undefined,
           }),
         },
         (event) => {
@@ -436,6 +459,17 @@ export function PushToEmailBisonButton({
                     </label>
                   </div>
                 </div>
+
+                {standardFieldMappingError ? (
+                  <p className="text-xs text-danger">{standardFieldMappingError}</p>
+                ) : standardFieldMapping === null ? (
+                  <p className="flex items-center gap-2 text-xs text-ink-soft">
+                    <Loader2 size={12} className="animate-spin" />
+                    Loading default field mapping…
+                  </p>
+                ) : (
+                  <StandardFieldMappingTable value={standardFieldMapping} onChange={setStandardFieldMapping} />
+                )}
 
                 <div>
                   <div className="flex items-center justify-between">

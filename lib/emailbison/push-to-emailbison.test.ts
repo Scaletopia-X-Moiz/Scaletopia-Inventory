@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import {
   runPeopleAddToEmailBison,
@@ -6,8 +6,11 @@ import {
   runPeopleAddToCampaign,
   runCompaniesAddToCampaign,
 } from "@/lib/emailbison/push-to-emailbison";
+import { clearEmailBisonCustomVariablesCache, getEmailBisonCustomVariables } from "@/lib/emailbison/custom-variables";
 import { includeOnly } from "@/lib/data/include-exclude";
+import { resolveDefaultFieldMapping } from "@/lib/push/resolve-default-field-mapping";
 import type { ClientRow } from "@/lib/data/clients";
+import type { EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
 
 const TEST_PREFIX = "__test-emailbison-push__";
 const WORKSPACE = "https://dedi.emailbison.test";
@@ -66,6 +69,14 @@ afterAll(async () => {
   if (otherActor) await supabaseAdmin.auth.admin.deleteUser(otherActor.id);
 });
 
+// ensureCustomVariablesExist patches newly-created variables into
+// custom-variables.ts's module-level cache (keyed by workspace id, shared
+// across every test in this file via the WORKSPACE constant) — clear it
+// between tests so one test's mocked variables can't leak into another's.
+afterEach(() => {
+  clearEmailBisonCustomVariablesCache();
+});
+
 let counter = 0;
 function unique(label: string): string {
   counter++;
@@ -96,13 +107,14 @@ async function seedPeople(niche: string, rows: SeedPerson[]) {
   if (error) throw error;
 }
 
-async function insertCompany(niche: string, slug: string): Promise<string> {
+async function insertCompany(niche: string, slug: string, overrides: Record<string, unknown> = {}): Promise<string> {
   const { data, error } = await supabaseAdmin
     .from("companies")
     .insert({
       domain: testDomain(slug),
       company_name: `Bison Test Co ${slug}`,
       niche,
+      ...overrides,
     })
     .select("id")
     .single();
@@ -180,6 +192,152 @@ function okFetch(): typeof fetch {
     throw new Error(`unexpected fetch to ${u}`);
   }) as unknown as typeof fetch;
 }
+
+/** okFetch() plus capturing every lead upserted in `capturedLeads`, keyed by
+ * email — lets a test inspect exactly what buildEmailBisonLeadPayload sent
+ * for each candidate, e.g. to assert a mapping's skip/include choices. */
+function okFetchCapturingLeads(capturedLeads: Record<string, unknown>[]): typeof fetch {
+  return vi.fn().mockImplementation(async (url: unknown, init?: RequestInit) => {
+    const u = String(url);
+    if (u.endsWith("/api/custom-variables") && init?.method === "GET") {
+      return { ok: true, status: 200, json: async () => ({ data: [] }) } as unknown as Response;
+    }
+    if (u.endsWith("/api/leads/create-or-update/multiple")) {
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      const leads = (body.leads as Record<string, unknown>[]).map((lead) => {
+        capturedLeads.push(lead);
+        leadCounter++;
+        return { id: leadCounter, email: lead.email };
+      });
+      return { ok: true, status: 200, json: async () => ({ data: leads }) } as unknown as Response;
+    }
+    throw new Error(`unexpected fetch to ${u}`);
+  }) as unknown as typeof fetch;
+}
+
+describe("standardFieldMapping (issue #110)", () => {
+  it("reproduces today's behavior when the mapping is omitted", async () => {
+    const niche = unique("mapping-omitted");
+    const companyId = await insertCompany(niche, "brand-omitted", { brand_name: "Acme" });
+    await seedPeople(niche, [{ slug: "a", companyId }]);
+    const client = await insertClient();
+    const capturedLeads: Record<string, unknown>[] = [];
+
+    await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, {
+      fetchImpl: okFetchCapturingLeads(capturedLeads),
+    });
+
+    expect(capturedLeads).toHaveLength(1);
+    expect(capturedLeads[0].company_name).toBe("Acme");
+    expect(capturedLeads[0].first_name).toBeTruthy();
+  });
+
+  it("sends the raw company_name when the mapping chooses company_name over brand_name", async () => {
+    const niche = unique("mapping-company-name");
+    const companyId = await insertCompany(niche, "brand-chosen", { brand_name: "Acme" });
+    await seedPeople(niche, [{ slug: "a", companyId }]);
+    const client = await insertClient();
+    const capturedLeads: Record<string, unknown>[] = [];
+    const mapping: EmailBisonStandardFieldMapping = {
+      companyName: "company_name",
+      firstName: "include",
+      lastName: "include",
+      email: "include",
+      phone: "include",
+      title: "include",
+      website: "include",
+    };
+
+    await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, {
+      fetchImpl: okFetchCapturingLeads(capturedLeads),
+      standardFieldMapping: mapping,
+    });
+
+    expect(capturedLeads).toHaveLength(1);
+    expect(capturedLeads[0].company_name).toBe("Acme Co");
+  });
+
+  it("omits fields the mapping sets to skip", async () => {
+    const niche = unique("mapping-skip");
+    await seedPeople(niche, [{ slug: "a" }]);
+    const client = await insertClient();
+    const capturedLeads: Record<string, unknown>[] = [];
+    const mapping: EmailBisonStandardFieldMapping = {
+      companyName: "skip",
+      firstName: "include",
+      lastName: "include",
+      email: "include",
+      phone: "skip",
+      title: "skip",
+      website: "skip",
+    };
+
+    await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, {
+      fetchImpl: okFetchCapturingLeads(capturedLeads),
+      standardFieldMapping: mapping,
+    });
+
+    expect(capturedLeads).toHaveLength(1);
+    expect(capturedLeads[0].company_name).toBeNull();
+    expect(capturedLeads[0].phone).toBeNull();
+    expect(capturedLeads[0].title).toBeNull();
+    expect(capturedLeads[0].website).toBeNull();
+    expect(capturedLeads[0].first_name).toBeTruthy();
+  });
+
+  it("forwards the mapping through the campaign orchestrator too", async () => {
+    const niche = unique("mapping-campaign");
+    await seedPeople(niche, [{ slug: "a" }]);
+    const client = await insertClient();
+    const capturedLeads: Record<string, unknown>[] = [];
+    const base = okFetchCapturingLeads(capturedLeads);
+    const fetchImpl = vi.fn().mockImplementation(async (url: unknown, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith(`/api/campaigns/${CAMPAIGN_ID}/leads/attach-leads`)) {
+        return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+      }
+      return (base as unknown as (u: unknown, i?: RequestInit) => Promise<Response>)(url, init);
+    }) as unknown as typeof fetch;
+    const mapping: EmailBisonStandardFieldMapping = {
+      companyName: "skip",
+      firstName: "include",
+      lastName: "include",
+      email: "include",
+      phone: "include",
+      title: "include",
+      website: "include",
+    };
+
+    await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, testActor, {
+      fetchImpl,
+      standardFieldMapping: mapping,
+    });
+
+    expect(capturedLeads).toHaveLength(1);
+    expect(capturedLeads[0].company_name).toBeNull();
+  });
+
+  it("uses resolveDefaultFieldMapping's fallback default (from #108) when no brand_name is present in the pushed set", async () => {
+    const niche = unique("mapping-default-fallback");
+    await seedPeople(niche, [{ slug: "a" }]);
+    const client = await insertClient();
+    const capturedLeads: Record<string, unknown>[] = [];
+
+    const { standardFields } = resolveDefaultFieldMapping({
+      platform: "emailbison",
+      records: [{ companyName: "Acme Co", brandName: null }],
+    });
+    expect(standardFields.companyName).toBe("company_name");
+
+    await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, {
+      fetchImpl: okFetchCapturingLeads(capturedLeads),
+      standardFieldMapping: standardFields,
+    });
+
+    expect(capturedLeads).toHaveLength(1);
+    expect(capturedLeads[0].company_name).toBe("Acme Co");
+  });
+});
 
 describe("runPeopleAddToEmailBison", () => {
   it("pushes every matched person and logs each to platform_pushes", async () => {
@@ -337,6 +495,15 @@ describe("runPeopleAddToEmailBison", () => {
     expect(result.pushed).toBe(3);
     expect(listCalls).toHaveLength(1);
     expect(createCalls).toEqual(["new_var"]);
+
+    // The newly-created variable must be visible to the UI's "existing
+    // workspace variables" reference panel immediately, without a refetch —
+    // ensureCustomVariablesExist patches it into the shared cache in place.
+    const cached = await getEmailBisonCustomVariables(
+      { apiKey: client.emailbisonApiKey!, workspaceId: client.emailbisonWorkspaceId! },
+      { fetchImpl: vi.fn() }
+    );
+    expect(cached.map((v) => v.name)).toContain("new_var");
   });
 
   it("returns an all-zero result for an empty filter match", async () => {
