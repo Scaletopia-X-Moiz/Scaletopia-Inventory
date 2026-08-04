@@ -17,6 +17,11 @@ export interface EmailBisonPushRecord {
   email: string | null;
   phone: string | null;
   companyName: string | null;
+  /** The linked company's cleaned name (companies.brand_name), joined in
+   * alongside the raw companyName above so the push payload can prefer it.
+   * null when the company has no linked row or hasn't been cleaned yet, in
+   * which case the raw companyName is used instead. */
+  brandName: string | null;
   title: string | null;
   website: string | null;
 }

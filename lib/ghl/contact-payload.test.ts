@@ -7,6 +7,7 @@ const fullRecord = {
   email: "jane@example.com",
   phone: "+15551234567",
   companyName: "Acme Inc",
+  brandName: null,
   city: "Austin",
   country: "US",
 };
@@ -35,6 +36,7 @@ describe("buildGhlContactPayload", () => {
       email: null,
       phone: null,
       companyName: null,
+      brandName: null,
       city: null,
       country: null,
     };
@@ -49,6 +51,19 @@ describe("buildGhlContactPayload", () => {
       tags: [],
       customFields: [],
     });
+  });
+
+  it("prefers the cleaned brandName over the raw companyName", () => {
+    const result = buildGhlContactPayload(
+      { ...fullRecord, companyName: "ACME INC dba", brandName: "Acme" },
+      []
+    );
+    expect(result.companyName).toBe("Acme");
+  });
+
+  it("falls back to the raw companyName when brandName is null", () => {
+    const result = buildGhlContactPayload({ ...fullRecord, brandName: null }, []);
+    expect(result.companyName).toBe("Acme Inc");
   });
 
   it("supports attaching more than one tag", () => {

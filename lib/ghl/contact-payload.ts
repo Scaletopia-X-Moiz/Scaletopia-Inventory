@@ -9,7 +9,7 @@ import type { GhlContactPayloadShape, GhlFieldMapping, GhlPushRecord } from "@/l
 export function buildGhlContactPayload(
   record: Pick<
     GhlPushRecord,
-    "firstName" | "lastName" | "email" | "phone" | "companyName" | "city" | "country"
+    "firstName" | "lastName" | "email" | "phone" | "companyName" | "brandName" | "city" | "country"
   >,
   tags: string[],
   customFields: { id: string; value: string }[] = []
@@ -19,7 +19,9 @@ export function buildGhlContactPayload(
     lastName: record.lastName,
     email: record.email,
     phone: record.phone,
-    companyName: record.companyName,
+    // Prefer the cleaned company name (companies.brand_name); fall back to
+    // the raw denormalized company_name for any company not yet cleaned.
+    companyName: record.brandName || record.companyName,
     city: record.city,
     country: record.country,
     tags,

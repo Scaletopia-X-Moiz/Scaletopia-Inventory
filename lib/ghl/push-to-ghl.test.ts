@@ -147,6 +147,7 @@ function candidate(phoneType: string | null): GhlPushCandidate {
       email: null,
       phone: null,
       companyName: null,
+      brandName: null,
       city: null,
       country: null,
       niche: null,

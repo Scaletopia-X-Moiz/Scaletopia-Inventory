@@ -7,6 +7,7 @@ const fullRecord = {
   email: "jane@example.com",
   phone: "+15551234567",
   companyName: "Acme Inc",
+  brandName: null,
   title: "VP Sales",
   website: "acme.com",
 };
@@ -33,6 +34,7 @@ describe("buildEmailBisonLeadPayload", () => {
       email: null,
       phone: null,
       companyName: null,
+      brandName: null,
       title: null,
       website: null,
     };
@@ -77,6 +79,20 @@ describe("buildEmailBisonLeadPayload", () => {
     const result = buildEmailBisonLeadPayload(fullRecord, []);
     expect(result.customVariables).toEqual([]);
   });
+
+  it("prefers the cleaned brandName over the raw companyName", () => {
+    const result = buildEmailBisonLeadPayload({
+      ...fullRecord,
+      companyName: "ACME INC dba",
+      brandName: "Acme",
+    });
+    expect(result.companyName).toBe("Acme");
+  });
+
+  it("falls back to the raw companyName when brandName is null", () => {
+    const result = buildEmailBisonLeadPayload({ ...fullRecord, brandName: null });
+    expect(result.companyName).toBe("Acme Inc");
+  });
 });
 
 describe("resolveCustomVariables", () => {
@@ -92,6 +108,12 @@ describe("resolveCustomVariables", () => {
     expect(resolveCustomVariables(entries, fullRecord, null)).toEqual([
       { name: "company", value: "Acme Inc" },
     ]);
+  });
+
+  it("prefers the cleaned brandName for a companyName-bound entry", () => {
+    const entries = [{ name: "company", value: "", columnKey: "companyName" }];
+    const record = { ...fullRecord, companyName: "ACME INC dba", brandName: "Acme" };
+    expect(resolveCustomVariables(entries, record, null)).toEqual([{ name: "company", value: "Acme" }]);
   });
 
   it("resolves a column-bound entry from custom_data (virtual column)", () => {

@@ -60,7 +60,14 @@ export function resolveCustomVariables(
     }
 
     const recordField = KNOWN_RECORD_FIELDS[entry.columnKey];
-    const raw = recordField ? record[recordField] : (customData?.[entry.columnKey] ?? null);
+    // companyName gets the same clean-name preference as buildEmailBisonLeadPayload,
+    // so a custom variable bound to "Company name" isn't left sending the raw value.
+    const raw =
+      entry.columnKey === "companyName"
+        ? record.brandName || record.companyName
+        : recordField
+          ? record[recordField]
+          : (customData?.[entry.columnKey] ?? null);
     const value = stringifyCustomValue(raw);
     if (value === null) continue;
     resolved.push({ name: entry.name, value });
@@ -83,7 +90,9 @@ export function buildEmailBisonLeadPayload(
     email: record.email,
     firstName: record.firstName,
     lastName: record.lastName,
-    companyName: record.companyName,
+    // Prefer the cleaned company name (companies.brand_name); fall back to
+    // the raw denormalized company_name for any company not yet cleaned.
+    companyName: record.brandName || record.companyName,
     title: record.title,
     phone: record.phone,
     website: record.website,

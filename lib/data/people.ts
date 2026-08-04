@@ -460,7 +460,18 @@ interface FullPersonRow extends RawPersonRow {
   custom_data: Record<string, unknown> | null;
   employee_count: number | null;
   niche_tokens: string[] | null;
+  /** The linked company's cleaned name (lib/clean-names/clean-names.ts),
+   * joined in alongside the person's own denormalized (raw) company_name so
+   * push builders can prefer it. null when the company has no linked row or
+   * hasn't been cleaned yet. */
+  companies: { brand_name: string | null } | null;
 }
+
+/** Select string for the full `*` row fetches below — joins in the linked
+ * company's brand_name (ticket: GHL/EmailBison push should prefer the
+ * cleaned company name over the raw denormalized one) without a second
+ * round trip. */
+const FULL_ROW_COLUMNS = "*, companies(brand_name)";
 
 export interface PersonExportRow {
   firstName: string | null;
@@ -512,7 +523,7 @@ async function fetchPeopleByIds(ids: string[]): Promise<Map<string, FullPersonRo
   for (let i = 0; i < chunks.length; i += FULL_ROW_FETCH_CONCURRENCY) {
     const window = chunks.slice(i, i + FULL_ROW_FETCH_CONCURRENCY);
     const results = await Promise.all(
-      window.map((chunk) => supabaseAdmin.from("people").select("*").in("id", chunk))
+      window.map((chunk) => supabaseAdmin.from("people").select(FULL_ROW_COLUMNS).in("id", chunk))
     );
     for (const { data, error } of results) {
       if (error) throw error;
@@ -647,6 +658,7 @@ function toGhlPushRecord(row: FullPersonRow): GhlPushRecord {
     email: row.email,
     phone: row.phone,
     companyName: row.company_name,
+    brandName: row.companies?.brand_name ?? null,
     city: row.city,
     country: row.country,
     niche: row.niche_tokens?.[0] ?? null,
@@ -696,6 +708,7 @@ function toEmailBisonPushRecord(row: FullPersonRow): EmailBisonPushRecord {
     email: row.email,
     phone: row.phone,
     companyName: row.company_name,
+    brandName: row.companies?.brand_name ?? null,
     title: row.job_title,
     website: row.domain,
   };
@@ -739,7 +752,7 @@ async function fetchFullPeopleByCompanyIds(companyIds: string[]): Promise<FullPe
     const window = chunks.slice(i, i + FULL_ROW_FETCH_CONCURRENCY);
     const results = await Promise.all(
       window.map((chunk) =>
-        fetchAllRows<FullPersonRow>("people", "*", (query) => query.in("company_id", chunk))
+        fetchAllRows<FullPersonRow>("people", FULL_ROW_COLUMNS, (query) => query.in("company_id", chunk))
       )
     );
     rows.push(...results.flat());
