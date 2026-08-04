@@ -10,8 +10,31 @@ import { fetchActiveClients } from "@/lib/data/active-clients-client";
 import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
 import type { GhlPushResult } from "@/lib/ghl/push-to-ghl";
 import type { GhlCustomField } from "@/lib/ghl/custom-fields";
-import type { GhlFieldMapping } from "@/lib/ghl/types";
+import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
+
+/** Reset baseline for standardFields between pushes — matches
+ * resolveDefaultFieldMapping's (ticket #108) "no brand_name in the pushed
+ * set" default so state is never in an undefined shape between the picker
+ * step and the mapping step's fetch resolving. */
+const FALLBACK_STANDARD_FIELDS: GhlStandardFieldMapping = {
+  companyName: "company_name",
+  firstName: "include",
+  lastName: "include",
+  email: "include",
+  phone: "include",
+  city: "include",
+  country: "include",
+};
+
+const STANDARD_FIELD_ROWS: { key: keyof Omit<GhlStandardFieldMapping, "companyName">; label: string }[] = [
+  { key: "firstName", label: "First name" },
+  { key: "lastName", label: "Last name" },
+  { key: "email", label: "Email" },
+  { key: "phone", label: "Phone" },
+  { key: "city", label: "City" },
+  { key: "country", label: "Country" },
+];
 
 interface ActiveClient {
   id: string;
@@ -63,6 +86,7 @@ export function PushToGhlButton({
   const [customFieldsError, setCustomFieldsError] = useState<string | null>(null);
   // ghlFieldId -> chosen virtualColumnKey ("" means "no data source / leave empty").
   const [mapping, setMapping] = useState<Record<string, string>>({});
+  const [standardFields, setStandardFields] = useState<GhlStandardFieldMapping>(FALLBACK_STANDARD_FIELDS);
 
   const [preview, setPreview] = useState<PreviewCounts | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -90,6 +114,7 @@ export function PushToGhlButton({
     setCustomFields(null);
     setCustomFieldsError(null);
     setMapping({});
+    setStandardFields(FALLBACK_STANDARD_FIELDS);
     setPreview(null);
     setPreviewError(null);
     setCustomTagSuffix("");
@@ -143,19 +168,39 @@ export function PushToGhlButton({
     setCustomFields(null);
     setCustomFieldsError(null);
     setMapping({});
+    setStandardFields(FALLBACK_STANDARD_FIELDS);
 
     try {
-      const res = await fetch(`/api/clients/${selectedClient.id}/ghl-custom-fields`);
-      if (!res.ok) throw new Error("Failed to load GHL custom fields");
-      const data = (await res.json()) as { fields: GhlCustomField[] };
-      setCustomFields(data.fields);
+      const res = await fetch(`/api/people/push-to-ghl/default-mapping?${paramsStr}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientId: selectedClient.id, virtualColumns }),
+      });
+      if (!res.ok) throw new Error("Failed to load field mapping");
+      const data = (await res.json()) as {
+        customFields: GhlCustomField[];
+        standardFields: GhlStandardFieldMapping;
+        customFieldMapping: GhlFieldMapping[];
+      };
+      setCustomFields(data.customFields);
+      setStandardFields(data.standardFields);
+      setMapping(
+        Object.fromEntries(data.customFieldMapping.map((m) => [m.ghlFieldId, m.virtualColumnKey]))
+      );
     } catch (error) {
-      setCustomFieldsError((error as Error).message || "Failed to load GHL custom fields.");
+      setCustomFieldsError((error as Error).message || "Failed to load field mapping.");
     }
   }
 
   function handleMappingChange(ghlFieldId: string, virtualColumnKey: string) {
     setMapping((prev) => ({ ...prev, [ghlFieldId]: virtualColumnKey }));
+  }
+
+  function handleStandardFieldChange<K extends keyof GhlStandardFieldMapping>(
+    key: K,
+    value: GhlStandardFieldMapping[K]
+  ) {
+    setStandardFields((prev) => ({ ...prev, [key]: value }));
   }
 
   async function handleConfirm() {
@@ -178,6 +223,7 @@ export function PushToGhlButton({
           body: JSON.stringify({
             clientId: selectedClient.id,
             fieldMapping,
+            standardFieldMapping: standardFields,
             customTagSuffix: customTagSuffix.trim() || undefined,
           }),
         },
@@ -321,44 +367,103 @@ export function PushToGhlButton({
             </div>
           </AlertDialog.Content>
         ) : step === "mapping" ? (
-          <AlertDialog.Content className="fixed top-[24%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
+          <AlertDialog.Content className="fixed top-[20%] left-1/2 z-50 w-full max-w-lg -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
             <AlertDialog.Title className="text-sm font-semibold text-ink">
-              Map GHL fields
+              Map fields for GHL
             </AlertDialog.Title>
             <AlertDialog.Description className="mt-2 text-sm text-ink-soft">
-              Choose which enrichment column feeds each GHL custom field. Fields with no matching
-              column are left empty and aren&apos;t sent with the push.
+              Review where each field is sourced from before pushing — defaults are pre-selected,
+              override any row or skip a field to leave it out of this push.
             </AlertDialog.Description>
 
-            <div className="mt-4 flex max-h-64 flex-col gap-2 overflow-y-auto">
-              {customFieldsError ? (
-                <p className="text-xs text-danger">{customFieldsError}</p>
-              ) : customFields === null ? (
-                <p className="flex items-center gap-2 text-xs text-ink-soft">
-                  <Loader2 size={12} className="animate-spin" />
-                  Loading GHL custom fields…
-                </p>
-              ) : customFields.length === 0 ? (
-                <p className="text-xs text-ink-soft">No custom fields configured in GHL.</p>
-              ) : (
-                customFields.map((field) => (
-                  <label key={field.id} className="flex items-center justify-between gap-3 text-xs">
-                    <span className="font-medium text-ink">{field.name}</span>
-                    <select
-                      value={mapping[field.id] ?? ""}
-                      onChange={(e) => handleMappingChange(field.id, e.target.value)}
-                      className="rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
-                    >
-                      <option value="">No data</option>
-                      {virtualColumns.map((col) => (
-                        <option key={col.key} value={col.key}>
-                          {col.key}
-                        </option>
+            <div className="mt-4 max-h-80 overflow-y-auto rounded-lg border border-rule">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-rule bg-hover">
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-ink-soft">Field</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-ink-soft">Source</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-rule">
+                  {customFieldsError ? (
+                    <tr>
+                      <td colSpan={2} className="px-4 py-2.5 text-xs text-danger">
+                        {customFieldsError}
+                      </td>
+                    </tr>
+                  ) : customFields === null ? (
+                    <tr>
+                      <td colSpan={2} className="px-4 py-2.5">
+                        <span className="flex items-center gap-2 text-xs text-ink-soft">
+                          <Loader2 size={12} className="animate-spin" />
+                          Loading field mapping…
+                        </span>
+                      </td>
+                    </tr>
+                  ) : (
+                    <>
+                      <tr className="bg-paper">
+                        <td className="px-4 py-2.5 text-xs font-medium text-ink">Company name</td>
+                        <td className="px-4 py-2.5">
+                          <select
+                            value={standardFields.companyName}
+                            onChange={(e) =>
+                              handleStandardFieldChange(
+                                "companyName",
+                                e.target.value as GhlStandardFieldMapping["companyName"]
+                              )
+                            }
+                            className="w-full rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                          >
+                            <option value="brand_name">Cleaned brand name</option>
+                            <option value="company_name">Raw company name</option>
+                            <option value="skip">Skip</option>
+                          </select>
+                        </td>
+                      </tr>
+                      {STANDARD_FIELD_ROWS.map((row) => (
+                        <tr key={row.key} className="bg-paper">
+                          <td className="px-4 py-2.5 text-xs font-medium text-ink">{row.label}</td>
+                          <td className="px-4 py-2.5">
+                            <select
+                              value={standardFields[row.key]}
+                              onChange={(e) =>
+                                handleStandardFieldChange(
+                                  row.key,
+                                  e.target.value as "include" | "skip"
+                                )
+                              }
+                              className="w-full rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                            >
+                              <option value="include">Include</option>
+                              <option value="skip">Skip</option>
+                            </select>
+                          </td>
+                        </tr>
                       ))}
-                    </select>
-                  </label>
-                ))
-              )}
+                      {customFields.map((field) => (
+                        <tr key={field.id} className="bg-paper">
+                          <td className="px-4 py-2.5 text-xs font-medium text-ink">{field.name}</td>
+                          <td className="px-4 py-2.5">
+                            <select
+                              value={mapping[field.id] ?? ""}
+                              onChange={(e) => handleMappingChange(field.id, e.target.value)}
+                              className="w-full rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                            >
+                              <option value="">No data</option>
+                              {virtualColumns.map((col) => (
+                                <option key={col.key} value={col.key}>
+                                  {col.key}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                        </tr>
+                      ))}
+                    </>
+                  )}
+                </tbody>
+              </table>
             </div>
 
             <div className="mt-5 flex justify-end gap-2">

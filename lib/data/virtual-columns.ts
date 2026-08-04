@@ -218,7 +218,7 @@ function isValidVirtualColumnFilter(value: unknown): value is VirtualColumnFilte
   return isValidFilterValue(f.type as VirtualColumnType, meta, f.value);
 }
 
-function isValidActiveVirtualColumn(value: unknown): value is ActiveVirtualColumn {
+export function isValidActiveVirtualColumn(value: unknown): value is ActiveVirtualColumn {
   if (typeof value !== "object" || value === null) return false;
   const c = value as Record<string, unknown>;
   return isNonEmptyKey(c.key) && typeof c.type === "string" && SUPPORTED_TYPES.includes(c.type as VirtualColumnType);
