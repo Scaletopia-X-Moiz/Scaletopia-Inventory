@@ -72,7 +72,10 @@ function newCreateCampaignForm(): CreateCampaignForm {
     days: { ...DEFAULT_DAYS },
     startTime: "09:00",
     endTime: "17:00",
-    timezone: "UTC",
+    // "UTC"/"Etc/UTC"/"GMT" are all rejected 422 by EmailBison's live API
+    // ("The selected timezone is invalid.") — default to a real IANA zone
+    // confirmed working live (issue #103).
+    timezone: "America/New_York",
     steps: [newSequenceStep()],
   };
 }
@@ -286,10 +289,14 @@ export function PushToEmailBisonCampaignButton({
             endTime: createForm.endTime,
             timezone: createForm.timezone,
           },
-          sequenceSteps: createForm.steps.map((step) => ({
+          sequenceSteps: createForm.steps.map((step, index) => ({
             emailSubject: step.emailSubject,
             emailBody: step.emailBody,
-            waitInDays: Number(step.waitInDays) || 0,
+            // EmailBison rejects wait_in_days < 1 for every step, including
+            // step 1 — which has no wait-days UI (conceptually meaningless
+            // for the first step). Force it to 1 regardless of form state
+            // (issue #104).
+            waitInDays: index === 0 ? 1 : Number(step.waitInDays) || 0,
             threadReply: false,
           })),
           launch,
@@ -577,7 +584,6 @@ export function PushToEmailBisonCampaignButton({
                             onChange={(e) => setCreateForm((f) => ({ ...f, timezone: e.target.value }))}
                             className="rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
                           >
-                            <option value="UTC">UTC</option>
                             <option value="America/New_York">America/New_York</option>
                             <option value="America/Chicago">America/Chicago</option>
                             <option value="America/Denver">America/Denver</option>
