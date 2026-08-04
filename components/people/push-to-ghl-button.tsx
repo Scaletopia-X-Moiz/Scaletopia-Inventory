@@ -41,10 +41,10 @@ export function PushToGhlButton({
 }: {
   paramsStr: string;
   total: number;
-  /** Active virtual/enrichment columns on the current People view. When
-   * non-empty, a mapping step (ticket #51) is inserted between picking a
-   * client and confirming the push, letting each column be mapped to a GHL
-   * custom field or skipped. */
+  /** Active virtual/enrichment columns on the current People view. Offered
+   * as data sources in the mapping step (ticket #51) shown between picking a
+   * client and confirming the push, where each GHL custom field can be
+   * mapped to one of these columns or left empty. */
   virtualColumns?: ActiveVirtualColumn[];
   /** Fired once the push stream reaches its `done` event — mirrors
    * PushToClayButton's onDone, used by the caller to offer removing any
@@ -61,7 +61,7 @@ export function PushToGhlButton({
 
   const [customFields, setCustomFields] = useState<GhlCustomField[] | null>(null);
   const [customFieldsError, setCustomFieldsError] = useState<string | null>(null);
-  // virtualColumnKey -> chosen GHL field id ("" means "skip this column").
+  // ghlFieldId -> chosen virtualColumnKey ("" means "no data source / leave empty").
   const [mapping, setMapping] = useState<Record<string, string>>({});
 
   const [preview, setPreview] = useState<PreviewCounts | null>(null);
@@ -136,11 +136,6 @@ export function PushToGhlButton({
   async function handleContinueFromPicker() {
     if (!selectedClient || !selectedClient.hasGhlCredentials) return;
 
-    if (virtualColumns.length === 0) {
-      await loadPreview();
-      return;
-    }
-
     setStep("mapping");
     setCustomFields(null);
     setCustomFieldsError(null);
@@ -156,8 +151,8 @@ export function PushToGhlButton({
     }
   }
 
-  function handleMappingChange(virtualColumnKey: string, ghlFieldId: string) {
-    setMapping((prev) => ({ ...prev, [virtualColumnKey]: ghlFieldId }));
+  function handleMappingChange(ghlFieldId: string, virtualColumnKey: string) {
+    setMapping((prev) => ({ ...prev, [ghlFieldId]: virtualColumnKey }));
   }
 
   async function handleConfirm() {
@@ -168,8 +163,8 @@ export function PushToGhlButton({
     let reachedDone = false;
 
     const fieldMapping: GhlFieldMapping[] = Object.entries(mapping)
-      .filter(([, ghlFieldId]) => ghlFieldId !== "")
-      .map(([virtualColumnKey, ghlFieldId]) => ({ virtualColumnKey, ghlFieldId }));
+      .filter(([, virtualColumnKey]) => virtualColumnKey !== "")
+      .map(([ghlFieldId, virtualColumnKey]) => ({ virtualColumnKey, ghlFieldId }));
 
     try {
       await runSse<SseEvent>(
@@ -321,11 +316,11 @@ export function PushToGhlButton({
         ) : step === "mapping" ? (
           <AlertDialog.Content className="fixed top-[24%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
             <AlertDialog.Title className="text-sm font-semibold text-ink">
-              Map enrichment columns to GHL fields
+              Map GHL fields
             </AlertDialog.Title>
             <AlertDialog.Description className="mt-2 text-sm text-ink-soft">
-              Choose a GHL custom field for each active enrichment column, or skip it. Skipped
-              columns aren&apos;t sent with the push.
+              Choose which enrichment column feeds each GHL custom field. Fields with no matching
+              column are left empty and aren&apos;t sent with the push.
             </AlertDialog.Description>
 
             <div className="mt-4 flex max-h-64 flex-col gap-2 overflow-y-auto">
@@ -336,19 +331,21 @@ export function PushToGhlButton({
                   <Loader2 size={12} className="animate-spin" />
                   Loading GHL custom fields…
                 </p>
+              ) : customFields.length === 0 ? (
+                <p className="text-xs text-ink-soft">No custom fields configured in GHL.</p>
               ) : (
-                virtualColumns.map((col) => (
-                  <label key={col.key} className="flex items-center justify-between gap-3 text-xs">
-                    <span className="font-medium text-ink">{col.key}</span>
+                customFields.map((field) => (
+                  <label key={field.id} className="flex items-center justify-between gap-3 text-xs">
+                    <span className="font-medium text-ink">{field.name}</span>
                     <select
-                      value={mapping[col.key] ?? ""}
-                      onChange={(e) => handleMappingChange(col.key, e.target.value)}
+                      value={mapping[field.id] ?? ""}
+                      onChange={(e) => handleMappingChange(field.id, e.target.value)}
                       className="rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
                     >
-                      <option value="">Skip</option>
-                      {customFields.map((field) => (
-                        <option key={field.id} value={field.id}>
-                          {field.name}
+                      <option value="">No data</option>
+                      {virtualColumns.map((col) => (
+                        <option key={col.key} value={col.key}>
+                          {col.key}
                         </option>
                       ))}
                     </select>
