@@ -50,3 +50,20 @@ export interface GhlFieldMapping {
   /** The target GHL custom field's id (GhlCustomField.id from ticket #49). */
   ghlFieldId: string;
 }
+
+/** The user-chosen (or auto-mapped, ticket #108) source for each standard
+ * GHL contact field on a given push. `companyName` is 3-way since GHL can
+ * receive either the cleaned name (companies.brand_name) or the raw
+ * denormalized company_name; every other field is a plain include/skip
+ * toggle. Distinct from `GhlFieldMapping`, which covers custom fields, not
+ * these fixed standard ones. Optional on payload builders/orchestrators —
+ * omitting it keeps today's always-include, prefer-brand-name behavior. */
+export interface GhlStandardFieldMapping {
+  companyName: "brand_name" | "company_name" | "skip";
+  firstName: "include" | "skip";
+  lastName: "include" | "skip";
+  email: "include" | "skip";
+  phone: "include" | "skip";
+  city: "include" | "skip";
+  country: "include" | "skip";
+}

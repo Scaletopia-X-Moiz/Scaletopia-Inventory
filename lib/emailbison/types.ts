@@ -57,3 +57,19 @@ export interface EmailBisonCustomVariableEntry {
   value: string;
   columnKey?: string;
 }
+
+/** The user-chosen (or auto-mapped, ticket #108) source for each standard
+ * EmailBison lead field on a given push. Mirrors GhlStandardFieldMapping
+ * (lib/ghl/types.ts) — same 3-way companyName, same include/skip toggles —
+ * swapping GHL's city/country for EmailBison's title/website. Optional on
+ * payload builders/orchestrators — omitting it keeps today's always-include,
+ * prefer-brand-name behavior. */
+export interface EmailBisonStandardFieldMapping {
+  companyName: "brand_name" | "company_name" | "skip";
+  firstName: "include" | "skip";
+  lastName: "include" | "skip";
+  email: "include" | "skip";
+  phone: "include" | "skip";
+  title: "include" | "skip";
+  website: "include" | "skip";
+}
