@@ -5,6 +5,12 @@ import {
   attachLeadsToCampaign,
   listCustomVariables,
   createCustomVariable,
+  createCampaign,
+  listSenderEmails,
+  attachSenderEmails,
+  createCampaignSchedule,
+  createSequenceSteps,
+  resumeCampaign,
   requestWithRetry,
   EmailBisonApiError,
   EMAILBISON_RETRY_MAX_RETRIES,
@@ -254,5 +260,210 @@ describe("createCustomVariable", () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, {}));
 
     await expect(createCustomVariable(CREDENTIALS, "broken", { fetchImpl })).rejects.toThrow(EmailBisonApiError);
+  });
+});
+
+describe("createCampaign", () => {
+  it("posts the campaign name and returns the created campaign", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(201, { data: { id: 20, name: "Q4 outbound", status: "draft" } }));
+
+    const result = await createCampaign(CREDENTIALS, "Q4 outbound", { fetchImpl });
+
+    expect(result).toEqual({ id: "20", name: "Q4 outbound" });
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${CREDENTIALS.workspaceId}/api/campaigns`);
+    expect(JSON.parse(init.body)).toEqual({ name: "Q4 outbound" });
+  });
+
+  it("throws a typed error on a non-transient failure", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(422, { message: "name required" }));
+
+    await expect(createCampaign(CREDENTIALS, "", { fetchImpl })).rejects.toThrow(EmailBisonApiError);
+  });
+});
+
+describe("listSenderEmails", () => {
+  it("gets the paginated sender-email list", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ id: 1, name: "Sales", email: "sales@acme.com" }],
+        meta: { current_page: 1, last_page: 2 },
+      })
+    );
+
+    const result = await listSenderEmails(CREDENTIALS, 1, { fetchImpl });
+
+    expect(result).toEqual({
+      senderEmails: [{ id: "1", name: "Sales", email: "sales@acme.com" }],
+      page: 1,
+      hasMore: true,
+    });
+    const [url] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${CREDENTIALS.workspaceId}/api/sender-emails?page=1`);
+  });
+
+  it("throws a typed error on a non-transient failure", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(401, { message: "invalid token" }));
+
+    await expect(listSenderEmails(CREDENTIALS, 1, { fetchImpl })).rejects.toThrow(EmailBisonApiError);
+  });
+});
+
+describe("attachSenderEmails", () => {
+  it("posts sender_email_ids to the attach-sender-emails endpoint", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { data: { success: true, message: "attached" } }));
+
+    await attachSenderEmails(CREDENTIALS, "camp_1", ["1", "2"], { fetchImpl });
+
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${CREDENTIALS.workspaceId}/api/campaigns/camp_1/attach-sender-emails`);
+    expect(JSON.parse(init.body)).toEqual({ sender_email_ids: ["1", "2"] });
+  });
+
+  it("throws a typed error on a non-transient HTTP failure", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(404, { message: "campaign not found" }));
+
+    await expect(attachSenderEmails(CREDENTIALS, "missing", ["1"], { fetchImpl })).rejects.toThrow(
+      EmailBisonApiError
+    );
+  });
+
+  it("throws a typed error on a 200 with a { data: { success: false } } body", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { data: { success: false, message: "sender email not found" } }));
+
+    await expect(attachSenderEmails(CREDENTIALS, "camp_1", ["1"], { fetchImpl })).rejects.toThrow(
+      EmailBisonApiError
+    );
+    await expect(attachSenderEmails(CREDENTIALS, "camp_1", ["1"], { fetchImpl })).rejects.toThrow(
+      /sender email not found/
+    );
+  });
+});
+
+describe("createCampaignSchedule", () => {
+  const SCHEDULE = {
+    monday: true,
+    tuesday: true,
+    wednesday: true,
+    thursday: true,
+    friday: true,
+    saturday: false,
+    sunday: false,
+    startTime: "09:00",
+    endTime: "17:00",
+    timezone: "America/New_York",
+  };
+
+  it("posts the schedule in snake_case and returns the persisted schedule", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, { data: { id: 33 } }));
+
+    const result = await createCampaignSchedule(CREDENTIALS, "camp_1", SCHEDULE, { fetchImpl });
+
+    expect(result).toEqual({ id: "33" });
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${CREDENTIALS.workspaceId}/api/campaigns/camp_1/schedule`);
+    expect(JSON.parse(init.body)).toEqual({
+      monday: true,
+      tuesday: true,
+      wednesday: true,
+      thursday: true,
+      friday: true,
+      saturday: false,
+      sunday: false,
+      start_time: "09:00",
+      end_time: "17:00",
+      timezone: "America/New_York",
+      save_as_template: false,
+    });
+  });
+
+  it("throws a typed error on a non-transient HTTP failure", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(422, { message: "invalid window" }));
+
+    await expect(createCampaignSchedule(CREDENTIALS, "camp_1", SCHEDULE, { fetchImpl })).rejects.toThrow(
+      EmailBisonApiError
+    );
+  });
+
+  it("throws a typed error on a 200 with a { data: { success: false } } body", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { data: { success: false, message: "schedule not found" } }));
+
+    await expect(createCampaignSchedule(CREDENTIALS, "camp_1", SCHEDULE, { fetchImpl })).rejects.toThrow(
+      EmailBisonApiError
+    );
+  });
+});
+
+describe("createSequenceSteps", () => {
+  const STEPS = [{ emailSubject: "Hi {{first_name}}", emailBody: "Body", waitInDays: 0, threadReply: false }];
+
+  it("posts the title and sequence steps in snake_case and returns the persisted ids", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(201, { data: { id: 44, sequence_steps: [{ id: 45 }] } })
+    );
+
+    const result = await createSequenceSteps(CREDENTIALS, "camp_1", "Initial outreach", STEPS, { fetchImpl });
+
+    expect(result).toEqual({ id: "44", steps: [{ id: "45" }] });
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${CREDENTIALS.workspaceId}/api/campaigns/camp_1/sequence-steps`);
+    expect(JSON.parse(init.body)).toEqual({
+      title: "Initial outreach",
+      sequence_steps: [{ email_subject: "Hi {{first_name}}", email_body: "Body", wait_in_days: 0, thread_reply: false }],
+    });
+  });
+
+  it("throws a typed error on a non-transient HTTP failure", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(422, { message: "invalid step" }));
+
+    await expect(
+      createSequenceSteps(CREDENTIALS, "camp_1", "Initial outreach", STEPS, { fetchImpl })
+    ).rejects.toThrow(EmailBisonApiError);
+  });
+
+  it("throws a typed error on a 200 with a { data: { success: false } } body", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { data: { success: false, message: "campaign not found" } }));
+
+    await expect(
+      createSequenceSteps(CREDENTIALS, "camp_1", "Initial outreach", STEPS, { fetchImpl })
+    ).rejects.toThrow(EmailBisonApiError);
+  });
+});
+
+describe("resumeCampaign", () => {
+  it("PATCHes the resume endpoint", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { data: { success: true, message: "resumed" } }));
+
+    await resumeCampaign(CREDENTIALS, "camp_1", { fetchImpl });
+
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${CREDENTIALS.workspaceId}/api/campaigns/camp_1/resume`);
+    expect(init.method).toBe("PATCH");
+  });
+
+  it("throws a typed error on a non-transient HTTP failure", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(404, { message: "campaign not found" }));
+
+    await expect(resumeCampaign(CREDENTIALS, "missing", { fetchImpl })).rejects.toThrow(EmailBisonApiError);
+  });
+
+  it("throws a typed error on a 200 with a { data: { success: false } } body", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { data: { success: false, message: "already sending" } }));
+
+    await expect(resumeCampaign(CREDENTIALS, "camp_1", { fetchImpl })).rejects.toThrow(EmailBisonApiError);
   });
 });

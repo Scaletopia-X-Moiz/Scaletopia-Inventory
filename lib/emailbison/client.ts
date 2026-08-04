@@ -80,7 +80,7 @@ interface RawResponse {
 async function requestWithMethodRetry(
   fetchImpl: typeof fetch,
   credentials: EmailBisonCredentials,
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PATCH",
   path: string,
   body?: Record<string, unknown>
 ): Promise<RawResponse> {
@@ -143,9 +143,36 @@ export async function requestGetWithRetry(
   return requestWithMethodRetry(fetchImpl, credentials, "GET", path);
 }
 
+/** PATCHes `path` (with an optional body) using the same retry/backoff
+ * behavior as requestWithRetry. */
+export async function requestPatchWithRetry(
+  fetchImpl: typeof fetch,
+  credentials: EmailBisonCredentials,
+  path: string,
+  body?: Record<string, unknown>
+): Promise<RawResponse> {
+  return requestWithMethodRetry(fetchImpl, credentials, "PATCH", path, body);
+}
+
 function assertOk(status: number, json: unknown, action: string): void {
   if (status < 200 || status >= 300) {
     throw new EmailBisonApiError(`EmailBison ${action} failed with status ${status}: ${JSON.stringify(json)}`, status);
+  }
+}
+
+/** EmailBison sometimes returns HTTP 2xx with a body shaped like
+ * `{ data: { success: false, message: "..." } }` for what is semantically a
+ * failure (confirmed live on a schedule-not-found GET). assertOk only checks
+ * the HTTP status range, so write calls that can hit this shape must also
+ * call this after assertOk to catch it. */
+function assertSuccessBody(json: unknown, action: string): void {
+  if (!json || typeof json !== "object") return;
+  const data = (json as Record<string, unknown>).data;
+  if (!data || typeof data !== "object") return;
+  const record = data as Record<string, unknown>;
+  if (record.success === false) {
+    const message = typeof record.message === "string" ? record.message : "unknown error";
+    throw new EmailBisonApiError(`EmailBison ${action} failed: ${message}`);
   }
 }
 
@@ -306,4 +333,242 @@ export async function createCustomVariable(
     throw new EmailBisonApiError("EmailBison custom-variable create succeeded but returned no variable");
   }
   return variable;
+}
+
+/** Creates a new campaign (`POST /api/campaigns`) — confirmed live: `201`
+ * with `{ data: { id, name, status: "draft", ... } }`. First step of the
+ * end-to-end create-campaign flow (issue #94). */
+export async function createCampaign(
+  credentials: EmailBisonCredentials,
+  name: string,
+  deps: EmailBisonClientDeps = {}
+): Promise<EmailBisonCampaign> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const { status, json } = await requestWithRetry(fetchImpl, credentials, "/api/campaigns", { name });
+  assertOk(status, json, "campaign create");
+
+  const record = json && typeof json === "object" ? (json as Record<string, unknown>).data ?? json : json;
+  const campaign = toCampaign(record);
+  if (!campaign) {
+    throw new EmailBisonApiError("EmailBison campaign create succeeded but returned no campaign");
+  }
+  return campaign;
+}
+
+export interface EmailBisonSenderEmail {
+  id: string;
+  name: string;
+  email: string;
+}
+
+export interface ListSenderEmailsResult {
+  senderEmails: EmailBisonSenderEmail[];
+  page: number;
+  hasMore: boolean;
+}
+
+function toSenderEmail(raw: unknown): EmailBisonSenderEmail | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const id = record.id;
+  const name = record.name;
+  const email = record.email;
+  if (id === undefined || id === null || typeof name !== "string" || typeof email !== "string") return null;
+  return { id: String(id), name, email };
+}
+
+/** Lists the workspace's sender emails (`GET /api/sender-emails`), same
+ * paginated envelope as listCampaigns — confirmed live: `200` with
+ * `{ data: [{ id, name, email, ... }] }`. */
+export async function listSenderEmails(
+  credentials: EmailBisonCredentials,
+  page = 1,
+  deps: EmailBisonClientDeps = {}
+): Promise<ListSenderEmailsResult> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const { status, json } = await requestGetWithRetry(fetchImpl, credentials, `/api/sender-emails?page=${page}`);
+  assertOk(status, json, "sender-email list");
+
+  const senderEmails = extractArray(json)
+    .map(toSenderEmail)
+    .filter((senderEmail): senderEmail is EmailBisonSenderEmail => senderEmail !== null);
+
+  const meta = json && typeof json === "object" ? (json as Record<string, unknown>).meta : null;
+  const currentPage = meta && typeof meta === "object" ? Number((meta as Record<string, unknown>).current_page) : NaN;
+  const lastPage = meta && typeof meta === "object" ? Number((meta as Record<string, unknown>).last_page) : NaN;
+  const hasMore = !Number.isNaN(currentPage) && !Number.isNaN(lastPage) ? currentPage < lastPage : false;
+
+  return { senderEmails, page, hasMore };
+}
+
+/** Attaches sender emails to a campaign (`POST
+ * /api/campaigns/{id}/attach-sender-emails`) — confirmed live: `200` with
+ * `{ data: { success: true, message } }`. Also confirmed live is a `200`
+ * with `{ data: { success: false, message } }` for a semantic failure (e.g.
+ * schedule not found), which assertOk alone wouldn't catch. */
+export async function attachSenderEmails(
+  credentials: EmailBisonCredentials,
+  campaignId: string,
+  senderEmailIds: string[],
+  deps: EmailBisonClientDeps = {}
+): Promise<void> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const { status, json } = await requestWithRetry(
+    fetchImpl,
+    credentials,
+    `/api/campaigns/${campaignId}/attach-sender-emails`,
+    { sender_email_ids: senderEmailIds }
+  );
+  assertOk(status, json, "sender-email attach");
+  assertSuccessBody(json, "sender-email attach");
+}
+
+/** Days/window for createCampaignSchedule — camelCase mirror of the wire
+ * body's monday..sunday booleans plus start_time/end_time (HH:MM) and
+ * timezone. `save_as_template` is always sent as `false`, matching #94's
+ * confirmed live request (not exposed as an option here). */
+export interface EmailBisonCampaignScheduleInput {
+  monday: boolean;
+  tuesday: boolean;
+  wednesday: boolean;
+  thursday: boolean;
+  friday: boolean;
+  saturday: boolean;
+  sunday: boolean;
+  startTime: string;
+  endTime: string;
+  timezone: string;
+}
+
+export interface EmailBisonCampaignSchedule {
+  id: string;
+}
+
+function toWireSchedule(schedule: EmailBisonCampaignScheduleInput): Record<string, unknown> {
+  return {
+    monday: schedule.monday,
+    tuesday: schedule.tuesday,
+    wednesday: schedule.wednesday,
+    thursday: schedule.thursday,
+    friday: schedule.friday,
+    saturday: schedule.saturday,
+    sunday: schedule.sunday,
+    start_time: schedule.startTime,
+    end_time: schedule.endTime,
+    timezone: schedule.timezone,
+    save_as_template: false,
+  };
+}
+
+/** Creates a campaign's sending schedule (`POST
+ * /api/campaigns/{id}/schedule`) — confirmed live: `201` with the persisted
+ * schedule object. Subject to the same `{ data: { success: false } }`-on-2xx
+ * failure shape as attachSenderEmails. */
+export async function createCampaignSchedule(
+  credentials: EmailBisonCredentials,
+  campaignId: string,
+  schedule: EmailBisonCampaignScheduleInput,
+  deps: EmailBisonClientDeps = {}
+): Promise<EmailBisonCampaignSchedule> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const { status, json } = await requestWithRetry(
+    fetchImpl,
+    credentials,
+    `/api/campaigns/${campaignId}/schedule`,
+    toWireSchedule(schedule)
+  );
+  assertOk(status, json, "campaign schedule create");
+  assertSuccessBody(json, "campaign schedule create");
+
+  const record = json && typeof json === "object" ? (json as Record<string, unknown>).data ?? json : json;
+  const id =
+    record && typeof record === "object" ? (record as Record<string, unknown>).id : undefined;
+  if (id === undefined || id === null) {
+    throw new EmailBisonApiError("EmailBison campaign schedule create succeeded but returned no schedule id");
+  }
+  return { id: String(id) };
+}
+
+/** One sequence step for createSequenceSteps — camelCase mirror of the wire
+ * body's email_subject/email_body/wait_in_days/thread_reply.
+ * `variant`/`variant_from_step` are out of scope per issue #96. */
+export interface EmailBisonSequenceStepInput {
+  emailSubject: string;
+  emailBody: string;
+  waitInDays: number;
+  threadReply: boolean;
+}
+
+export interface EmailBisonSequenceStepResult {
+  id: string;
+}
+
+export interface EmailBisonSequenceResult {
+  id: string;
+  steps: EmailBisonSequenceStepResult[];
+}
+
+function toWireSequenceStep(step: EmailBisonSequenceStepInput): Record<string, unknown> {
+  return {
+    email_subject: step.emailSubject,
+    email_body: step.emailBody,
+    wait_in_days: step.waitInDays,
+    thread_reply: step.threadReply,
+  };
+}
+
+/** Creates a campaign's sequence and its steps in one call (`POST
+ * /api/campaigns/{id}/sequence-steps`) — confirmed live: `201` with the
+ * persisted sequence + step ids. Subject to the same `{ data: { success:
+ * false } }`-on-2xx failure shape as attachSenderEmails. */
+export async function createSequenceSteps(
+  credentials: EmailBisonCredentials,
+  campaignId: string,
+  title: string,
+  steps: EmailBisonSequenceStepInput[],
+  deps: EmailBisonClientDeps = {}
+): Promise<EmailBisonSequenceResult> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const { status, json } = await requestWithRetry(
+    fetchImpl,
+    credentials,
+    `/api/campaigns/${campaignId}/sequence-steps`,
+    { title, sequence_steps: steps.map(toWireSequenceStep) }
+  );
+  assertOk(status, json, "sequence-steps create");
+  assertSuccessBody(json, "sequence-steps create");
+
+  const record = json && typeof json === "object" ? (json as Record<string, unknown>).data ?? json : json;
+  const data = record && typeof record === "object" ? (record as Record<string, unknown>) : null;
+  const id = data ? data.id : undefined;
+  if (id === undefined || id === null) {
+    throw new EmailBisonApiError("EmailBison sequence-steps create succeeded but returned no sequence id");
+  }
+  const rawSteps = data && Array.isArray(data.sequence_steps) ? data.sequence_steps : [];
+  const resultSteps = rawSteps
+    .map((raw): EmailBisonSequenceStepResult | null => {
+      if (!raw || typeof raw !== "object") return null;
+      const stepId = (raw as Record<string, unknown>).id;
+      return stepId === undefined || stepId === null ? null : { id: String(stepId) };
+    })
+    .filter((step): step is EmailBisonSequenceStepResult => step !== null);
+
+  return { id: String(id), steps: resultSteps };
+}
+
+/** Resumes a paused/draft campaign, starting real sending (`PATCH
+ * /api/campaigns/{id}/resume`) — not yet verified live (deliberately not
+ * exercised during #94's verification pass); implemented with the same
+ * write pattern as the confirmed calls pending a separate live-verification
+ * ticket. Subject to the same `{ data: { success: false } }`-on-2xx failure
+ * shape as attachSenderEmails. */
+export async function resumeCampaign(
+  credentials: EmailBisonCredentials,
+  campaignId: string,
+  deps: EmailBisonClientDeps = {}
+): Promise<void> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const { status, json } = await requestPatchWithRetry(fetchImpl, credentials, `/api/campaigns/${campaignId}/resume`);
+  assertOk(status, json, "campaign resume");
+  assertSuccessBody(json, "campaign resume");
 }
