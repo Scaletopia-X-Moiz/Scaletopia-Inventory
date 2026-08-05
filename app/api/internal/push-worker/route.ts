@@ -306,7 +306,12 @@ async function runWorker(request: Request): Promise<Response> {
           ? { ...selfChainHeaders(), "content-type": "application/json" }
           : selfChainHeaders(),
         body: jobId ? JSON.stringify({ jobId }) : undefined,
-      }).catch(() => {});
+      }).catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[push-worker] self-chain kick failed${jobId ? ` (jobId=${jobId})` : ""}: ${message}`
+        );
+      });
     });
   };
 
@@ -321,18 +326,38 @@ async function runWorker(request: Request): Promise<Response> {
       break;
     }
 
+    // Acquiring the next job (resume-lookup or claim RPC) can throw — a missing
+    // RPC surfaces as PGRST202, a dropped connection as a network error. This
+    // used to run outside any try/catch, so a throw here killed the whole
+    // invocation with a 500 and left jobs stuck at Queued with no signal (#136).
+    // Log it with context and stop this invocation cleanly instead; the next
+    // cron tick retries.
+    const wasResume = Boolean(resumeJobId);
     let job: PushJob | null;
-    if (resumeJobId) {
-      // A running job may already be terminal (e.g. its client vanished and a
-      // prior tick failed it) — only resume if it's still running, else fall
-      // through to the claim path on the next loop.
-      const resumed = await getPushJob(resumeJobId);
-      resumeJobId = null;
-      job = resumed && resumed.status === "running" ? resumed : null;
-      if (!job) continue;
-    } else {
-      job = await claimNextRunnableJob(MAX_CONCURRENT_JOBS);
-      if (!job) break; // nothing runnable (queue drained or all clients busy)
+    try {
+      if (resumeJobId) {
+        // A running job may already be terminal (e.g. its client vanished and a
+        // prior tick failed it) — only resume if it's still running, else fall
+        // through to the claim path on the next loop.
+        const resumed = await getPushJob(resumeJobId);
+        job = resumed && resumed.status === "running" ? resumed : null;
+      } else {
+        job = await claimNextRunnableJob(MAX_CONCURRENT_JOBS);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[push-worker] failed to acquire next job${
+          resumeJobId ? ` (resume jobId=${resumeJobId})` : " (claim)"
+        }: ${message}`
+      );
+      break;
+    }
+    resumeJobId = null;
+    if (wasResume) {
+      if (!job) continue; // resumed job already terminal — claim on the next loop
+    } else if (!job) {
+      break; // nothing runnable (queue drained or all clients busy)
     }
 
     processed++;

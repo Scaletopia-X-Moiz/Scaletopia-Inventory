@@ -160,7 +160,10 @@ export async function POST(request: NextRequest) {
     fetch(new URL("/api/internal/push-worker", request.url), {
       method: "POST",
       headers: workerKickHeaders(),
-    }).catch(() => {});
+    }).catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[emailbison/push] worker kick failed (jobId=${job.id}): ${message}`);
+    });
   });
 
   return Response.json({ jobId: job.id });
