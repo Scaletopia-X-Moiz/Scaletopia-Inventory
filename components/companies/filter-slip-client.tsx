@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { FilterSlip } from "@/components/companies/filter-slip";
+import type { ClientOption } from "@/lib/data/clients";
 
 interface FilterOption {
   id: string;
@@ -34,7 +35,7 @@ const EMPTY: CompanyFilterOptions = {
 // results are cached per unique query string rather than once globally.
 const cache = new Map<string, CompanyFilterOptions>();
 
-export function FilterSlipClient() {
+export function FilterSlipClient({ clientOptions }: { clientOptions: ClientOption[] }) {
   const searchParams = useSearchParams();
   const facetParams = new URLSearchParams(searchParams);
   facetParams.delete("page");
@@ -67,5 +68,5 @@ export function FilterSlipClient() {
     return () => controller.abort();
   }, [paramsStr]);
 
-  return <FilterSlip options={options} />;
+  return <FilterSlip options={options} clientOptions={clientOptions} />;
 }

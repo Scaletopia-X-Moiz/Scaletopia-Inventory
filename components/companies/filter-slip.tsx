@@ -7,6 +7,9 @@ import { FilterChipGroup, type ChipOption } from "@/components/companies/filter-
 import { FilterPopover } from "@/components/shared/filter-popover";
 import { SingleSelectGroup } from "@/components/people/single-select-group";
 import { PushJobFilterChip } from "@/components/shared/push-job-filter-chip";
+import { PushStatusFilterPopover } from "@/components/shared/push-status-filter-popover";
+import { parsePushStatusFilter, type PushStatusFilter } from "@/lib/data/push-status-filter";
+import type { ClientOption } from "@/lib/data/clients";
 import type { CompanyFilterOptions } from "@/lib/data/companies";
 
 const MULTI_PARAMS = [
@@ -20,7 +23,13 @@ const MULTI_PARAMS = [
 ] as const;
 const SINGLE_PARAMS = ["q", "empmin", "empmax"] as const;
 
-export function FilterSlip({ options }: { options: CompanyFilterOptions }) {
+export function FilterSlip({
+  options,
+  clientOptions,
+}: {
+  options: CompanyFilterOptions;
+  clientOptions: ClientOption[];
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -122,6 +131,20 @@ export function FilterSlip({ options }: { options: CompanyFilterOptions }) {
     });
   }
 
+  function setPushStatus(next: PushStatusFilter | undefined) {
+    navigate((params) => {
+      if (next) {
+        params.set("pushClient", next.clientId);
+        params.set("pushPlatform", next.platform);
+        params.set("pushStatus", next.status);
+      } else {
+        params.delete("pushClient");
+        params.delete("pushPlatform");
+        params.delete("pushStatus");
+      }
+    });
+  }
+
   function clearAll() {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     setSearch("");
@@ -139,7 +162,12 @@ export function FilterSlip({ options }: { options: CompanyFilterOptions }) {
     Boolean(searchParams.get("empmin")) ||
     Boolean(searchParams.get("empmax")) ||
     Boolean(searchParams.get("pushJobId")) ||
+    Boolean(searchParams.get("pushClient")) ||
+    Boolean(searchParams.get("pushPlatform")) ||
+    Boolean(searchParams.get("pushStatus")) ||
     MULTI_PARAMS.some((p) => searchParams.getAll(p).length > 0 || searchParams.getAll(`${p}_exclude`).length > 0);
+
+  const pushStatusValue = parsePushStatusFilter(new URLSearchParams(searchParams.toString()));
 
   const toOptions = (entries: { id: string; label: string; count: number }[]): ChipOption[] =>
     entries.map((e) => ({ id: e.id, label: e.label, count: e.count }));
@@ -286,6 +314,17 @@ export function FilterSlip({ options }: { options: CompanyFilterOptions }) {
             />
           </div>
         </FilterPopover>
+
+        {/* A company "counts" as pushed only when all of its linked contacts
+            are pushed, so the trigger carries that semantics as a tooltip —
+            the shared popover (F3) is reused verbatim and stays entity-neutral. */}
+        <span title="Companies whose every linked contact is already pushed to the selected client">
+          <PushStatusFilterPopover
+            clientOptions={clientOptions}
+            value={pushStatusValue}
+            onChange={setPushStatus}
+          />
+        </span>
 
         <button
           type="button"
