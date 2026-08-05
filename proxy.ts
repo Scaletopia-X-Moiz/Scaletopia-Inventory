@@ -5,10 +5,17 @@ const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
 // Paths reachable without a session: the login page, the invite/reset
-// acceptance routes, and the cache-warming ping the login screen fires so
-// authenticated pages load without a cold full-table scan (see api/warm).
+// acceptance routes, the cache-warming ping the login screen fires so
+// authenticated pages load without a cold full-table scan (see api/warm), and
+// the internal worker endpoints, which carry no session cookie (Vercel Cron /
+// self-chain) and enforce their own auth (see api/internal/*/route.ts).
 function isPublicPath(path: string) {
-  return path === "/login" || path === "/api/warm" || path.startsWith("/auth");
+  return (
+    path === "/login" ||
+    path === "/api/warm" ||
+    path.startsWith("/auth") ||
+    path.startsWith("/api/internal")
+  );
 }
 
 /**
