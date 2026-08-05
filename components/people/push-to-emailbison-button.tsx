@@ -9,10 +9,11 @@ import { runSse } from "@/components/shared/use-sse-run";
 import { fetchActiveClients } from "@/lib/data/active-clients-client";
 import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
 import type { EmailBisonPushResult, EmailBisonPushProgress } from "@/lib/emailbison/push-to-emailbison";
-import type { EmailBisonCustomVariableEntry } from "@/lib/emailbison/types";
+import type { EmailBisonCustomVariableEntry, EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
 import type { EmailBisonCustomVariable } from "@/lib/emailbison/client";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
 import type { EnrichmentField } from "@/lib/data/enrichment-fields";
+import { StandardFieldMappingTable } from "@/components/emailbison/standard-field-mapping-table";
 
 interface ActiveClient {
   id: string;
@@ -93,6 +94,16 @@ export function PushToEmailBisonButton({
   // scoped + housekeeping-key-filtered server-side.
   const [enrichmentFields, setEnrichmentFields] = useState<EnrichmentField[]>([]);
 
+  // Pre-populated via resolveDefaultFieldMapping (issue #108) on step entry,
+  // by GET /api/emailbison/default-field-mapping — the same candidate set the
+  // push itself would resolve. Null while that fetch is in flight; every row
+  // is then overridable via StandardFieldMappingTable before confirming
+  // (issue #112).
+  const [standardFieldMapping, setStandardFieldMapping] = useState<EmailBisonStandardFieldMapping | null>(
+    null
+  );
+  const [standardFieldMappingError, setStandardFieldMappingError] = useState<string | null>(null);
+
   const [result, setResult] = useState<EmailBisonPushResult | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
@@ -117,6 +128,8 @@ export function PushToEmailBisonButton({
     setReferenceVariables(null);
     setReferenceError(null);
     setEnrichmentFields([]);
+    setStandardFieldMapping(null);
+    setStandardFieldMappingError(null);
     setResult(null);
     setNote(null);
   }
@@ -153,6 +166,8 @@ export function PushToEmailBisonButton({
     setReferenceVariables(null);
     setReferenceError(null);
     setEnrichmentFields([]);
+    setStandardFieldMapping(null);
+    setStandardFieldMappingError(null);
 
     try {
       const res = await fetch(`/api/clients/${selectedClient.id}/emailbison-custom-variables`);
@@ -173,6 +188,15 @@ export function PushToEmailBisonButton({
       setEnrichmentFields(data.fields);
     } catch {
       setEnrichmentFields([]);
+    }
+
+    try {
+      const res = await fetch(`/api/emailbison/default-field-mapping?entity=people&${paramsStr}`);
+      if (!res.ok) throw new Error("Failed to load default field mapping");
+      const data = (await res.json()) as { standardFields: EmailBisonStandardFieldMapping };
+      setStandardFieldMapping(data.standardFields);
+    } catch (error) {
+      setStandardFieldMappingError((error as Error).message || "Failed to load default field mapping.");
     }
   }
 
@@ -231,6 +255,7 @@ export function PushToEmailBisonButton({
             clientId: selectedClient.id,
             existingLeadBehavior,
             customVariables: customVariablesForPush(),
+            standardFieldMapping: standardFieldMapping ?? undefined,
           }),
         },
         (event) => {
@@ -433,6 +458,17 @@ export function PushToEmailBisonButton({
                     </label>
                   </div>
                 </div>
+
+                {standardFieldMappingError ? (
+                  <p className="text-xs text-danger">{standardFieldMappingError}</p>
+                ) : standardFieldMapping === null ? (
+                  <p className="flex items-center gap-2 text-xs text-ink-soft">
+                    <Loader2 size={12} className="animate-spin" />
+                    Loading default field mapping…
+                  </p>
+                ) : (
+                  <StandardFieldMappingTable value={standardFieldMapping} onChange={setStandardFieldMapping} />
+                )}
 
                 <div>
                   <div className="flex items-center justify-between">
