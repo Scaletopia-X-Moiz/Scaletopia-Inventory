@@ -147,6 +147,71 @@ describe("virtual_filter_predicate_matches — list", () => {
   });
 });
 
+describe("virtual_filter_predicate_matches — text contains/not_contains chip input (ticket #116)", () => {
+  it("'contains' with a keyword array matches any of them", async () => {
+    const filter: VirtualColumnFilter = {
+      key: "niche",
+      type: "text",
+      operator: "contains",
+      value: ["fintech", "insurtech"],
+    };
+    expect(await matches({ niche: "B2B Fintech SaaS" }, filter)).toBe(true);
+    expect(await matches({ niche: "InsurTech platform" }, filter)).toBe(true);
+    expect(await matches({ niche: "Healthtech" }, filter)).toBe(false);
+    expect(await matches({}, filter)).toBe(false);
+  });
+
+  it("'not_contains' with a keyword array matches only when none of them appear", async () => {
+    const filter: VirtualColumnFilter = {
+      key: "niche",
+      type: "text",
+      operator: "not_contains",
+      value: ["fintech", "insurtech"],
+    };
+    expect(await matches({ niche: "Healthtech" }, filter)).toBe(true);
+    expect(await matches({ niche: "B2B Fintech SaaS" }, filter)).toBe(false);
+    expect(await matches({}, filter)).toBe(true);
+  });
+
+  it("a single-element array behaves identically to the scalar form (no regression)", async () => {
+    const scalar: VirtualColumnFilter = { key: "niche", type: "text", operator: "contains", value: "fintech" };
+    const array: VirtualColumnFilter = { key: "niche", type: "text", operator: "contains", value: ["fintech"] };
+    for (const data of [{ niche: "B2B Fintech SaaS" }, { niche: "Healthtech" }, {}]) {
+      expect(await matches(data, array)).toBe(await matches(data, scalar));
+    }
+  });
+});
+
+describe("virtual_filter_predicate_matches — list contains/not_contains chip input (ticket #116)", () => {
+  it("'contains' with a keyword array matches any exact member (still member-exact, not substring)", async () => {
+    const filter: VirtualColumnFilter = { key: "specialties", type: "list", operator: "contains", value: ["a3", "a4"] };
+    expect(await matches({ specialties: ["a3"] }, filter)).toBe(true);
+    expect(await matches({ specialties: ["a4", "a5"] }, filter)).toBe(true);
+    expect(await matches({ specialties: ["a30"] }, filter)).toBe(false);
+    expect(await matches({}, filter)).toBe(false);
+  });
+
+  it("'not_contains' with a keyword array matches only when none of them are members", async () => {
+    const filter: VirtualColumnFilter = {
+      key: "specialties",
+      type: "list",
+      operator: "not_contains",
+      value: ["a3", "a4"],
+    };
+    expect(await matches({ specialties: ["a30"] }, filter)).toBe(true);
+    expect(await matches({ specialties: ["a3"] }, filter)).toBe(false);
+    expect(await matches({}, filter)).toBe(true);
+  });
+
+  it("a single-element array behaves identically to the scalar form (no regression)", async () => {
+    const scalar: VirtualColumnFilter = { key: "specialties", type: "list", operator: "contains", value: "a3" };
+    const array: VirtualColumnFilter = { key: "specialties", type: "list", operator: "contains", value: ["a3"] };
+    for (const data of [{ specialties: ["a3", "a4"] }, { specialties: ["a30"] }, {}]) {
+      expect(await matches(data, array)).toBe(await matches(data, scalar));
+    }
+  });
+});
+
 describe("virtual_filter_predicate_matches — empty/not-empty share the one normalization", () => {
   it("is_empty and is_not_empty partition every case exhaustively", async () => {
     const values = ["", "  ", "-", "{{ x }}", "real", null, [], ["x"]];
@@ -211,12 +276,52 @@ describe("value-list validation on the vf param (ticket #38)", () => {
         { key: "a", type: "text", operator: "is", value: [] }, // empty list
         { key: "b", type: "text", operator: "is", value: ["", "x"] }, // blank entry
         { key: "c", type: "text", operator: "is", value: ["ok", 3] }, // non-string entry
-        { key: "d", type: "text", operator: "contains", value: ["nope"] }, // array not allowed for contains
+        { key: "d", type: "text", operator: "contains", value: [] }, // empty array not allowed
         { key: "e", type: "text", operator: "is", value: ["real"] }, // valid — survives
       ])
     );
     expect(parseVirtualFiltersParam(params)).toEqual([
       { key: "e", type: "text", operator: "is", value: ["real"] },
+    ]);
+  });
+});
+
+describe("value-list validation on Text/List contains/not_contains (ticket #116)", () => {
+  it("round-trips a chip-input keyword array unchanged, for both operators and types", () => {
+    const filters: VirtualColumnFilter[] = [
+      { key: "niche", type: "text", operator: "contains", value: ["fintech", "insurtech"] },
+      { key: "niche", type: "text", operator: "not_contains", value: ["legacy"] },
+      { key: "specialties", type: "list", operator: "contains", value: ["a3", "a4"] },
+      { key: "specialties", type: "list", operator: "not_contains", value: ["a30"] },
+    ];
+    const params = new URLSearchParams();
+    params.set("vf", serializeVirtualFiltersParam(filters)!);
+    expect(parseVirtualFiltersParam(params)).toEqual(filters);
+  });
+
+  it("keeps the single-string form valid for contains/not_contains (no regression)", () => {
+    const filters: VirtualColumnFilter[] = [
+      { key: "niche", type: "text", operator: "contains", value: "fintech" },
+      { key: "specialties", type: "list", operator: "contains", value: "a3" },
+    ];
+    const params = new URLSearchParams();
+    params.set("vf", serializeVirtualFiltersParam(filters)!);
+    expect(parseVirtualFiltersParam(params)).toEqual(filters);
+  });
+
+  it("drops a contains/not_contains array that is empty or carries a blank/non-string entry", () => {
+    const params = new URLSearchParams();
+    params.set(
+      "vf",
+      JSON.stringify([
+        { key: "a", type: "text", operator: "contains", value: [] },
+        { key: "b", type: "text", operator: "not_contains", value: ["", "x"] },
+        { key: "c", type: "list", operator: "contains", value: ["ok", 3] },
+        { key: "d", type: "text", operator: "contains", value: ["real"] }, // valid — survives
+      ])
+    );
+    expect(parseVirtualFiltersParam(params)).toEqual([
+      { key: "d", type: "text", operator: "contains", value: ["real"] },
     ]);
   });
 });
@@ -327,7 +432,7 @@ describe("vf/vc URL param round-trip (ticket #34)", () => {
         { key: "a", type: "boolean", operator: "is_true", value: true }, // value-less op carrying a value is still parsed fine (value ignored)
         { key: "b", type: "boolean", operator: "gt", value: true }, // gt isn't a boolean operator
         { key: "c", type: "list", operator: "contains" }, // missing required value
-        { key: "d", type: "list", operator: "contains", value: ["a3"] }, // array not allowed — list contains wants one string
+        { key: "d", type: "list", operator: "contains", value: [] }, // empty array not allowed
         { key: "e", type: "list", operator: "is_empty" }, // valid — survives
       ])
     );

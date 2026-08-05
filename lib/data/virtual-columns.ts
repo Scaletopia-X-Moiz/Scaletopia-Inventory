@@ -31,7 +31,10 @@ export interface VirtualColumnFilter {
    * [min, max] tuple for between, omitted for is_empty/is_not_empty. Text
    * is/is_not additionally accept a `string[]` — the multi-select over a
    * low-cardinality field's real distinct values (ticket #38); the shared SQL
-   * predicate treats the array as "matches any of" via jsonb containment. */
+   * predicate treats the array as "matches any of" via jsonb containment.
+   * Text and List contains/not_contains additionally accept a `string[]` —
+   * the chip input's stacked keywords (ticket #116); "matches any of" for
+   * contains, "matches none of" for not_contains. */
   value?: string | number | boolean | string[] | [string | number, string | number] | null;
 }
 
@@ -191,13 +194,15 @@ function isValidFilterValue(type: VirtualColumnType, meta: VirtualColumnOperator
   if (meta.requiresValue) {
     if (type === "number") return isFiniteNumber(value);
     if (type === "date") return isIsoDate(value);
-    // List contains/not_contains take one exact member string to match via
-    // jsonb containment SQL-side (ticket #36) — same shape as Text
-    // contains/not_contains, no array-of-candidates form.
-    if (type === "list") return typeof value === "string" && value.length > 0;
-    // Text is/is_not additionally accept a multi-select value list (ticket #38);
-    // contains/not_contains stay single free-text (substring matching).
-    if ((meta.id === "is" || meta.id === "is_not") && Array.isArray(value)) {
+    // Text is/is_not accept a multi-select value list (ticket #38); Text and
+    // List contains/not_contains accept a chip-input keyword list (ticket
+    // #116) — both read as a non-empty string[] of non-empty strings. Every
+    // other requiresValue operator (List's single-member contains/
+    // not_contains form, etc.) stays scalar-only.
+    if (
+      (meta.id === "is" || meta.id === "is_not" || meta.id === "contains" || meta.id === "not_contains") &&
+      Array.isArray(value)
+    ) {
       return value.length > 0 && value.every((v) => typeof v === "string" && v.length > 0);
     }
     return typeof value === "string" && value.length > 0;
