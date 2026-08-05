@@ -1,16 +1,17 @@
-import type { NextRequest } from "next/server";
+import { after, type NextRequest } from "next/server";
 import { parsePersonFilters } from "@/lib/data/people-search-params";
 import { getClientById } from "@/lib/data/clients";
-import { runPeopleGhlPush, type GhlPushProgress } from "@/lib/ghl/push-to-ghl";
+import { createPushJob } from "@/lib/data/push-jobs";
 import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
 import { getUser } from "@/lib/auth/dal";
-import { logActivity } from "@/lib/activity/log";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
 
-function sseEvent(data: unknown): Uint8Array {
-  return new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`);
+/** Header on the immediate worker kick, so a configured PUSH_WORKER_SECRET
+ * still lets our own trigger through the worker route's optional gate. */
+function workerKickHeaders(): Record<string, string> {
+  const workerSecret = process.env.PUSH_WORKER_SECRET;
+  return workerSecret ? { "x-worker-secret": workerSecret } : {};
 }
 
 function isFieldMapping(value: unknown): value is GhlFieldMapping {
@@ -90,63 +91,35 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "Client not found" }, { status: 404 });
   }
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      const lastProgress: { current: GhlPushProgress | null } = { current: null };
-      try {
-        const result = await runPeopleGhlPush(filters, client, user, {
-          fieldMapping,
-          standardFieldMapping,
-          customTagSuffix,
-          onProgress: (p: GhlPushProgress) => {
-            lastProgress.current = p;
-            controller.enqueue(sseEvent({ type: "progress", ...p }));
-          },
-        });
-        await logActivity(
-          "ghl.push",
-          {
-            target: "people",
-            clientId: client.id,
-            totalMatched: result.total_matched,
-            eligible: result.eligible,
-            skipped: result.skipped,
-            pushed: result.pushed,
-            created: result.created,
-            tagAppended: result.tagAppended,
-            errors: result.errors,
-          },
-          user
-        );
-        controller.enqueue(sseEvent({ type: "done", result }));
-      } catch (err) {
-        const message = (err as Error).message;
-        await logActivity(
-          "ghl.push",
-          {
-            target: "people",
-            clientId: client.id,
-            done: lastProgress.current?.done ?? 0,
-            total: lastProgress.current?.total ?? 0,
-            pushed: lastProgress.current?.pushed ?? 0,
-            errors: lastProgress.current?.errors ?? 0,
-            error: message,
-            failed: true,
-          },
-          user
-        );
-        controller.enqueue(sseEvent({ type: "error", message }));
-      } finally {
-        controller.close();
-      }
-    },
+  // Background execution (issue #120): enqueue a push_jobs row and return its
+  // id immediately rather than running the push inline (the ~300s serverless
+  // cap could otherwise kill a large run mid-stream). The worker resolves the
+  // stored filter snapshot every tick and processes in resumable chunks; the
+  // UI polls GET /api/push-jobs/[id] for progress.
+  const niche = filters.niche?.include ?? [];
+
+  const job = await createPushJob({
+    clientId: client.id,
+    platform: "ghl",
+    entity: "people",
+    action: null,
+    campaignId: null,
+    niche,
+    filters: filters as Record<string, unknown>,
+    options: { fieldMapping, standardFieldMapping, customTagSuffix },
+    triggeredByUserId: user.id,
+    triggeredByEmail: user.email,
   });
 
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-    },
+  // Kick the worker immediately so the user doesn't wait for the next cron
+  // minute. Fire-and-forget after the response is sent; the Vercel Cron
+  // backstop covers a dropped kick.
+  after(() => {
+    fetch(new URL("/api/internal/push-worker", request.url), {
+      method: "POST",
+      headers: workerKickHeaders(),
+    }).catch(() => {});
   });
+
+  return Response.json({ jobId: job.id });
 }

@@ -50,6 +50,21 @@ export interface EmailBisonPushResult {
   /** Same failed records as `failed_people`, paired with why each one
    * failed. */
   failed: EmailBisonPushFailure[];
+  /** Person ids that were successfully pushed this call — used by the
+   * background worker (issue #120) to tag push_job_records. Reflects only
+   * this call's candidates (see `offset`/`deadline` on RunEmailBisonPushDeps),
+   * not necessarily the whole job. */
+  succeededPersonIds: string[];
+  /** Person ids whose push failed this call — same per-call scope as
+   * succeededPersonIds. */
+  failedPersonIds: string[];
+  /** Index into the deterministic candidate list (entity.loadRecords(filters))
+   * to resume from on the next call — equal to total_matched once `done`. */
+  nextOffset: number;
+  /** True once every candidate has been attempted (across `offset`-chained
+   * calls) — false means the caller hit `deadline` before finishing and
+   * should call again with `offset: nextOffset`. */
+  done: boolean;
 }
 
 export interface EmailBisonPushProgress {
@@ -73,6 +88,17 @@ export interface RunEmailBisonPushDeps {
    * comes from (issue #110, types from #108). Omitting it reproduces
    * today's behavior exactly — see buildEmailBisonLeadPayload. */
   standardFieldMapping?: EmailBisonStandardFieldMapping;
+  /** Index into the resolved candidate list to resume from — the background
+   * worker (issue #120) re-resolves entity.loadRecords(filters) every tick
+   * (the query is deterministic for unchanged filters/data) and slices from
+   * here rather than persisting the whole candidate set. Defaults to 0. */
+  offset?: number;
+  /** Wall-clock epoch-ms deadline: stop after the chunk group in flight when
+   * it's passed, returning `done: false` and the offset to resume from,
+   * rather than running the whole candidate set to completion. Omitted (the
+   * default) preserves today's run-to-completion behavior for direct/test
+   * callers. */
+  deadline?: number;
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -269,6 +295,11 @@ interface WorkspaceUpsertOutcome {
   errors: number;
   failed_people: string[];
   failed: EmailBisonPushFailure[];
+  succeededPersonIds: string[];
+  failedPersonIds: string[];
+  /** How many of `candidates` were actually attempted before returning —
+   * equal to candidates.length unless `deadline` cut the run short. */
+  attempted: number;
 }
 
 /** Upserts `candidates` as EmailBison leads in EMAILBISON_CHUNK_SIZE-sized
@@ -289,7 +320,8 @@ async function upsertCandidatesToWorkspace(
   existingLeadBehavior: "patch" | "put",
   fetchImpl: typeof fetch,
   standardFieldMapping: EmailBisonStandardFieldMapping | undefined,
-  onChunkGroupDone?: (done: number, pushed: number, errors: number) => void
+  onChunkGroupDone?: (done: number, pushed: number, errors: number) => void,
+  deadline?: number
 ): Promise<WorkspaceUpsertOutcome> {
   const leadIdByPersonId = new Map<string, string>();
   let pushed = 0;
@@ -297,10 +329,13 @@ async function upsertCandidatesToWorkspace(
   let done = 0;
   const failed_people: string[] = [];
   const failed: EmailBisonPushFailure[] = [];
+  const succeededPersonIds: string[] = [];
+  const failedPersonIds: string[] = [];
 
   const chunks = chunk(candidates, EMAILBISON_CHUNK_SIZE);
+  const groups = chunk(chunks, EMAILBISON_PUSH_CONCURRENCY);
 
-  for (const group of chunk(chunks, EMAILBISON_PUSH_CONCURRENCY)) {
+  for (const group of groups) {
     const settled = await Promise.allSettled(
       group.map((chunkCandidates) =>
         pushChunk(chunkCandidates, credentials, customVariables, existingLeadBehavior, fetchImpl, standardFieldMapping)
@@ -319,6 +354,7 @@ async function upsertCandidatesToWorkspace(
           const name = c.displayName || "unknown";
           failed_people.push(name);
           failed.push({ name, reason });
+          failedPersonIds.push(c.id);
         }
         console.error(`EmailBison ${label} push: chunk failed: ${String(outcome.reason)}`);
         continue;
@@ -328,6 +364,7 @@ async function upsertCandidatesToWorkspace(
       pushed += written.length;
       for (const w of written) {
         leadIdByPersonId.set(w.candidate.id, w.leadId);
+        succeededPersonIds.push(w.candidate.id);
       }
 
       for (const f of [...outcome.value.failed, ...writeFailed]) {
@@ -335,14 +372,19 @@ async function upsertCandidatesToWorkspace(
         const name = f.name || "unknown";
         failed_people.push(name);
         failed.push({ name, reason: f.error });
+        failedPersonIds.push(f.id);
         console.error(`EmailBison ${label} push: failed for person ${f.id} (${f.name ?? "unknown"}): ${f.error}`);
       }
     }
 
     onChunkGroupDone?.(done, pushed, errors);
+
+    if (deadline !== undefined && Date.now() >= deadline && done < candidates.length) {
+      break;
+    }
   }
 
-  return { leadIdByPersonId, pushed, errors, failed_people, failed };
+  return { leadIdByPersonId, pushed, errors, failed_people, failed, succeededPersonIds, failedPersonIds, attempted: done };
 }
 
 /** Creates or updates every candidate in the current filtered view as an
@@ -371,6 +413,8 @@ async function runEmailBisonAddToWorkspace<TFilters>(
   const customVariables = deps.customVariables ?? [];
   const existingLeadBehavior = deps.existingLeadBehavior ?? "patch";
   const standardFieldMapping = deps.standardFieldMapping;
+  const offset = deps.offset ?? 0;
+  const deadline = deps.deadline;
 
   onProgress?.({ phase: "resolving", done: 0, total: 0, pushed: 0, errors: 0 });
 
@@ -379,30 +423,55 @@ async function runEmailBisonAddToWorkspace<TFilters>(
 
   if (total_matched === 0) {
     onProgress?.({ phase: "done", done: 0, total: 0, pushed: 0, errors: 0 });
-    return { total_matched: 0, pushed: 0, errors: 0, failed_people: [], failed: [] };
+    return {
+      total_matched: 0,
+      pushed: 0,
+      errors: 0,
+      failed_people: [],
+      failed: [],
+      succeededPersonIds: [],
+      failedPersonIds: [],
+      nextOffset: 0,
+      done: true,
+    };
   }
 
-  await ensureCustomVariablesExist(credentials, customVariables, fetchImpl);
+  const remaining = candidates.slice(offset);
 
-  onProgress?.({ phase: "pushing", done: 0, total: candidates.length, pushed: 0, errors: 0 });
+  if (offset === 0) {
+    await ensureCustomVariablesExist(credentials, customVariables, fetchImpl);
+  }
 
-  const { pushed, errors, failed_people, failed } = await upsertCandidatesToWorkspace(
-    candidates,
-    entity.label,
-    client,
-    actor,
-    credentials,
-    customVariables,
-    existingLeadBehavior,
-    fetchImpl,
-    standardFieldMapping,
-    (done, chunkPushed, chunkErrors) =>
-      onProgress?.({ phase: "pushing", done, total: candidates.length, pushed: chunkPushed, errors: chunkErrors })
-  );
+  onProgress?.({ phase: "pushing", done: offset, total: candidates.length, pushed: 0, errors: 0 });
 
-  onProgress?.({ phase: "done", done: candidates.length, total: candidates.length, pushed, errors });
+  const { pushed, errors, failed_people, failed, succeededPersonIds, failedPersonIds, attempted } =
+    await upsertCandidatesToWorkspace(
+      remaining,
+      entity.label,
+      client,
+      actor,
+      credentials,
+      customVariables,
+      existingLeadBehavior,
+      fetchImpl,
+      standardFieldMapping,
+      (chunkDone, chunkPushed, chunkErrors) =>
+        onProgress?.({
+          phase: "pushing",
+          done: offset + chunkDone,
+          total: candidates.length,
+          pushed: chunkPushed,
+          errors: chunkErrors,
+        }),
+      deadline
+    );
 
-  return { total_matched, pushed, errors, failed_people, failed };
+  const nextOffset = offset + attempted;
+  const isDone = nextOffset >= candidates.length;
+
+  onProgress?.({ phase: "done", done: nextOffset, total: candidates.length, pushed, errors });
+
+  return { total_matched, pushed, errors, failed_people, failed, succeededPersonIds, failedPersonIds, nextOffset, done: isDone };
 }
 
 /** Add to EmailBison, triggered from the People table. */
@@ -451,7 +520,20 @@ export interface EmailBisonCampaignPushResult {
    * whole-batch attach failure) the attachLeadsToCampaign error message
    * shared by every candidate in that failed attach call. */
   failed: EmailBisonPushFailure[];
+  /** Person ids attached this call — see EmailBisonPushResult's identical
+   * field for why this is per-call rather than whole-job scoped. */
+  succeededPersonIds: string[];
+  failedPersonIds: string[];
+  nextOffset: number;
+  done: boolean;
 }
+
+/** Candidates per resumable tick when `deadline` is set (issue #120) —
+ * attachLeadsToCampaign is a single bulk call with no internal chunk
+ * boundary to check a deadline against mid-call, so (unlike the workspace
+ * push's chunk-group deadline check) campaign ticks are bounded by count
+ * instead of wall-clock time. */
+const EMAILBISON_CAMPAIGN_TICK_SIZE = 2000;
 
 export interface EmailBisonCampaignPushProgress {
   phase: "resolving" | "adding-to-workspace" | "attaching" | "done";
@@ -511,16 +593,32 @@ async function runEmailBisonAddToCampaign<TFilters>(
   const customVariables = deps.customVariables ?? [];
   const existingLeadBehavior = deps.existingLeadBehavior ?? "patch";
   const standardFieldMapping = deps.standardFieldMapping;
+  const offset = deps.offset ?? 0;
+  const tickSize = deps.deadline !== undefined ? EMAILBISON_CAMPAIGN_TICK_SIZE : Infinity;
 
   onProgress?.({ phase: "resolving", done: 0, total: 0, attached: 0, errors: 0 });
 
-  const candidates = await entity.loadRecords(filters);
-  const total_matched = candidates.length;
+  const allCandidates = await entity.loadRecords(filters);
+  const total_matched = allCandidates.length;
 
   if (total_matched === 0) {
     onProgress?.({ phase: "done", done: 0, total: 0, attached: 0, errors: 0 });
-    return { total_matched: 0, attached: 0, errors: 0, failed_people: [], failed: [] };
+    return {
+      total_matched: 0,
+      attached: 0,
+      errors: 0,
+      failed_people: [],
+      failed: [],
+      succeededPersonIds: [],
+      failedPersonIds: [],
+      nextOffset: 0,
+      done: true,
+    };
   }
+
+  const candidates = allCandidates.slice(offset, offset + tickSize);
+  const nextOffset = offset + candidates.length;
+  const isDone = nextOffset >= total_matched;
 
   const { data: existingRows, error: lookupError } = await supabaseAdmin
     .from("platform_pushes")
@@ -545,6 +643,7 @@ async function runEmailBisonAddToCampaign<TFilters>(
   let errors = 0;
   const failed_people: string[] = [];
   const failed: EmailBisonPushFailure[] = [];
+  const failedPersonIds: string[] = [];
 
   if (needsUpsert.length > 0) {
     onProgress?.({ phase: "adding-to-workspace", done: 0, total: needsUpsert.length, attached: 0, errors: 0 });
@@ -568,18 +667,30 @@ async function runEmailBisonAddToCampaign<TFilters>(
     errors += upsertOutcome.errors;
     failed_people.push(...upsertOutcome.failed_people);
     failed.push(...upsertOutcome.failed);
+    failedPersonIds.push(...upsertOutcome.failedPersonIds);
   }
 
   const attachable = candidates.filter((c) => leadIdByPersonId.has(c.id));
 
   if (attachable.length === 0) {
-    onProgress?.({ phase: "done", done: total_matched, total: total_matched, attached: 0, errors });
-    return { total_matched, attached: 0, errors, failed_people, failed };
+    onProgress?.({ phase: "done", done: nextOffset, total: total_matched, attached: 0, errors });
+    return {
+      total_matched,
+      attached: 0,
+      errors,
+      failed_people,
+      failed,
+      succeededPersonIds: [],
+      failedPersonIds,
+      nextOffset,
+      done: isDone,
+    };
   }
 
   onProgress?.({ phase: "attaching", done: 0, total: attachable.length, attached: 0, errors });
 
   let attached = 0;
+  const succeededPersonIds: string[] = [];
   try {
     const attachResult = await attachLeadsToCampaign(
       credentials,
@@ -613,6 +724,7 @@ async function runEmailBisonAddToCampaign<TFilters>(
     }
 
     attached = attachedCandidates.length;
+    succeededPersonIds.push(...attachedCandidates.map((c) => c.id));
 
     if (unattachedCandidates.length > 0) {
       const reasonByLeadId = new Map(attachResult.failed.map((f) => [f.leadId, f.reason]));
@@ -622,6 +734,7 @@ async function runEmailBisonAddToCampaign<TFilters>(
         const reason = reasonByLeadId.get(leadIdByPersonId.get(c.id)!) ?? "not attached by EmailBison";
         failed_people.push(name);
         failed.push({ name, reason });
+        failedPersonIds.push(c.id);
         console.error(`EmailBison ${entity.label} add-to-campaign: attach failed for person ${c.id} (${name}): ${reason}`);
       }
     }
@@ -632,13 +745,14 @@ async function runEmailBisonAddToCampaign<TFilters>(
       const name = c.displayName || "unknown";
       failed_people.push(name);
       failed.push({ name, reason: message });
+      failedPersonIds.push(c.id);
     }
     console.error(`EmailBison ${entity.label} add-to-campaign: attach failed: ${message}`);
   }
 
-  onProgress?.({ phase: "done", done: total_matched, total: total_matched, attached, errors });
+  onProgress?.({ phase: "done", done: nextOffset, total: total_matched, attached, errors });
 
-  return { total_matched, attached, errors, failed_people, failed };
+  return { total_matched, attached, errors, failed_people, failed, succeededPersonIds, failedPersonIds, nextOffset, done: isDone };
 }
 
 /** Add to Campaign, triggered from the People table. */

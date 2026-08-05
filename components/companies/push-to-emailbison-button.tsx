@@ -5,10 +5,8 @@ import { AlertDialog } from "radix-ui";
 import { Loader2, Send, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
-import { runSse } from "@/components/shared/use-sse-run";
 import { fetchActiveClients } from "@/lib/data/active-clients-client";
 import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
-import type { EmailBisonPushResult, EmailBisonPushProgress } from "@/lib/emailbison/push-to-emailbison";
 import type { EmailBisonCustomVariableEntry, EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
 import type { EmailBisonCustomVariable } from "@/lib/emailbison/client";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
@@ -33,13 +31,8 @@ interface ActiveClient {
   hasEmailBisonCredentials: boolean;
 }
 
-type SseEvent =
-  | ({ type: "progress" } & EmailBisonPushProgress)
-  | { type: "done"; action: "workspace"; result: EmailBisonPushResult; note: string }
-  | { type: "error"; message: string };
-
 type Status = "idle" | "open" | "pushing";
-type Step = "picker" | "options" | "confirm" | "summary";
+type Step = "picker" | "options" | "confirm";
 
 /** A Person-record field bindable by a custom-variable row — the seven
  * standard fields the EmailBison lead payload already carries
@@ -117,16 +110,12 @@ export function PushToEmailBisonButton({
   // scoped + housekeeping-key-filtered server-side.
   const [enrichmentFields, setEnrichmentFields] = useState<EnrichmentField[]>([]);
 
-  const [result, setResult] = useState<EmailBisonPushResult | null>(null);
-  const [note, setNote] = useState<string | null>(null);
-
   const busy = status === "pushing";
   const selectedClient = clients?.find((c) => c.id === selectedClientId) ?? null;
 
-  // Registers this dialog (including its persistent "Push complete" summary
-  // step) with the shared dialog stack so other prompts — e.g. the post-push
-  // "remove temporary columns?" prompt — know not to open on top of it
-  // (issue #89).
+  // Registers this dialog with the shared dialog stack so other prompts — e.g.
+  // the post-push "remove temporary columns?" prompt — defer until it closes
+  // rather than stacking on top of it (issue #89).
   useRegisterDialogOpen(status !== "idle");
 
   function reset() {
@@ -143,8 +132,6 @@ export function PushToEmailBisonButton({
     setReferenceVariables(null);
     setReferenceError(null);
     setEnrichmentFields([]);
-    setResult(null);
-    setNote(null);
   }
 
   async function handleClick() {
@@ -267,8 +254,7 @@ export function PushToEmailBisonButton({
     if (!selectedClient) return;
 
     setStatus("pushing");
-    setPushLabel("Pushing…");
-    let reachedDone = false;
+    setPushLabel("Queuing…");
 
     // Ticket #114: save the mapping actually being used as the new starting
     // point for the next push to this (client, "emailbison_companies") pair.
@@ -281,64 +267,37 @@ export function PushToEmailBisonButton({
       } satisfies SavedEmailBisonFieldMapping).catch(() => {});
     }
 
+    // Pushes now run as durable background jobs (issue #120): POST enqueues a
+    // push_jobs row and returns immediately. Rather than block the dialog on
+    // the run, we toast and close — live progress and the completion summary
+    // live in the Push Activity panel (issue #122).
     try {
-      await runSse<SseEvent>(
-        `/api/emailbison/push?${paramsStr}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            entity: "companies",
-            action: "workspace",
-            clientId: selectedClient.id,
-            existingLeadBehavior,
-            customVariables: customVariablesForPush(),
-            standardFieldMapping: standardFieldMapping ?? undefined,
-          }),
-        },
-        (event) => {
-          if (event.type === "done") reachedDone = true;
-          handleSseEvent(event);
-        }
-      );
+      const res = await fetch(`/api/emailbison/push?${paramsStr}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          entity: "companies",
+          action: "workspace",
+          clientId: selectedClient.id,
+          existingLeadBehavior,
+          customVariables: customVariablesForPush(),
+          standardFieldMapping: standardFieldMapping ?? undefined,
+        }),
+      });
+      if (!res.ok) {
+        const message = (await res.json().catch(() => null))?.error ?? "Failed to start push";
+        throw new Error(message);
+      }
     } catch (error) {
-      showToast((error as Error).message || "Push interrupted — try again.", "error");
-      console.error("Push to EmailBison stream error:", error);
+      showToast((error as Error).message || "Failed to queue push — try again.", "error");
+      console.error("Push to EmailBison error:", error);
       reset();
       return;
     }
 
-    // A terminal `{type: "error"}` frame (e.g. missing EmailBison credentials)
-    // closes the stream without ever sending `done` — treat that as a failed
-    // run and close the dialog rather than leaving it stuck mid-"pushing".
-    if (!reachedDone) {
-      reset();
-      return;
-    }
-
-    setPushLabel(null);
-  }
-
-  function handleSseEvent(event: SseEvent) {
-    if (event.type === "progress") {
-      setPushLabel(
-        event.phase === "resolving" ? "Resolving…" : `Pushing ${event.done}/${event.total}…`
-      );
-      return;
-    }
-
-    if (event.type === "error") {
-      showToast(event.message, "error");
-      return;
-    }
-
-    if (event.type === "done") {
-      setResult(event.result);
-      setNote(event.note);
-      setStatus("open");
-      setStep("summary");
-      onDone?.();
-    }
+    showToast("Push queued — track it in Push Activity", "success");
+    onDone?.();
+    reset();
   }
 
   const label = status === "pushing" && pushLabel ? pushLabel : "Add to EmailBison";
@@ -663,7 +622,7 @@ export function PushToEmailBisonButton({
               </button>
             </div>
           </AlertDialog.Content>
-        ) : step === "confirm" ? (
+        ) : (
           <AlertDialog.Content className="fixed top-[26%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
             <AlertDialog.Title className="text-sm font-semibold text-ink">
               Push to {selectedClient?.name}?
@@ -692,55 +651,6 @@ export function PushToEmailBisonButton({
               >
                 Push {total.toLocaleString("en-US")}
               </button>
-            </div>
-          </AlertDialog.Content>
-        ) : (
-          <AlertDialog.Content className="fixed top-[26%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
-            <AlertDialog.Title className="text-sm font-semibold text-ink">
-              Push complete
-            </AlertDialog.Title>
-            <AlertDialog.Description asChild>
-              <div className="mt-2 text-sm text-ink-soft">
-                {result ? (
-                  <ul className="flex flex-col gap-1">
-                    <li>
-                      {/* EmailBison's create-or-update response doesn't reliably
-                          distinguish created from updated (client.ts's
-                          EmailBisonLeadResult comment) — report the combined
-                          count rather than fabricate a created/updated split. */}
-                      Created or updated: <strong className="text-ink">{result.pushed}</strong>
-                    </li>
-                    <li>
-                      Failed: <strong className="text-ink">{result.errors}</strong>
-                    </li>
-                    {result.failed.length > 0 ? (
-                      <li className="mt-1 flex flex-col gap-0.5 text-xs text-ink-mute">
-                        {result.failed.slice(0, 5).map((f, i) => (
-                          <span key={i}>
-                            Failed: {f.name} — {f.reason}
-                          </span>
-                        ))}
-                        {result.failed.length > 5 ? (
-                          <span>…and {result.failed.length - 5} more</span>
-                        ) : null}
-                      </li>
-                    ) : null}
-                    {note ? <li className="mt-2 text-xs text-ink-mute">{note}</li> : null}
-                  </ul>
-                ) : null}
-              </div>
-            </AlertDialog.Description>
-
-            <div className="mt-5 flex justify-end gap-2">
-              <AlertDialog.Cancel asChild>
-                <button
-                  type="button"
-                  onClick={reset}
-                  className="rounded-md bg-stamp px-3 py-1.5 text-xs font-medium text-white transition-smooth hover:opacity-90 focus-visible:ring-2 focus-visible:ring-stamp/50"
-                >
-                  Close
-                </button>
-              </AlertDialog.Cancel>
             </div>
           </AlertDialog.Content>
         )}

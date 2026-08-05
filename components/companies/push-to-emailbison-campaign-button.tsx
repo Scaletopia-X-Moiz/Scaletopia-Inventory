@@ -5,13 +5,8 @@ import { AlertDialog } from "radix-ui";
 import { Loader2, Rocket, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
-import { runSse } from "@/components/shared/use-sse-run";
 import { fetchActiveClients } from "@/lib/data/active-clients-client";
 import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
-import type {
-  EmailBisonCampaignPushResult,
-  EmailBisonCampaignPushProgress,
-} from "@/lib/emailbison/push-to-emailbison";
 import type { EmailBisonCampaign, EmailBisonSenderEmail } from "@/lib/emailbison/client";
 
 type DayKey = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
@@ -112,13 +107,8 @@ interface ActiveClient {
   hasEmailBisonCredentials: boolean;
 }
 
-type SseEvent =
-  | ({ type: "progress" } & EmailBisonCampaignPushProgress)
-  | { type: "done"; action: "campaign"; result: EmailBisonCampaignPushResult; note: string }
-  | { type: "error"; message: string };
-
 type Status = "idle" | "open" | "pushing";
-type Step = "picker" | "campaign" | "confirm" | "summary";
+type Step = "picker" | "campaign" | "confirm";
 
 /** "Add to Campaign", the Companies-table counterpart of
  * push-to-emailbison-campaign-button.tsx (People table, issue #63) — resolves
@@ -165,9 +155,6 @@ export function PushToEmailBisonCampaignButton({
   const [createCampaignError, setCreateCampaignError] = useState<string | null>(null);
   const [createCampaignBusy, setCreateCampaignBusy] = useState<"draft" | "launch" | null>(null);
 
-  const [result, setResult] = useState<EmailBisonCampaignPushResult | null>(null);
-  const [note, setNote] = useState<string | null>(null);
-
   const busy = status === "pushing";
   const selectedClient = clients?.find((c) => c.id === selectedClientId) ?? null;
   const selectedCampaign = campaigns?.find((c) => c.id === selectedCampaignId) ?? null;
@@ -178,10 +165,9 @@ export function PushToEmailBisonCampaignButton({
     createForm.steps.length > 0 &&
     createForm.steps.every((s) => s.emailSubject.trim().length > 0 && s.emailBody.trim().length > 0);
 
-  // Registers this dialog (including its persistent "Push complete" summary
-  // step) with the shared dialog stack so other prompts — e.g. the post-push
-  // "remove temporary columns?" prompt — know not to open on top of it
-  // (issue #89).
+  // Registers this dialog with the shared dialog stack so other prompts — e.g.
+  // the post-push "remove temporary columns?" prompt — defer until it closes
+  // rather than stacking on top of it (issue #89).
   useRegisterDialogOpen(status !== "idle");
 
   function reset() {
@@ -195,8 +181,6 @@ export function PushToEmailBisonCampaignButton({
     setCampaignsError(null);
     setSelectedCampaignId(null);
     setParallel(false);
-    setResult(null);
-    setNote(null);
     setCreatingCampaign(false);
     setCreateForm(newCreateCampaignForm());
     setSenderEmails(null);
@@ -364,72 +348,38 @@ export function PushToEmailBisonCampaignButton({
     if (!selectedClient || !selectedCampaign) return;
 
     setStatus("pushing");
-    setPushLabel("Pushing…");
-    let reachedDone = false;
+    setPushLabel("Queuing…");
 
+    // Pushes now run as durable background jobs (issue #120): POST enqueues a
+    // push_jobs row and returns immediately. Rather than block the dialog on
+    // the run, we toast and close — live progress and the completion summary
+    // live in the Push Activity panel (issue #122).
     try {
-      await runSse<SseEvent>(
-        `/api/emailbison/push?${paramsStr}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            entity: "companies",
-            action: "campaign",
-            clientId: selectedClient.id,
-            campaignId: selectedCampaign.id,
-            parallel,
-          }),
-        },
-        (event) => {
-          if (event.type === "done") reachedDone = true;
-          handleSseEvent(event);
-        }
-      );
+      const res = await fetch(`/api/emailbison/push?${paramsStr}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          entity: "companies",
+          action: "campaign",
+          clientId: selectedClient.id,
+          campaignId: selectedCampaign.id,
+          parallel,
+        }),
+      });
+      if (!res.ok) {
+        const message = (await res.json().catch(() => null))?.error ?? "Failed to start push";
+        throw new Error(message);
+      }
     } catch (error) {
-      showToast((error as Error).message || "Push interrupted — try again.", "error");
-      console.error("Add to Campaign stream error:", error);
+      showToast((error as Error).message || "Failed to queue push — try again.", "error");
+      console.error("Add to Campaign error:", error);
       reset();
       return;
     }
 
-    // A terminal `{type: "error"}` frame (e.g. missing EmailBison credentials)
-    // closes the stream without ever sending `done` — treat that as a failed
-    // run and close the dialog rather than leaving it stuck mid-"pushing".
-    if (!reachedDone) {
-      reset();
-      return;
-    }
-
-    setPushLabel(null);
-  }
-
-  function handleSseEvent(event: SseEvent) {
-    if (event.type === "progress") {
-      const phaseLabel =
-        event.phase === "resolving"
-          ? "Resolving…"
-          : event.phase === "adding-to-workspace"
-            ? `Adding to workspace ${event.done}/${event.total}…`
-            : event.phase === "attaching"
-              ? `Attaching ${event.done}/${event.total}…`
-              : null;
-      if (phaseLabel) setPushLabel(phaseLabel);
-      return;
-    }
-
-    if (event.type === "error") {
-      showToast(event.message, "error");
-      return;
-    }
-
-    if (event.type === "done") {
-      setResult(event.result);
-      setNote(event.note);
-      setStatus("open");
-      setStep("summary");
-      onDone?.();
-    }
+    showToast("Push queued — track it in Push Activity", "success");
+    onDone?.();
+    reset();
   }
 
   const label = status === "pushing" && pushLabel ? pushLabel : "Add to EmailBison Campaign";
@@ -844,7 +794,7 @@ export function PushToEmailBisonCampaignButton({
               )}
             </div>
           </AlertDialog.Content>
-        ) : step === "confirm" ? (
+        ) : (
           <AlertDialog.Content className="fixed top-[26%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
             <AlertDialog.Title className="text-sm font-semibold text-ink">
               Add to {selectedCampaign?.name}?
@@ -874,51 +824,6 @@ export function PushToEmailBisonCampaignButton({
               >
                 Push {total.toLocaleString("en-US")}
               </button>
-            </div>
-          </AlertDialog.Content>
-        ) : (
-          <AlertDialog.Content className="fixed top-[26%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
-            <AlertDialog.Title className="text-sm font-semibold text-ink">
-              Push complete
-            </AlertDialog.Title>
-            <AlertDialog.Description asChild>
-              <div className="mt-2 text-sm text-ink-soft">
-                {result ? (
-                  <ul className="flex flex-col gap-1">
-                    <li>
-                      Queued for campaign: <strong className="text-ink">{result.attached}</strong>
-                    </li>
-                    <li>
-                      Failed: <strong className="text-ink">{result.errors}</strong>
-                    </li>
-                    {result.failed.length > 0 ? (
-                      <li className="mt-1 flex flex-col gap-0.5 text-xs text-ink-mute">
-                        {result.failed.slice(0, 5).map((f, i) => (
-                          <span key={i}>
-                            Failed: {f.name} — {f.reason}
-                          </span>
-                        ))}
-                        {result.failed.length > 5 ? (
-                          <span>…and {result.failed.length - 5} more</span>
-                        ) : null}
-                      </li>
-                    ) : null}
-                    {note ? <li className="mt-2 text-xs text-ink-mute">{note}</li> : null}
-                  </ul>
-                ) : null}
-              </div>
-            </AlertDialog.Description>
-
-            <div className="mt-5 flex justify-end gap-2">
-              <AlertDialog.Cancel asChild>
-                <button
-                  type="button"
-                  onClick={reset}
-                  className="rounded-md bg-stamp px-3 py-1.5 text-xs font-medium text-white transition-smooth hover:opacity-90 focus-visible:ring-2 focus-visible:ring-stamp/50"
-                >
-                  Close
-                </button>
-              </AlertDialog.Cancel>
             </div>
           </AlertDialog.Content>
         )}

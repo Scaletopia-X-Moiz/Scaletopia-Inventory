@@ -8,26 +8,15 @@ vi.mock("@/lib/auth/dal", () => ({ getUser }));
 const { getClientById } = vi.hoisted(() => ({ getClientById: vi.fn() }));
 vi.mock("@/lib/data/clients", () => ({ getClientById }));
 
-const { logActivity } = vi.hoisted(() => ({ logActivity: vi.fn() }));
-vi.mock("@/lib/activity/log", () => ({ logActivity }));
+const { createPushJob } = vi.hoisted(() => ({ createPushJob: vi.fn() }));
+vi.mock("@/lib/data/push-jobs", () => ({ createPushJob }));
 
-const {
-  runPeopleAddToEmailBison,
-  runCompaniesAddToEmailBison,
-  runPeopleAddToCampaign,
-  runCompaniesAddToCampaign,
-} = vi.hoisted(() => ({
-  runPeopleAddToEmailBison: vi.fn(),
-  runCompaniesAddToEmailBison: vi.fn(),
-  runPeopleAddToCampaign: vi.fn(),
-  runCompaniesAddToCampaign: vi.fn(),
-}));
-vi.mock("@/lib/emailbison/push-to-emailbison", () => ({
-  runPeopleAddToEmailBison,
-  runCompaniesAddToEmailBison,
-  runPeopleAddToCampaign,
-  runCompaniesAddToCampaign,
-}));
+// Keep NextRequest real; stub `after` to a no-op so the fire-and-forget worker
+// kick doesn't actually run during the test.
+vi.mock("next/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/server")>();
+  return { ...actual, after: vi.fn() };
+});
 
 const { POST } = await import("@/app/api/emailbison/push/route");
 
@@ -51,28 +40,19 @@ function makeRequest(body: unknown, query = ""): NextRequest {
   });
 }
 
-async function readSseEvents(response: Response): Promise<Record<string, unknown>[]> {
-  const text = await response.text();
-  return text
-    .split("\n\n")
-    .filter((chunk) => chunk.startsWith("data: "))
-    .map((chunk) => JSON.parse(chunk.slice("data: ".length)));
-}
-
 beforeEach(() => {
   vi.clearAllMocks();
   getUser.mockResolvedValue(testUser);
   getClientById.mockResolvedValue(testClient);
+  createPushJob.mockResolvedValue({ id: "job-abc" });
 });
 
-describe("POST /api/emailbison/push", () => {
+describe("POST /api/emailbison/push (enqueue-only)", () => {
   it("returns 401 when there is no session", async () => {
     getUser.mockResolvedValue(null);
-
     const response = await POST(makeRequest({ entity: "people", action: "workspace", clientId: "client-1" }));
-
     expect(response.status).toBe(401);
-    expect(runPeopleAddToEmailBison).not.toHaveBeenCalled();
+    expect(createPushJob).not.toHaveBeenCalled();
   });
 
   it("returns 400 for an invalid entity", async () => {
@@ -97,19 +77,11 @@ describe("POST /api/emailbison/push", () => {
 
   it("returns 404 when the client doesn't exist", async () => {
     getClientById.mockResolvedValue(null);
-
     const response = await POST(makeRequest({ entity: "people", action: "workspace", clientId: "missing" }));
-
     expect(response.status).toBe(404);
   });
 
-  it("dispatches Add-to-EmailBison for entity=people, streaming progress and a done event", async () => {
-    runPeopleAddToEmailBison.mockImplementation(async (_filters, _client, _user, deps) => {
-      deps.onProgress?.({ phase: "resolving", done: 0, total: 0, pushed: 0, errors: 0 });
-      deps.onProgress?.({ phase: "done", done: 2, total: 2, pushed: 2, errors: 0 });
-      return { total_matched: 2, pushed: 2, errors: 0, failed_people: [] };
-    });
-
+  it("enqueues a people workspace job and returns its id", async () => {
     const response = await POST(
       makeRequest(
         { entity: "people", action: "workspace", clientId: "client-1", existingLeadBehavior: "put" },
@@ -118,78 +90,45 @@ describe("POST /api/emailbison/push", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(runPeopleAddToEmailBison).toHaveBeenCalledTimes(1);
-    expect(runCompaniesAddToEmailBison).not.toHaveBeenCalled();
-    const [, client, user, deps] = runPeopleAddToEmailBison.mock.calls[0];
-    expect(client).toBe(testClient);
-    expect(user).toBe(testUser);
-    expect(deps.existingLeadBehavior).toBe("put");
+    expect(await response.json()).toEqual({ jobId: "job-abc" });
 
-    const events = await readSseEvents(response);
-    expect(events[0]).toMatchObject({ type: "progress", phase: "resolving" });
-    expect(events.at(-1)).toMatchObject({
-      type: "done",
+    expect(createPushJob).toHaveBeenCalledTimes(1);
+    const arg = createPushJob.mock.calls[0][0];
+    expect(arg).toMatchObject({
+      clientId: "client-1",
+      platform: "emailbison_people",
+      entity: "people",
       action: "workspace",
-      result: { total_matched: 2, pushed: 2, errors: 0 },
+      campaignId: null,
+      niche: ["widgets"],
+      triggeredByUserId: "user-1",
+      triggeredByEmail: "operator@example.com",
     });
-    expect((events.at(-1) as { note: string }).note).toMatch(/created or updated/i);
-    expect(logActivity).toHaveBeenCalledWith(
-      "emailbison.push",
-      expect.objectContaining({ target: "people", action: "workspace", pushed: 2 }),
-      testUser
-    );
+    expect(arg.options.existingLeadBehavior).toBe("put");
+    // Parsed filter object stored verbatim, not a re-serialized query string.
+    expect(arg.filters).toMatchObject({ niche: { include: ["widgets"] } });
   });
 
-  it("dispatches Add-to-Campaign for entity=companies with campaignId and parallel", async () => {
-    runCompaniesAddToCampaign.mockImplementation(async (_filters, _client, campaignId, _user, deps) => {
-      deps.onProgress?.({ phase: "attaching", done: 0, total: 3, attached: 0, errors: 0 });
-      return { total_matched: 3, attached: 3, errors: 0, failed_people: [] };
+  it("derives platform=emailbison_companies for a companies workspace push", async () => {
+    await POST(makeRequest({ entity: "companies", action: "workspace", clientId: "client-1" }));
+    expect(createPushJob.mock.calls[0][0]).toMatchObject({
+      platform: "emailbison_companies",
+      entity: "companies",
     });
+  });
 
-    const response = await POST(
+  it("derives platform=emailbison_campaign and carries campaignId + parallel for a campaign push", async () => {
+    await POST(
       makeRequest({
-        entity: "companies",
+        entity: "people",
         action: "campaign",
         clientId: "client-1",
         campaignId: "camp-1",
         parallel: true,
       })
     );
-
-    expect(response.status).toBe(200);
-    expect(runCompaniesAddToCampaign).toHaveBeenCalledTimes(1);
-    expect(runPeopleAddToCampaign).not.toHaveBeenCalled();
-    const [, , campaignId, user, deps] = runCompaniesAddToCampaign.mock.calls[0];
-    expect(campaignId).toBe("camp-1");
-    expect(user).toBe(testUser);
-    expect(deps.parallel).toBe(true);
-
-    const events = await readSseEvents(response);
-    expect(events.at(-1)).toMatchObject({
-      type: "done",
-      action: "campaign",
-      result: { total_matched: 3, attached: 3, errors: 0 },
-    });
-    expect((events.at(-1) as { note: string }).note).toMatch(/queued/i);
-  });
-
-  it("streams an error event and logs a failed activity when the orchestrator throws", async () => {
-    runPeopleAddToEmailBison.mockImplementation(async (_filters, _client, _user, deps) => {
-      deps.onProgress?.({ phase: "pushing", done: 1, total: 5, pushed: 1, errors: 0 });
-      throw new Error('Client "Acme" has no EmailBison credentials configured');
-    });
-
-    const response = await POST(makeRequest({ entity: "people", action: "workspace", clientId: "client-1" }));
-
-    const events = await readSseEvents(response);
-    expect(events.at(-1)).toMatchObject({
-      type: "error",
-      message: 'Client "Acme" has no EmailBison credentials configured',
-    });
-    expect(logActivity).toHaveBeenCalledWith(
-      "emailbison.push",
-      expect.objectContaining({ failed: true, done: 1, total: 5 }),
-      testUser
-    );
+    const arg = createPushJob.mock.calls[0][0];
+    expect(arg).toMatchObject({ platform: "emailbison_campaign", campaignId: "camp-1" });
+    expect(arg.options.parallel).toBe(true);
   });
 });

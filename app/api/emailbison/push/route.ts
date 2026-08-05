@@ -1,41 +1,21 @@
-import type { NextRequest } from "next/server";
+import { after, type NextRequest } from "next/server";
 import { parsePersonFilters } from "@/lib/data/people-search-params";
 import { parseCompanyFilters } from "@/lib/data/companies-search-params";
 import { getClientById } from "@/lib/data/clients";
-import {
-  runPeopleAddToEmailBison,
-  runCompaniesAddToEmailBison,
-  runPeopleAddToCampaign,
-  runCompaniesAddToCampaign,
-  type EmailBisonPushProgress,
-  type EmailBisonCampaignPushProgress,
-  type RunEmailBisonPushDeps,
-  type RunEmailBisonCampaignPushDeps,
-} from "@/lib/emailbison/push-to-emailbison";
+import { createPushJob } from "@/lib/data/push-jobs";
 import type { EmailBisonCustomVariableEntry, EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
 import { getUser } from "@/lib/auth/dal";
-import { logActivity } from "@/lib/activity/log";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
 
 type Entity = "people" | "companies";
 type Action = "workspace" | "campaign";
 
-function sseEvent(data: unknown): Uint8Array {
-  return new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`);
-}
-
-/** Per ADR 0003: Add to Campaign attaches asynchronously on EmailBison's
- * side (up to ~5 minutes to sync), so its summary must say the leads were
- * queued rather than implying immediate campaign membership — unlike Add to
- * EmailBison, whose created/updated/failed counts are immediate. This note
- * carries that distinction on the wire so the caller doesn't have to
- * hard-code copy per action. */
-function summaryNote(action: Action): string {
-  return action === "workspace"
-    ? "Leads were created or updated in the EmailBison workspace immediately."
-    : "Leads were queued for campaign attachment — EmailBison syncs this asynchronously, up to ~5 minutes.";
+/** Header on the immediate worker kick, so a configured PUSH_WORKER_SECRET
+ * still lets our own trigger through the worker route's optional gate. */
+function workerKickHeaders(): Record<string, string> {
+  const workerSecret = process.env.PUSH_WORKER_SECRET;
+  return workerSecret ? { "x-worker-secret": workerSecret } : {};
 }
 
 function isEntity(value: unknown): value is Entity {
@@ -140,80 +120,48 @@ export async function POST(request: NextRequest) {
   const personFilters = entity === "people" ? parsePersonFilters(request.nextUrl.searchParams) : null;
   const companyFilters = entity === "companies" ? parseCompanyFilters(request.nextUrl.searchParams) : null;
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      type Progress = EmailBisonPushProgress | EmailBisonCampaignPushProgress;
-      const lastProgress: { current: Progress | null } = { current: null };
-      const onProgress = <P extends Progress>(p: P) => {
-        lastProgress.current = p;
-        controller.enqueue(sseEvent({ type: "progress", ...p }));
-      };
+  // Background execution (issue #120): rather than run the push inline in an
+  // SSE stream (which the ~300s serverless cap could kill mid-run), enqueue a
+  // push_jobs row and return its id immediately. The worker resolves the
+  // stored filter snapshot every tick and processes in resumable chunks; the
+  // UI polls GET /api/push-jobs/[id] for progress.
+  const platform =
+    action === "campaign"
+      ? "emailbison_campaign"
+      : entity === "people"
+        ? "emailbison_people"
+        : "emailbison_companies";
 
-      try {
-        let result;
-        if (action === "workspace") {
-          const deps: RunEmailBisonPushDeps = {
-            existingLeadBehavior,
-            customVariables,
-            standardFieldMapping,
-            onProgress,
-          };
-          result =
-            entity === "people"
-              ? await runPeopleAddToEmailBison(personFilters!, client, user, deps)
-              : await runCompaniesAddToEmailBison(companyFilters!, client, user, deps);
-        } else {
-          const deps: RunEmailBisonCampaignPushDeps = {
-            existingLeadBehavior,
-            customVariables,
-            standardFieldMapping,
-            parallel: typeof parallel === "boolean" ? parallel : undefined,
-            onProgress,
-          };
-          result =
-            entity === "people"
-              ? await runPeopleAddToCampaign(personFilters!, client, campaignId as string, user, deps)
-              : await runCompaniesAddToCampaign(companyFilters!, client, campaignId as string, user, deps);
-        }
+  const niche = personFilters?.niche?.include ?? companyFilters?.niche?.include ?? [];
+  const filters = (entity === "people" ? personFilters : companyFilters) ?? {};
 
-        await logActivity(
-          "emailbison.push",
-          {
-            target: entity,
-            action,
-            clientId: client.id,
-            ...result,
-          },
-          user
-        );
-        controller.enqueue(sseEvent({ type: "done", action, result, note: summaryNote(action) }));
-      } catch (err) {
-        const message = (err as Error).message;
-        await logActivity(
-          "emailbison.push",
-          {
-            target: entity,
-            action,
-            clientId: client.id,
-            done: lastProgress.current?.done ?? 0,
-            total: lastProgress.current?.total ?? 0,
-            error: message,
-            failed: true,
-          },
-          user
-        );
-        controller.enqueue(sseEvent({ type: "error", message }));
-      } finally {
-        controller.close();
-      }
+  const job = await createPushJob({
+    clientId: client.id,
+    platform,
+    entity,
+    action,
+    campaignId: action === "campaign" ? (campaignId as string) : null,
+    niche,
+    filters: filters as Record<string, unknown>,
+    options: {
+      existingLeadBehavior,
+      customVariables,
+      standardFieldMapping,
+      parallel: typeof parallel === "boolean" ? parallel : undefined,
     },
+    triggeredByUserId: user.id,
+    triggeredByEmail: user.email,
   });
 
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-    },
+  // Kick the worker immediately so the user doesn't wait for the next cron
+  // minute. Fire-and-forget after the response is sent; the Vercel Cron
+  // backstop covers a dropped kick.
+  after(() => {
+    fetch(new URL("/api/internal/push-worker", request.url), {
+      method: "POST",
+      headers: workerKickHeaders(),
+    }).catch(() => {});
   });
+
+  return Response.json({ jobId: job.id });
 }

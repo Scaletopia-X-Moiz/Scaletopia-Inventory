@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import {
-  claimNextQueuedJob,
+  claimNextRunnableJob,
   createPushJob,
   finishJob,
   getPushJob,
@@ -58,6 +58,18 @@ async function insertPerson(fullName: string): Promise<string> {
   return (data as { id: string }).id;
 }
 
+/** Empties the runnable queue so a claim/serialization assertion sees only the
+ * rows the test just created. Per-client serialization means one claim pass
+ * leaves a client's other queued jobs behind (its first is now running), so
+ * each claimed job is finished to free its client and let the loop continue. */
+async function drainQueue(): Promise<void> {
+  let job = await claimNextRunnableJob();
+  while (job) {
+    await finishJob(job.id, { status: "canceled", succeeded: 0, failed: 0 });
+    job = await claimNextRunnableJob();
+  }
+}
+
 describe("push-jobs data access", () => {
   it("creates a queued job with the trigger-time filter/options snapshot", async () => {
     const clientId = await insertClient(unique("Client"));
@@ -92,20 +104,14 @@ describe("push-jobs data access", () => {
     expect(fetched).toBeNull();
   });
 
-  it("claims the oldest queued job and flips it to running", async () => {
-    // claimNextQueuedJob claims globally (a single worker across all
-    // clients), so drain any queued rows other tests in this file left
-    // behind before asserting FIFO order between our own two jobs.
-    while (await claimNextQueuedJob()) {
-      // drain
-    }
-
+  it("claims the oldest queued job whose client is idle and flips it to running", async () => {
+    await drainQueue();
     const clientId = await insertClient(unique("Client"));
 
     const older = await createPushJob({ clientId, platform: "ghl", entity: "people", filters: {} });
     await createPushJob({ clientId, platform: "ghl", entity: "people", filters: {} });
 
-    const claimed = await claimNextQueuedJob();
+    const claimed = await claimNextRunnableJob();
 
     expect(claimed?.id).toBe(older.id);
     expect(claimed?.status).toBe("running");
@@ -113,6 +119,59 @@ describe("push-jobs data access", () => {
 
     const refetched = await getPushJob(older.id);
     expect(refetched?.status).toBe("running");
+  });
+
+  it("serializes a second push to the same client behind the first, then auto-starts it", async () => {
+    await drainQueue();
+    const clientId = await insertClient(unique("Client"));
+
+    const first = await createPushJob({ clientId, platform: "ghl", entity: "people", filters: {} });
+    const second = await createPushJob({ clientId, platform: "ghl", entity: "people", filters: {} });
+
+    const claimedFirst = await claimNextRunnableJob();
+    expect(claimedFirst?.id).toBe(first.id);
+
+    // The client now has a running job, so the second push is not claimable —
+    // no other clients are queued, so the claim comes back empty.
+    expect(await claimNextRunnableJob()).toBeNull();
+    expect((await getPushJob(second.id))?.status).toBe("queued");
+
+    // Finishing the first frees the client; the next claim auto-starts the second.
+    await finishJob(first.id, { status: "succeeded", succeeded: 1, failed: 0 });
+    const claimedSecond = await claimNextRunnableJob();
+    expect(claimedSecond?.id).toBe(second.id);
+    expect(claimedSecond?.status).toBe("running");
+  });
+
+  it("lets two different clients run concurrently", async () => {
+    await drainQueue();
+    const clientA = await insertClient(unique("Client A"));
+    const clientB = await insertClient(unique("Client B"));
+
+    const jobA = await createPushJob({ clientId: clientA, platform: "ghl", entity: "people", filters: {} });
+    const jobB = await createPushJob({ clientId: clientB, platform: "ghl", entity: "people", filters: {} });
+
+    const first = await claimNextRunnableJob();
+    expect(first?.id).toBe(jobA.id);
+
+    // A is running, but B is a different client — its push may start alongside.
+    const second = await claimNextRunnableJob();
+    expect(second?.id).toBe(jobB.id);
+    expect(second?.status).toBe("running");
+  });
+
+  it("respects the max_concurrent cap across all clients", async () => {
+    await drainQueue();
+    const clientA = await insertClient(unique("Client A"));
+    const clientB = await insertClient(unique("Client B"));
+
+    await createPushJob({ clientId: clientA, platform: "ghl", entity: "people", filters: {} });
+    await createPushJob({ clientId: clientB, platform: "ghl", entity: "people", filters: {} });
+
+    // With a cap of 1, the first claim runs but the second is throttled even
+    // though it belongs to an idle client.
+    expect(await claimNextRunnableJob(1)).not.toBeNull();
+    expect(await claimNextRunnableJob(1)).toBeNull();
   });
 
   it("updates progress counters mid-run", async () => {
@@ -148,7 +207,8 @@ describe("push-jobs data access", () => {
   });
 
   it("lists jobs newest first, filterable by client/platform/status", async () => {
-    const clientId = await insertClient(unique("Client"));
+    const clientName = unique("Client");
+    const clientId = await insertClient(clientName);
     const otherClientId = await insertClient(unique("Other Client"));
 
     const first = await createPushJob({ clientId, platform: "ghl", entity: "people", filters: {} });
@@ -160,6 +220,9 @@ describe("push-jobs data access", () => {
     expect(total).toBe(2);
     expect(rows[0].id).toBe(second.id);
     expect(rows[1].id).toBe(first.id);
+    // Rows are joined to their client so the Push Activity panel (#122) can
+    // show the client name without a second fetch.
+    expect(rows[0].client).toEqual({ id: clientId, name: clientName });
 
     const { rows: platformRows, total: platformTotal } = await listPushJobs({
       clientId,

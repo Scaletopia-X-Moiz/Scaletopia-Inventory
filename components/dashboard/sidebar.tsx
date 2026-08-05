@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { motion } from "framer-motion";
-import { Activity, ArrowRightLeft, Building2, ChevronRight, KeyRound, LogOut, PieChart, Ticket, Upload, UserCog, Users } from "lucide-react";
+import { Activity, ArrowRightLeft, Building2, ChevronRight, KeyRound, LogOut, PieChart, Radio, Ticket, Upload, UserCog, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ScaletopiaLogo } from "@/components/shared/scaletopia-logo";
 import { useSession } from "@/components/dashboard/session-context";
@@ -22,6 +22,7 @@ const DATA_ITEMS = [
 // admin/dev see and manage all of them (see /tickets and lib/data/tickets.ts).
 const WORK_ITEMS = [
   { href: "/tickets", label: "Tickets", icon: Ticket },
+  { href: "/push-activity", label: "Push Activity", icon: Radio },
   { href: "/push-history", label: "Push History", icon: ArrowRightLeft },
 ];
 

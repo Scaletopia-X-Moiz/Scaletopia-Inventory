@@ -28,6 +28,20 @@ export interface GhlPushResult {
   errors: number;
   /** Display names of people whose push failed, one per failed record. */
   failed_people: string[];
+  /** Person ids pushed successfully this call — used by the background
+   * worker (issue #120) to tag push_job_records. Reflects only this call's
+   * candidates (see `offset`/`deadline` on RunGhlPushDeps), not necessarily
+   * the whole job. */
+  succeededPersonIds: string[];
+  /** Person ids whose push failed this call — same per-call scope. */
+  failedPersonIds: string[];
+  /** Index into the deterministic eligible-candidate list to resume from on
+   * the next call — equal to `eligible` once `done`. */
+  nextOffset: number;
+  /** True once every eligible candidate has been attempted (across
+   * `offset`-chained calls) — false means the caller hit `deadline` before
+   * finishing and should call again with `offset: nextOffset`. */
+  done: boolean;
 }
 
 export interface GhlPushProgress {
@@ -55,6 +69,17 @@ export interface RunGhlPushDeps {
    * this run — see buildGhlTag. Left undefined/blank, the tag format is
    * unchanged. */
   customTagSuffix?: string | null;
+  /** Index into the resolved eligible-candidate list to resume from — the
+   * background worker (issue #120) re-resolves getPeopleForGhl(filters)
+   * every tick (deterministic for unchanged filters/data) and slices from
+   * here rather than persisting the whole candidate set. Defaults to 0. */
+  offset?: number;
+  /** Wall-clock epoch-ms deadline: stop after the group in flight when it's
+   * passed, returning `done: false` and the offset to resume from, rather
+   * than running the whole eligible set to completion. Omitted (the
+   * default) preserves today's run-to-completion behavior for direct/test
+   * callers. */
+  deadline?: number;
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -187,6 +212,8 @@ export async function runPeopleGhlPush(
   const fieldMapping = deps.fieldMapping ?? [];
   const standardFieldMapping = deps.standardFieldMapping;
   const customTagSuffix = deps.customTagSuffix;
+  const offset = deps.offset ?? 0;
+  const deadline = deps.deadline;
 
   onProgress?.({ phase: "resolving", done: 0, total: 0, pushed: 0, errors: 0 });
 
@@ -204,19 +231,29 @@ export async function runPeopleGhlPush(
       tagAppended: 0,
       errors: 0,
       failed_people: [],
+      succeededPersonIds: [],
+      failedPersonIds: [],
+      nextOffset: 0,
+      done: true,
     };
   }
 
-  onProgress?.({ phase: "pushing", done: 0, total: eligible.length, pushed: 0, errors: 0 });
+  const remaining = eligible.slice(offset);
+
+  onProgress?.({ phase: "pushing", done: offset, total: eligible.length, pushed: 0, errors: 0 });
 
   let pushed = 0;
   let created = 0;
   let tagAppended = 0;
   let errors = 0;
-  let done = 0;
+  let attempted = 0;
   const failed_people: string[] = [];
+  const succeededPersonIds: string[] = [];
+  const failedPersonIds: string[] = [];
 
-  for (const group of chunk(eligible, GHL_PUSH_CONCURRENCY)) {
+  const groups = chunk(remaining, GHL_PUSH_CONCURRENCY);
+
+  for (const group of groups) {
     const results = await Promise.allSettled(
       group.map(async (candidate) => ({
         candidate,
@@ -234,9 +271,10 @@ export async function runPeopleGhlPush(
     );
 
     for (const settled of results) {
-      done++;
+      attempted++;
       if (settled.status === "fulfilled" && settled.value.result.ok) {
         pushed++;
+        succeededPersonIds.push(settled.value.candidate.id);
         if (settled.value.result.deduped) {
           tagAppended++;
         } else {
@@ -250,6 +288,7 @@ export async function runPeopleGhlPush(
             ? (settled.value.result as { ok: false; error: string }).error
             : String((settled as PromiseRejectedResult).reason);
         failed_people.push(candidate?.displayName || "unknown");
+        if (candidate) failedPersonIds.push(candidate.id);
         // platform_pushes has no column for a failed attempt, so this is the
         // only place a failure's actual cause (vs. just "who failed") is
         // recoverable — mirrors lib/clay/push-to-clay.ts's best-effort
@@ -260,10 +299,17 @@ export async function runPeopleGhlPush(
       }
     }
 
-    onProgress?.({ phase: "pushing", done, total: eligible.length, pushed, errors });
+    onProgress?.({ phase: "pushing", done: offset + attempted, total: eligible.length, pushed, errors });
+
+    if (deadline !== undefined && Date.now() >= deadline && attempted < remaining.length) {
+      break;
+    }
   }
 
-  onProgress?.({ phase: "done", done, total: eligible.length, pushed, errors });
+  const nextOffset = offset + attempted;
+  const isDone = nextOffset >= eligible.length;
+
+  onProgress?.({ phase: "done", done: nextOffset, total: eligible.length, pushed, errors });
 
   return {
     total_matched,
@@ -274,5 +320,9 @@ export async function runPeopleGhlPush(
     tagAppended,
     errors,
     failed_people,
+    succeededPersonIds,
+    failedPersonIds,
+    nextOffset,
+    done: isDone,
   };
 }

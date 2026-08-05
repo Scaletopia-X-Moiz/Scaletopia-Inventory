@@ -5,10 +5,8 @@ import { AlertDialog } from "radix-ui";
 import { Loader2, Send } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
-import { runSse } from "@/components/shared/use-sse-run";
 import { fetchActiveClients } from "@/lib/data/active-clients-client";
 import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
-import type { GhlPushResult } from "@/lib/ghl/push-to-ghl";
 import type { GhlCustomField } from "@/lib/ghl/custom-fields";
 import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
@@ -60,13 +58,8 @@ interface PreviewCounts {
   skipped: number;
 }
 
-type SseEvent =
-  | { type: "progress"; phase: "resolving" | "pushing" | "done"; done: number; total: number; pushed: number; errors: number }
-  | { type: "done"; result: GhlPushResult }
-  | { type: "error"; message: string };
-
 type Status = "idle" | "open" | "pushing";
-type Step = "picker" | "mapping" | "confirm" | "summary";
+type Step = "picker" | "mapping" | "confirm";
 
 export function PushToGhlButton({
   paramsStr,
@@ -105,15 +98,12 @@ export function PushToGhlButton({
 
   const [customTagSuffix, setCustomTagSuffix] = useState("");
 
-  const [result, setResult] = useState<GhlPushResult | null>(null);
-
   const busy = status === "pushing";
   const selectedClient = clients?.find((c) => c.id === selectedClientId) ?? null;
 
-  // Registers this dialog (including its persistent "Push complete" summary
-  // step) with the shared dialog stack so other prompts — e.g. the post-push
-  // "remove temporary columns?" prompt — know not to open on top of it
-  // (issue #89).
+  // Registers this dialog with the shared dialog stack so other prompts — e.g.
+  // the post-push "remove temporary columns?" prompt — defer until it closes
+  // rather than stacking on top of it (issue #89).
   useRegisterDialogOpen(status !== "idle");
 
   function reset() {
@@ -130,7 +120,6 @@ export function PushToGhlButton({
     setPreview(null);
     setPreviewError(null);
     setCustomTagSuffix("");
-    setResult(null);
   }
 
   async function handleClick() {
@@ -233,8 +222,7 @@ export function PushToGhlButton({
     if (!selectedClient) return;
 
     setStatus("pushing");
-    setPushLabel("Pushing…");
-    let reachedDone = false;
+    setPushLabel("Queuing…");
 
     const fieldMapping: GhlFieldMapping[] = Object.entries(mapping)
       .filter(([, virtualColumnKey]) => virtualColumnKey !== "")
@@ -248,61 +236,35 @@ export function PushToGhlButton({
       customFieldMapping: mapping,
     } satisfies SavedGhlFieldMapping).catch(() => {});
 
+    // Pushes now run as durable background jobs (issue #120): POST enqueues a
+    // push_jobs row and returns immediately. Rather than block the dialog on
+    // the run, we toast and close — live progress and the completion summary
+    // live in the Push Activity panel (issue #122).
     try {
-      await runSse<SseEvent>(
-        `/api/people/push-to-ghl?${paramsStr}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            clientId: selectedClient.id,
-            fieldMapping,
-            standardFieldMapping: standardFields,
-            customTagSuffix: customTagSuffix.trim() || undefined,
-          }),
-        },
-        (event) => {
-          if (event.type === "done") reachedDone = true;
-          handleSseEvent(event);
-        }
-      );
+      const res = await fetch(`/api/people/push-to-ghl?${paramsStr}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientId: selectedClient.id,
+          fieldMapping,
+          standardFieldMapping: standardFields,
+          customTagSuffix: customTagSuffix.trim() || undefined,
+        }),
+      });
+      if (!res.ok) {
+        const message = (await res.json().catch(() => null))?.error ?? "Failed to start push";
+        throw new Error(message);
+      }
     } catch (error) {
-      showToast((error as Error).message || "Push interrupted — try again.", "error");
-      console.error("Push to GHL stream error:", error);
+      showToast((error as Error).message || "Failed to queue push — try again.", "error");
+      console.error("Push to GHL error:", error);
       reset();
       return;
     }
 
-    // A terminal `{type: "error"}` frame (e.g. missing GHL credentials) closes
-    // the stream without ever sending `done` — treat that as a failed run and
-    // close the dialog rather than leaving it stuck mid-"pushing".
-    if (!reachedDone) {
-      reset();
-      return;
-    }
-
-    setPushLabel(null);
-  }
-
-  function handleSseEvent(event: SseEvent) {
-    if (event.type === "progress") {
-      setPushLabel(
-        event.phase === "resolving" ? "Resolving…" : `Pushing ${event.done}/${event.total}…`
-      );
-      return;
-    }
-
-    if (event.type === "error") {
-      showToast(event.message, "error");
-      return;
-    }
-
-    if (event.type === "done") {
-      setResult(event.result);
-      setStatus("open");
-      setStep("summary");
-      onDone?.();
-    }
+    showToast("Push queued — track it in Push Activity", "success");
+    onDone?.();
+    reset();
   }
 
   const label = status === "pushing" && pushLabel ? pushLabel : "Push to GHL";
@@ -522,7 +484,7 @@ export function PushToGhlButton({
               </button>
             </div>
           </AlertDialog.Content>
-        ) : step === "confirm" ? (
+        ) : (
           <AlertDialog.Content className="fixed top-[26%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
             <AlertDialog.Title className="text-sm font-semibold text-ink">
               Push to {selectedClient?.name}?
@@ -598,51 +560,6 @@ export function PushToGhlButton({
               >
                 Push {preview ? preview.eligible.toLocaleString("en-US") : ""}
               </button>
-            </div>
-          </AlertDialog.Content>
-        ) : (
-          <AlertDialog.Content className="fixed top-[26%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
-            <AlertDialog.Title className="text-sm font-semibold text-ink">
-              Push complete
-            </AlertDialog.Title>
-            <AlertDialog.Description asChild>
-              <div className="mt-2 text-sm text-ink-soft">
-                {result ? (
-                  <ul className="flex flex-col gap-1">
-                    <li>
-                      Created: <strong className="text-ink">{result.created}</strong>
-                    </li>
-                    <li>
-                      Tag appended (already in GHL):{" "}
-                      <strong className="text-ink">{result.tagAppended}</strong>
-                    </li>
-                    <li>
-                      Failed: <strong className="text-ink">{result.errors}</strong>
-                    </li>
-                    <li>
-                      Skipped (landline/other): <strong className="text-ink">{result.skipped}</strong>
-                    </li>
-                    {result.failed_people.length > 0 ? (
-                      <li className="mt-1 text-xs text-ink-mute">
-                        Failed: {result.failed_people.slice(0, 5).join(", ")}
-                        {result.failed_people.length > 5 ? "…" : ""}
-                      </li>
-                    ) : null}
-                  </ul>
-                ) : null}
-              </div>
-            </AlertDialog.Description>
-
-            <div className="mt-5 flex justify-end gap-2">
-              <AlertDialog.Cancel asChild>
-                <button
-                  type="button"
-                  onClick={reset}
-                  className="rounded-md bg-stamp px-3 py-1.5 text-xs font-medium text-white transition-smooth hover:opacity-90 focus-visible:ring-2 focus-visible:ring-stamp/50"
-                >
-                  Close
-                </button>
-              </AlertDialog.Cancel>
             </div>
           </AlertDialog.Content>
         )}
