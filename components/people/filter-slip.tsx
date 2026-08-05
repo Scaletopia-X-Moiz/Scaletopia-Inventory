@@ -7,6 +7,9 @@ import { FilterChipGroup, type ChipOption } from "@/components/companies/filter-
 import { FilterPopover } from "@/components/shared/filter-popover";
 import { SingleSelectGroup } from "@/components/people/single-select-group";
 import { PushJobFilterChip } from "@/components/shared/push-job-filter-chip";
+import { PushStatusFilterPopover } from "@/components/shared/push-status-filter-popover";
+import { parsePushStatusFilter, type PushStatusFilter } from "@/lib/data/push-status-filter";
+import type { ClientOption } from "@/lib/data/clients";
 import type { PersonFilterOptions } from "@/lib/data/people";
 
 const MULTI_PARAMS = [
@@ -19,7 +22,13 @@ const MULTI_PARAMS = [
   "phoneType",
 ] as const;
 
-export function PeopleFilterSlip({ options }: { options: PersonFilterOptions }) {
+export function PeopleFilterSlip({
+  options,
+  clientOptions,
+}: {
+  options: PersonFilterOptions;
+  clientOptions: ClientOption[];
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -111,6 +120,20 @@ export function PeopleFilterSlip({ options }: { options: PersonFilterOptions }) 
     });
   }
 
+  function setPushStatus(next: PushStatusFilter | undefined) {
+    navigate((params) => {
+      if (next) {
+        params.set("pushClient", next.clientId);
+        params.set("pushPlatform", next.platform);
+        params.set("pushStatus", next.status);
+      } else {
+        params.delete("pushClient");
+        params.delete("pushPlatform");
+        params.delete("pushStatus");
+      }
+    });
+  }
+
   function commitCustomRange(min: string, max: string) {
     navigate((params) => {
       if (min.trim()) params.set("empmin", min.trim());
@@ -140,7 +163,12 @@ export function PeopleFilterSlip({ options }: { options: PersonFilterOptions }) 
     Boolean(searchParams.get("empmin")) ||
     Boolean(searchParams.get("empmax")) ||
     Boolean(searchParams.get("pushJobId")) ||
+    Boolean(searchParams.get("pushClient")) ||
+    Boolean(searchParams.get("pushPlatform")) ||
+    Boolean(searchParams.get("pushStatus")) ||
     MULTI_PARAMS.some((p) => searchParams.getAll(p).length > 0 || searchParams.getAll(`${p}_exclude`).length > 0);
+
+  const pushStatusValue = parsePushStatusFilter(new URLSearchParams(searchParams.toString()));
 
   const toOptions = (entries: { id: string; label: string; count: number }[]): ChipOption[] =>
     entries.map((e) => ({ id: e.id, label: e.label, count: e.count }));
@@ -299,6 +327,11 @@ export function PeopleFilterSlip({ options }: { options: PersonFilterOptions }) 
           />
         </div>
       </FilterPopover>
+      <PushStatusFilterPopover
+        clientOptions={clientOptions}
+        value={pushStatusValue}
+        onChange={setPushStatus}
+      />
 
       <button
         type="button"
