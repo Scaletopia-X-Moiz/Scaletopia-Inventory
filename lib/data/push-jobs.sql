@@ -46,6 +46,55 @@ CREATE TABLE IF NOT EXISTS push_jobs (
 CREATE INDEX IF NOT EXISTS push_jobs_status_created_idx ON push_jobs (status, created_at);
 CREATE INDEX IF NOT EXISTS push_jobs_client_idx        ON push_jobs (client_id, created_at DESC);
 
+-- Atomic per-client claim (ticket #121, "queueing / serialization").
+--
+-- Picks the oldest `queued` job whose client has no job already `running`,
+-- flips it to `running`, and returns it — all in one statement so two
+-- concurrent worker ticks can never claim the same row (`FOR UPDATE SKIP
+-- LOCKED` on the candidate). The `NOT EXISTS (running for this client)`
+-- predicate is the whole serialization rule: rate limits are per EmailBison
+-- workspace / GHL location (i.e. per client), so a second push to the *same*
+-- client must queue behind the first, while two *different* clients' pushes
+-- may run at once. "Auto-start when the current completes" falls out for free:
+-- once the running job goes terminal its client is no longer `running`, so the
+-- next tick claims the now-unblocked queued job.
+--
+-- `max_concurrent` is an optional soft cap on total running jobs across all
+-- clients, so a burst of many-client pushes doesn't spin up unboundedly many
+-- overlapping worker invocations. NULL disables the cap. It is best-effort:
+-- concurrent claimers each see the pre-claim count under SKIP LOCKED, so the
+-- live total can briefly exceed the cap by the number of simultaneous
+-- claimers — fine for a soft throttle on an internal tool.
+--
+-- Returns 0 rows when nothing is runnable (all queued clients busy, or the cap
+-- is hit). Only ever claims `queued` jobs — resuming a `running` job left by a
+-- timed-out invocation is the worker's job (it self-chains by id), not this
+-- function's.
+CREATE OR REPLACE FUNCTION claim_next_runnable_job(max_concurrent integer DEFAULT NULL)
+RETURNS SETOF push_jobs
+LANGUAGE sql
+AS $$
+  UPDATE push_jobs
+  SET status = 'running', started_at = now()
+  WHERE id = (
+    SELECT j.id
+    FROM push_jobs j
+    WHERE j.status = 'queued'
+      AND NOT EXISTS (
+        SELECT 1 FROM push_jobs r
+        WHERE r.status = 'running' AND r.client_id = j.client_id
+      )
+      AND (
+        max_concurrent IS NULL
+        OR (SELECT count(*) FROM push_jobs c WHERE c.status = 'running') < max_concurrent
+      )
+    ORDER BY j.created_at
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1
+  )
+  RETURNING *;
+$$;
+
 CREATE TABLE IF NOT EXISTS push_job_records (
   push_job_id uuid NOT NULL REFERENCES push_jobs(id) ON DELETE CASCADE,
   person_id   uuid NOT NULL REFERENCES people(id),

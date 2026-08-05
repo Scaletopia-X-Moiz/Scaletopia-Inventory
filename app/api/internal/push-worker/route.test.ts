@@ -5,13 +5,20 @@ import type { ClientRow } from "@/lib/data/clients";
 const { after } = vi.hoisted(() => ({ after: vi.fn() }));
 vi.mock("next/server", () => ({ after }));
 
-const { getResumableJob, updateJobProgress, finishJob, recordJobPeople } = vi.hoisted(() => ({
-  getResumableJob: vi.fn(),
+const { claimNextRunnableJob, getPushJob, updateJobProgress, finishJob, recordJobPeople } = vi.hoisted(() => ({
+  claimNextRunnableJob: vi.fn(),
+  getPushJob: vi.fn(),
   updateJobProgress: vi.fn(),
   finishJob: vi.fn(),
   recordJobPeople: vi.fn(),
 }));
-vi.mock("@/lib/data/push-jobs", () => ({ getResumableJob, updateJobProgress, finishJob, recordJobPeople }));
+vi.mock("@/lib/data/push-jobs", () => ({
+  claimNextRunnableJob,
+  getPushJob,
+  updateJobProgress,
+  finishJob,
+  recordJobPeople,
+}));
 
 const { getClientById } = vi.hoisted(() => ({ getClientById: vi.fn() }));
 vi.mock("@/lib/data/clients", () => ({ getClientById }));
@@ -111,7 +118,7 @@ beforeEach(() => {
 
 describe("push-worker auth", () => {
   it("skips the check when no secret env var is set", async () => {
-    getResumableJob.mockResolvedValue(null);
+    claimNextRunnableJob.mockResolvedValue(null);
     const res = await POST(req());
     expect(res.status).toBe(200);
   });
@@ -120,12 +127,12 @@ describe("push-worker auth", () => {
     process.env.CRON_SECRET = "s3cret";
     const res = await GET(new Request("http://localhost/api/internal/push-worker"));
     expect(res.status).toBe(401);
-    expect(getResumableJob).not.toHaveBeenCalled();
+    expect(claimNextRunnableJob).not.toHaveBeenCalled();
   });
 
   it("accepts a matching x-worker-secret header", async () => {
     process.env.PUSH_WORKER_SECRET = "wsecret";
-    getResumableJob.mockResolvedValue(null);
+    claimNextRunnableJob.mockResolvedValue(null);
     const res = await POST(
       new Request("http://localhost/api/internal/push-worker", {
         method: "POST",
@@ -138,11 +145,14 @@ describe("push-worker auth", () => {
 
 describe("push-worker dispatch + finish", () => {
   it("dispatches a GHL job, records people, finishes succeeded, logs activity, no self-chain", async () => {
-    getResumableJob.mockResolvedValueOnce(makeJob()).mockResolvedValue(null);
+    claimNextRunnableJob.mockResolvedValueOnce(makeJob()).mockResolvedValue(null);
     runPeopleGhlPush.mockResolvedValue(ghlResult());
 
     const res = await POST(req());
     expect(res.status).toBe(200);
+
+    // Claim path (no jobId body) throttled by the concurrency cap.
+    expect(claimNextRunnableJob).toHaveBeenCalledWith(expect.any(Number));
 
     expect(runPeopleGhlPush).toHaveBeenCalledTimes(1);
     const [filters, client, actor, deps] = runPeopleGhlPush.mock.calls[0];
@@ -173,7 +183,7 @@ describe("push-worker dispatch + finish", () => {
   });
 
   it("finishes partial when some succeed and some fail", async () => {
-    getResumableJob.mockResolvedValueOnce(makeJob()).mockResolvedValue(null);
+    claimNextRunnableJob.mockResolvedValueOnce(makeJob()).mockResolvedValue(null);
     runPeopleGhlPush.mockResolvedValue(
       ghlResult({
         succeededPersonIds: ["p1"],
@@ -195,7 +205,7 @@ describe("push-worker dispatch + finish", () => {
   });
 
   it("dispatches an EmailBison workspace people job", async () => {
-    getResumableJob
+    claimNextRunnableJob
       .mockResolvedValueOnce(makeJob({ platform: "emailbison_people", entity: "people" }))
       .mockResolvedValue(null);
     runPeopleAddToEmailBison.mockResolvedValue({
@@ -218,7 +228,7 @@ describe("push-worker dispatch + finish", () => {
   });
 
   it("dispatches an EmailBison campaign companies job with campaignId", async () => {
-    getResumableJob
+    claimNextRunnableJob
       .mockResolvedValueOnce(
         makeJob({ platform: "emailbison_campaign", entity: "companies", action: "campaign", campaignId: "camp-9" })
       )
@@ -245,7 +255,7 @@ describe("push-worker dispatch + finish", () => {
 
 describe("push-worker continue + self-chain", () => {
   it("updates progress and self-chains when a tick is not done", async () => {
-    getResumableJob.mockResolvedValueOnce(makeJob()).mockResolvedValue(null);
+    claimNextRunnableJob.mockResolvedValueOnce(makeJob()).mockResolvedValue(null);
     runPeopleGhlPush.mockResolvedValue(
       ghlResult({ done: false, nextOffset: 100, succeededPersonIds: ["p1"], failedPersonIds: [], pushed: 1 })
     );
@@ -263,10 +273,21 @@ describe("push-worker continue + self-chain", () => {
     expect(finishJob).not.toHaveBeenCalled();
     expect(after).toHaveBeenCalledTimes(1);
     expect(body.chained).toBe(true);
+
+    // The self-chain must carry the in-progress job id so the next invocation
+    // resumes *this* row directly (keeping its client `running` so a
+    // concurrent invocation can pick up a different client) rather than
+    // re-claiming it.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null));
+    await (after.mock.calls[0][0] as () => void | Promise<void>)();
+    const [, init] = fetchSpy.mock.calls[0];
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(init?.body as string)).toEqual({ jobId: "job-1" });
+    fetchSpy.mockRestore();
   });
 
   it("resumes accumulated totals from the job row and offset from the cursor", async () => {
-    getResumableJob
+    claimNextRunnableJob
       .mockResolvedValueOnce(makeJob({ succeeded: 5, failed: 1, cursor: { offset: 50 } }))
       .mockResolvedValue(null);
     runPeopleGhlPush.mockResolvedValue(
@@ -284,9 +305,48 @@ describe("push-worker continue + self-chain", () => {
   });
 });
 
+describe("push-worker resume by jobId (self-chain)", () => {
+  const resumeReq = (jobId: string) =>
+    new Request("http://localhost/api/internal/push-worker", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jobId }),
+    });
+
+  it("resumes the posted running job directly, from its cursor, without claiming it", async () => {
+    getPushJob.mockResolvedValue(makeJob({ id: "job-7", cursor: { offset: 20 } }));
+    // No claim result — so the only job that can be processed is the resumed
+    // one; claim is used solely to look for further work after it finishes.
+    claimNextRunnableJob.mockResolvedValue(null);
+    runPeopleGhlPush.mockResolvedValue(
+      ghlResult({ done: true, nextOffset: 22, succeededPersonIds: ["p21"], failedPersonIds: [] })
+    );
+
+    const res = await POST(resumeReq("job-7"));
+    expect(res.status).toBe(200);
+
+    expect(getPushJob).toHaveBeenCalledWith("job-7");
+    expect(runPeopleGhlPush).toHaveBeenCalledTimes(1);
+    expect(runPeopleGhlPush.mock.calls[0][3].offset).toBe(20);
+    expect(finishJob).toHaveBeenCalledWith("job-7", expect.objectContaining({ status: "succeeded" }));
+  });
+
+  it("skips a posted job that is already terminal and falls through to the claim path", async () => {
+    getPushJob.mockResolvedValue(makeJob({ id: "job-8", status: "succeeded" }));
+    claimNextRunnableJob.mockResolvedValue(null);
+
+    const res = await POST(resumeReq("job-8"));
+    expect(res.status).toBe(200);
+
+    expect(getPushJob).toHaveBeenCalledWith("job-8");
+    expect(claimNextRunnableJob).toHaveBeenCalledTimes(1);
+    expect(runPeopleGhlPush).not.toHaveBeenCalled();
+  });
+});
+
 describe("push-worker error handling", () => {
   it("finishes a job failed when its tick throws, without crashing the invocation", async () => {
-    getResumableJob.mockResolvedValueOnce(makeJob()).mockResolvedValue(null);
+    claimNextRunnableJob.mockResolvedValueOnce(makeJob()).mockResolvedValue(null);
     runPeopleGhlPush.mockRejectedValue(new Error("EmailBison exploded"));
 
     const res = await POST(req());
@@ -298,7 +358,7 @@ describe("push-worker error handling", () => {
   });
 
   it("finishes a job failed when its client no longer exists", async () => {
-    getResumableJob.mockResolvedValueOnce(makeJob()).mockResolvedValue(null);
+    claimNextRunnableJob.mockResolvedValueOnce(makeJob()).mockResolvedValue(null);
     getClientById.mockResolvedValue(null);
 
     await POST(req());

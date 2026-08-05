@@ -1,6 +1,7 @@
 import { after } from "next/server";
 import {
-  getResumableJob,
+  claimNextRunnableJob,
+  getPushJob,
   updateJobProgress,
   finishJob,
   recordJobPeople,
@@ -39,6 +40,13 @@ const TICK_BUDGET_MS = 240_000;
  * would otherwise grow unbounded across ticks of a large, failure-heavy run.
  * The Push Activity panel (#122) surfaces only a sample of failures anyway. */
 const MAX_FAILURES_KEPT = 50;
+
+/** Soft cap on how many jobs may be `running` at once across all clients
+ * (ticket #121). Per-client serialization already keeps one client to a single
+ * running job; this bounds the *total* so a burst of many-client pushes can't
+ * spin up unboundedly many overlapping worker invocations. Passed to the claim
+ * query, which treats it as best-effort. */
+const MAX_CONCURRENT_JOBS = 3;
 
 const WORKER_PATH = "/api/internal/push-worker";
 
@@ -246,35 +254,74 @@ async function processJobTick(job: PushJob, workerDeadline: number): Promise<boo
   return false;
 }
 
+/** Reads the `{ jobId }` the self-chain POSTs so a not-yet-done job resumes on
+ * the exact same row rather than being re-claimed. Cron GETs and the enqueue-
+ * route kicks carry no body — those start on the claim path (pick up whatever
+ * is runnable). Malformed/absent bodies fall through to null. */
+async function resumeJobIdFrom(request: Request): Promise<string | null> {
+  if (request.method !== "POST") return null;
+  try {
+    const body = (await request.json()) as { jobId?: unknown } | null;
+    return body && typeof body.jobId === "string" ? body.jobId : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The shared tick loop behind both GET (Vercel Cron) and POST (self-chain /
- * route-triggered kick). Processes jobs until the queue drains or the wall-
+ * route-triggered kick). Processes jobs until nothing is runnable or the wall-
  * clock budget is spent; self-chains via `after()` when it stops with work
  * still outstanding, so a large push spans multiple invocations without
- * waiting for the next cron minute. */
+ * waiting for the next cron minute.
+ *
+ * Two entry paths, so per-client concurrency (#121) works: a self-chain POSTs
+ * the in-progress `jobId` and resumes *that* row directly (its client stays
+ * `running`, so a concurrent invocation's claim skips it and can pick up a
+ * *different* client's job instead — the two run in parallel). Everything else
+ * claims the next runnable job — the oldest `queued` job whose client isn't
+ * already running — so a second push to the same client waits its turn. */
 async function runWorker(request: Request): Promise<Response> {
   const workerDeadline = Date.now() + WORKER_BUDGET_MS;
   let processed = 0;
   let chained = false;
 
-  const scheduleSelfChain = () => {
+  const scheduleSelfChain = (jobId?: string) => {
     chained = true;
     after(() => {
       fetch(new URL(WORKER_PATH, request.url), {
         method: "POST",
-        headers: selfChainHeaders(),
+        headers: jobId
+          ? { ...selfChainHeaders(), "content-type": "application/json" }
+          : selfChainHeaders(),
+        body: jobId ? JSON.stringify({ jobId }) : undefined,
       }).catch(() => {});
     });
   };
 
+  // First iteration resumes the self-chained job (if any); later iterations
+  // always claim, so one invocation still drains several independent jobs.
+  let resumeJobId = await resumeJobIdFrom(request);
+
   while (true) {
     if (Date.now() >= workerDeadline) {
-      // Out of time — a running/queued job may still remain; hand off.
+      // Out of time between jobs — hand off so remaining queued work continues.
       scheduleSelfChain();
       break;
     }
 
-    const job = await getResumableJob();
-    if (!job) break; // queue drained
+    let job: PushJob | null;
+    if (resumeJobId) {
+      // A running job may already be terminal (e.g. its client vanished and a
+      // prior tick failed it) — only resume if it's still running, else fall
+      // through to the claim path on the next loop.
+      const resumed = await getPushJob(resumeJobId);
+      resumeJobId = null;
+      job = resumed && resumed.status === "running" ? resumed : null;
+      if (!job) continue;
+    } else {
+      job = await claimNextRunnableJob(MAX_CONCURRENT_JOBS);
+      if (!job) break; // nothing runnable (queue drained or all clients busy)
+    }
 
     processed++;
     let finished: boolean;
@@ -293,8 +340,8 @@ async function runWorker(request: Request): Promise<Response> {
     }
 
     if (!finished) {
-      // Tick hit its deadline mid-job — resume on the next invocation.
-      scheduleSelfChain();
+      // Tick hit its deadline mid-job — resume this exact job next invocation.
+      scheduleSelfChain(job.id);
       break;
     }
   }

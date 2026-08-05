@@ -39,8 +39,15 @@ export interface PushJobFilters {
   status?: PushJobStatus;
 }
 
+/** A push job joined to the client it targets — the row shape the Push
+ * Activity panel (#122) renders. `client` is null only if the referenced
+ * client row was deleted. */
+export interface PushJobListRow extends PushJob {
+  client: { id: string; name: string | null } | null;
+}
+
 export interface PushJobListResult {
-  rows: PushJob[];
+  rows: PushJobListRow[];
   total: number;
 }
 
@@ -64,6 +71,10 @@ export interface RecordJobPersonOutcome {
 
 const PUSH_JOB_COLUMNS =
   "id,client_id,platform,entity,action,campaign_id,niche,filters,options,status,total,processed,succeeded,failed,failures,cursor,error,triggered_by_user_id,triggered_by_email,created_at,started_at,finished_at";
+
+/** listPushJobs' select — the base columns plus the joined client, so the
+ * Push Activity panel can show the client name in one round-trip. */
+const PUSH_JOB_LIST_COLUMNS = `${PUSH_JOB_COLUMNS},client:clients(id,name)`;
 
 interface RawPushJob {
   id: string;
@@ -150,56 +161,29 @@ export async function getPushJob(id: string): Promise<PushJob | null> {
   return toPushJob(data as unknown as RawPushJob);
 }
 
-/** Claims the oldest queued job by flipping it to `running`, or null if
- * none are queued. Optimistic (status=queued guard on the update) rather
- * than a DB-level lock — sufficient for a single-worker claimer; the
- * runner issue (#120) owns any concurrency hardening beyond that. */
-export async function claimNextQueuedJob(): Promise<PushJob | null> {
-  const { data: candidates, error: selectError } = await supabaseAdmin
-    .from("push_jobs")
-    .select("id")
-    .eq("status", "queued")
-    .order("created_at", { ascending: true })
-    .limit(1);
-  if (selectError) throw selectError;
-  if (!candidates || candidates.length === 0) return null;
-
-  const candidateId = (candidates[0] as { id: string }).id;
-  const { data, error } = await supabaseAdmin
-    .from("push_jobs")
-    .update({ status: "running", started_at: new Date().toISOString() })
-    .eq("id", candidateId)
-    .eq("status", "queued")
-    .select(PUSH_JOB_COLUMNS)
-    .single();
-  if (error) {
-    if (error.code === "PGRST116") return null;
-    throw error;
-  }
-  return toPushJob(data as unknown as RawPushJob);
-}
-
-/** Returns the next job the worker should process this tick: an already-
- * `running` job first (so an invocation that ran out of time mid-run resumes
- * the same job rather than stranding it), else the oldest `queued` job via
- * claimNextQueuedJob (which flips it to `running`).
+/** Atomically claims the next runnable job — the oldest `queued` job whose
+ * client has no job already `running` — flipping it to `running`, or null if
+ * nothing is runnable. Delegates to the `claim_next_runnable_job` Postgres
+ * function (lib/data/push-jobs.sql) so the select-and-flip is a single
+ * `FOR UPDATE SKIP LOCKED` statement: two concurrent worker ticks can never
+ * claim the same row, and per-client serialization is enforced in-query.
  *
- * Serialization is global FIFO — a single running job at a time across all
- * clients. Per-client serialization (letting two different clients' pushes run
- * concurrently) is issue #121; this shape doesn't preclude it — #121 refines
- * the claim predicate here without touching the worker. */
-export async function getResumableJob(): Promise<PushJob | null> {
-  const { data, error } = await supabaseAdmin
-    .from("push_jobs")
-    .select(PUSH_JOB_COLUMNS)
-    .eq("status", "running")
-    .order("started_at", { ascending: true })
-    .limit(1);
+ * `maxConcurrent` is an optional soft cap on total running jobs across all
+ * clients (undefined/null disables it). It's best-effort — simultaneous
+ * claimers each see the pre-claim count, so the live total can briefly exceed
+ * the cap by the number of concurrent claimers.
+ *
+ * Only claims `queued` jobs. Resuming a `running` job stranded by a timed-out
+ * invocation is the worker's responsibility (it self-chains by job id), not
+ * this claim. */
+export async function claimNextRunnableJob(maxConcurrent?: number | null): Promise<PushJob | null> {
+  const { data, error } = await supabaseAdmin.rpc("claim_next_runnable_job", {
+    max_concurrent: maxConcurrent ?? null,
+  });
   if (error) throw error;
-  if (data && data.length > 0) {
-    return toPushJob(data[0] as unknown as RawPushJob);
-  }
-  return claimNextQueuedJob();
+  const rows = (data ?? []) as unknown as RawPushJob[];
+  if (rows.length === 0) return null;
+  return toPushJob(rows[0]);
 }
 
 /** Updates the live progress counters a running job reports mid-run. */
@@ -245,9 +229,10 @@ export async function finishJob(
   if (error) throw error;
 }
 
-/** Paginated push jobs, newest first, for the Push Activity panel. */
+/** Paginated push jobs, newest first, joined to their client, for the Push
+ * Activity panel (#122). */
 export async function listPushJobs(filters: PushJobFilters = {}, limit = 50, offset = 0): Promise<PushJobListResult> {
-  let query = supabaseAdmin.from("push_jobs").select(PUSH_JOB_COLUMNS, { count: "exact" });
+  let query = supabaseAdmin.from("push_jobs").select(PUSH_JOB_LIST_COLUMNS, { count: "exact" });
 
   if (filters.clientId) query = query.eq("client_id", filters.clientId);
   if (filters.platform) query = query.eq("platform", filters.platform);
@@ -258,8 +243,11 @@ export async function listPushJobs(filters: PushJobFilters = {}, limit = 50, off
   const { data, error, count } = await query.range(offset, offset + limit - 1);
   if (error) throw error;
 
-  const rows = (data ?? []) as unknown as RawPushJob[];
-  return { rows: rows.map(toPushJob), total: count ?? 0 };
+  const rows = (data ?? []) as unknown as (RawPushJob & { client: { id: string; name: string | null } | null })[];
+  return {
+    rows: rows.map((raw) => ({ ...toPushJob(raw), client: raw.client ?? null })),
+    total: count ?? 0,
+  };
 }
 
 /** Tags each pushed person with the job that pushed them, so People/

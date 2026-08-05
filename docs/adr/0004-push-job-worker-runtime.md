@@ -71,12 +71,23 @@ Supabase Edge Function.
 - No new runtime to maintain; the push core has exactly one implementation.
 - The worker inherits the Next route's `maxDuration` — resumability, not a
   longer single invocation, is what lets a push exceed it.
-- **Deferred to #121 (queueing/serialization):** the worker claims jobs
-  **global FIFO, one running job at a time** (`getResumableJob` →
-  `claimNextQueuedJob`). Per-client serialization (letting two different
-  clients' pushes run concurrently while a second push to the *same* client
-  queues) is #121; it refines the claim predicate in `lib/data/push-jobs.ts`
-  without touching the worker. This decision doesn't preclude it.
+- **Superseded by #121 (queueing/serialization):** #120 shipped with the worker
+  claiming **global FIFO, one running job at a time** (`getResumableJob` →
+  `claimNextQueuedJob`), and this ADR predicted per-client serialization could
+  land "without touching the worker" by only refining the claim predicate. That
+  turned out to be wrong: `getResumableJob` returned *any* running job first and
+  only claimed when nothing was running, so a per-client predicate was inert
+  (it only ran when zero jobs were running, where per-client ≡ global) and two
+  clients could never actually run concurrently. #121 replaced that path with an
+  atomic claim (`claim_next_runnable_job`, `FOR UPDATE SKIP LOCKED`, per-client
+  `NOT EXISTS running` predicate + optional `MAX_CONCURRENT_JOBS` cap) **and**
+  changed the worker: a self-chain now POSTs the in-progress `{ jobId }` and
+  resumes that row directly, so its client stays `running` and a concurrent
+  invocation's claim skips it to pick up a *different* client — the two run in
+  parallel. Trade-off: a job stranded `running` by a crashed invocation is no
+  longer auto-recovered (the old running-first path did so incidentally, at the
+  cost of double-processing on cron overlap); a lease/heartbeat reaper is the
+  follow-up if that becomes a problem.
 - **Deferred to #122 (Push Activity panel):** the push buttons keep working via
   a minimal polling shim (`pollJob` → `GET /api/push-jobs/[id]`), but the
   completion summary is now generic (succeeded / failed / total, plus failure

@@ -5,7 +5,6 @@ import { AlertDialog } from "radix-ui";
 import { Loader2, Send, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
-import { pollJob, type PolledPushJob, type PollJobEvent } from "@/components/shared/use-sse-run";
 import { fetchActiveClients } from "@/lib/data/active-clients-client";
 import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
 import type { EmailBisonCustomVariableEntry, EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
@@ -33,7 +32,7 @@ interface ActiveClient {
 }
 
 type Status = "idle" | "open" | "pushing";
-type Step = "picker" | "options" | "confirm" | "summary";
+type Step = "picker" | "options" | "confirm";
 
 /** A People-table column bindable by a custom-variable row — the seven
  * standard fields the EmailBison lead payload already carries
@@ -110,15 +109,12 @@ export function PushToEmailBisonButton({
   );
   const [standardFieldMappingError, setStandardFieldMappingError] = useState<string | null>(null);
 
-  const [result, setResult] = useState<PolledPushJob | null>(null);
-
   const busy = status === "pushing";
   const selectedClient = clients?.find((c) => c.id === selectedClientId) ?? null;
 
-  // Registers this dialog (including its persistent "Push complete" summary
-  // step) with the shared dialog stack so other prompts — e.g. the post-push
-  // "remove temporary columns?" prompt — know not to open on top of it
-  // (issue #89).
+  // Registers this dialog with the shared dialog stack so other prompts — e.g.
+  // the post-push "remove temporary columns?" prompt — defer until it closes
+  // rather than stacking on top of it (issue #89).
   useRegisterDialogOpen(status !== "idle");
 
   function reset() {
@@ -135,7 +131,6 @@ export function PushToEmailBisonButton({
     setEnrichmentFields([]);
     setStandardFieldMapping(null);
     setStandardFieldMappingError(null);
-    setResult(null);
   }
 
   async function handleClick() {
@@ -258,8 +253,7 @@ export function PushToEmailBisonButton({
     if (!selectedClient) return;
 
     setStatus("pushing");
-    setPushLabel("Pushing…");
-    let reachedDone = false;
+    setPushLabel("Queuing…");
 
     // Ticket #114: save the mapping actually being used as the new starting
     // point for the next push to this (client, "emailbison_people") pair.
@@ -272,9 +266,10 @@ export function PushToEmailBisonButton({
       } satisfies SavedEmailBisonFieldMapping).catch(() => {});
     }
 
-    // The push now runs as a durable background job (issue #120): POST
-    // enqueues a push_jobs row and returns its id, then we poll the job to
-    // terminal instead of holding an SSE stream open for the whole run.
+    // Pushes now run as durable background jobs (issue #120): POST enqueues a
+    // push_jobs row and returns immediately. Rather than block the dialog on
+    // the run, we toast and close — live progress and the completion summary
+    // live in the Push Activity panel (issue #122).
     try {
       const res = await fetch(`/api/emailbison/push?${paramsStr}`, {
         method: "POST",
@@ -292,46 +287,16 @@ export function PushToEmailBisonButton({
         const message = (await res.json().catch(() => null))?.error ?? "Failed to start push";
         throw new Error(message);
       }
-      const { jobId } = (await res.json()) as { jobId: string };
-      await pollJob(jobId, (event) => {
-        if (event.type === "done") reachedDone = true;
-        handlePollEvent(event);
-      });
     } catch (error) {
-      showToast((error as Error).message || "Push interrupted — try again.", "error");
+      showToast((error as Error).message || "Failed to queue push — try again.", "error");
       console.error("Push to EmailBison error:", error);
       reset();
       return;
     }
 
-    // A terminal error event (e.g. missing EmailBison credentials) never
-    // sends `done` — treat that as a failed run and close the dialog rather
-    // than leaving it stuck mid-"pushing".
-    if (!reachedDone) {
-      reset();
-      return;
-    }
-
-    setPushLabel(null);
-  }
-
-  function handlePollEvent(event: PollJobEvent) {
-    if (event.type === "progress") {
-      setPushLabel(event.total > 0 ? `Pushing ${event.done}/${event.total}…` : "Pushing…");
-      return;
-    }
-
-    if (event.type === "error") {
-      showToast(event.message, "error");
-      return;
-    }
-
-    if (event.type === "done") {
-      setResult(event.job);
-      setStatus("open");
-      setStep("summary");
-      onDone?.();
-    }
+    showToast("Push queued — track it in Push Activity", "success");
+    onDone?.();
+    reset();
   }
 
   const label = status === "pushing" && pushLabel ? pushLabel : "Add to EmailBison";
@@ -656,7 +621,7 @@ export function PushToEmailBisonButton({
               </button>
             </div>
           </AlertDialog.Content>
-        ) : step === "confirm" ? (
+        ) : (
           <AlertDialog.Content className="fixed top-[26%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
             <AlertDialog.Title className="text-sm font-semibold text-ink">
               Push to {selectedClient?.name}?
@@ -683,56 +648,6 @@ export function PushToEmailBisonButton({
               >
                 Push {total.toLocaleString("en-US")}
               </button>
-            </div>
-          </AlertDialog.Content>
-        ) : (
-          <AlertDialog.Content className="fixed top-[26%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
-            <AlertDialog.Title className="text-sm font-semibold text-ink">
-              Push complete
-            </AlertDialog.Title>
-            <AlertDialog.Description asChild>
-              <div className="mt-2 text-sm text-ink-soft">
-                {result ? (
-                  // Temporary generic summary (succeeded/failed/total) pending
-                  // issue #122's Push Activity panel, which restores the richer
-                  // per-platform detail the durable push_jobs row doesn't carry.
-                  <ul className="flex flex-col gap-1">
-                    <li>
-                      Created or updated: <strong className="text-ink">{result.succeeded}</strong>
-                    </li>
-                    <li>
-                      Failed: <strong className="text-ink">{result.failed}</strong>
-                    </li>
-                    <li>
-                      Total selected: <strong className="text-ink">{result.total}</strong>
-                    </li>
-                    {result.failures.length > 0 ? (
-                      <li className="mt-1 flex flex-col gap-0.5 text-xs text-ink-mute">
-                        {result.failures.slice(0, 5).map((f, i) => (
-                          <span key={i}>
-                            Failed: {f.name} — {f.reason}
-                          </span>
-                        ))}
-                        {result.failures.length > 5 ? (
-                          <span>…and {result.failures.length - 5} more</span>
-                        ) : null}
-                      </li>
-                    ) : null}
-                  </ul>
-                ) : null}
-              </div>
-            </AlertDialog.Description>
-
-            <div className="mt-5 flex justify-end gap-2">
-              <AlertDialog.Cancel asChild>
-                <button
-                  type="button"
-                  onClick={reset}
-                  className="rounded-md bg-stamp px-3 py-1.5 text-xs font-medium text-white transition-smooth hover:opacity-90 focus-visible:ring-2 focus-visible:ring-stamp/50"
-                >
-                  Close
-                </button>
-              </AlertDialog.Cancel>
             </div>
           </AlertDialog.Content>
         )}
