@@ -12,6 +12,18 @@ import type { GhlPushResult } from "@/lib/ghl/push-to-ghl";
 import type { GhlCustomField } from "@/lib/ghl/custom-fields";
 import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
+import {
+  fetchSavedPushFieldMapping,
+  savePushFieldMapping,
+} from "@/lib/data/push-field-mappings-client";
+
+/** Stored shape for platform "ghl" in push_field_mappings (ticket #114) —
+ * the two pieces of mapping state this button collects, read back verbatim
+ * as the next push's starting point for the same (clientId, "ghl") pair. */
+interface SavedGhlFieldMapping {
+  standardFields: GhlStandardFieldMapping;
+  customFieldMapping: Record<string, string>;
+}
 
 /** Reset baseline for standardFields between pushes — matches
  * resolveDefaultFieldMapping's (ticket #108) "no brand_name in the pushed
@@ -187,6 +199,20 @@ export function PushToGhlButton({
       setMapping(
         Object.fromEntries(data.customFieldMapping.map((m) => [m.ghlFieldId, m.virtualColumnKey]))
       );
+
+      // Ticket #114: a saved mapping for this (client, "ghl") pair — if one
+      // exists — overrides the pure auto-mapping default just applied above.
+      // Best-effort: a fetch failure just leaves the auto-mapping default in
+      // place, same as having no saved mapping at all.
+      try {
+        const saved = await fetchSavedPushFieldMapping<SavedGhlFieldMapping>(selectedClient.id, "ghl");
+        if (saved) {
+          setStandardFields(saved.standardFields);
+          setMapping(saved.customFieldMapping);
+        }
+      } catch {
+        // keep auto-mapping default
+      }
     } catch (error) {
       setCustomFieldsError((error as Error).message || "Failed to load field mapping.");
     }
@@ -213,6 +239,14 @@ export function PushToGhlButton({
     const fieldMapping: GhlFieldMapping[] = Object.entries(mapping)
       .filter(([, virtualColumnKey]) => virtualColumnKey !== "")
       .map(([ghlFieldId, virtualColumnKey]) => ({ virtualColumnKey, ghlFieldId }));
+
+    // Ticket #114: save the mapping actually being used as the new starting
+    // point for the next push to this (client, "ghl") pair. Fire-and-forget —
+    // never blocks or fails the push itself; only ever affects future pushes.
+    savePushFieldMapping(selectedClient.id, "ghl", {
+      standardFields,
+      customFieldMapping: mapping,
+    } satisfies SavedGhlFieldMapping).catch(() => {});
 
     try {
       await runSse<SseEvent>(

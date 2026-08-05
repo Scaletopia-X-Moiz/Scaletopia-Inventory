@@ -14,6 +14,18 @@ import type { EmailBisonCustomVariable } from "@/lib/emailbison/client";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
 import type { EnrichmentField } from "@/lib/data/enrichment-fields";
 import { StandardFieldMappingTable } from "@/components/emailbison/standard-field-mapping-table";
+import {
+  fetchSavedPushFieldMapping,
+  savePushFieldMapping,
+} from "@/lib/data/push-field-mappings-client";
+
+/** Stored shape for platform "emailbison_companies" in push_field_mappings
+ * (ticket #114) — distinct from "emailbison_people" since the two entities
+ * map an entirely different field set despite sharing
+ * EmailBisonStandardFieldMapping's shape. */
+interface SavedEmailBisonFieldMapping {
+  standardFields: EmailBisonStandardFieldMapping;
+}
 
 interface ActiveClient {
   id: string;
@@ -175,6 +187,20 @@ export function PushToEmailBisonButton({
       if (!res.ok) throw new Error("Failed to load default field mapping");
       const data = (await res.json()) as { standardFields: EmailBisonStandardFieldMapping };
       setStandardFieldMapping(data.standardFields);
+
+      // Ticket #114: a saved mapping for this (client, "emailbison_companies")
+      // pair — if one exists — overrides the pure auto-mapping default just
+      // applied above. Best-effort: a fetch failure just leaves the
+      // auto-mapping default in place, same as having no saved mapping.
+      try {
+        const saved = await fetchSavedPushFieldMapping<SavedEmailBisonFieldMapping>(
+          selectedClient.id,
+          "emailbison_companies"
+        );
+        if (saved) setStandardFieldMapping(saved.standardFields);
+      } catch {
+        // keep auto-mapping default
+      }
     } catch (error) {
       setStandardFieldMappingError((error as Error).message || "Failed to load default field mapping.");
     }
@@ -243,6 +269,17 @@ export function PushToEmailBisonButton({
     setStatus("pushing");
     setPushLabel("Pushing…");
     let reachedDone = false;
+
+    // Ticket #114: save the mapping actually being used as the new starting
+    // point for the next push to this (client, "emailbison_companies") pair.
+    // Fire-and-forget — never blocks or fails the push; only ever affects
+    // future pushes. Skipped when null (e.g. the default-mapping fetch
+    // failed) so a saved override isn't wiped by an unrelated fetch error.
+    if (standardFieldMapping) {
+      savePushFieldMapping(selectedClient.id, "emailbison_companies", {
+        standardFields: standardFieldMapping,
+      } satisfies SavedEmailBisonFieldMapping).catch(() => {});
+    }
 
     try {
       await runSse<SseEvent>(
