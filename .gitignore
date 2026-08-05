@@ -29,3 +29,4 @@ env.local
 
 # supabase CLI link state (local machine only)
 /supabase/
+.vercel
