@@ -71,6 +71,26 @@ LANGUAGE sql IMMUTABLE AS $$
   END
 $$;
 
+-- Cast-safe uuid read: the uuid for a valid 8-4-4-4-12 hex string, else NULL
+-- (never an exception). Mirrors enrichment_numeric/enrichment_date_text's
+-- regex-guard-before-cast rule (ADR-0002: Postgres has no try_cast, and a
+-- filter-derived value that can't be cast must exclude rather than 500 the
+-- request). Used by the push-status filter (ticket #127) to cast the
+-- URL-supplied `pushStatus.clientId` before the platform_pushes join — the
+-- param is only validated as "non-empty" upstream (parsePushStatusFilter), so a
+-- hand-edited `?pushClient=garbage` reaches here as junk and must not throw. A
+-- NULL result makes `pp.client_id = NULL` match no push rows, so the filter
+-- degrades to "unknown client" semantics (pushed → none, not_pushed → all)
+-- rather than erroring. Kept `::uuid` (not text compare) so the client_id side
+-- stays index-sargable against platform_pushes_client_platform_person_idx.
+CREATE OR REPLACE FUNCTION safe_uuid(t text) RETURNS uuid
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE
+    WHEN t ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN t::uuid
+    ELSE NULL
+  END
+$$;
+
 -- Evaluates one virtual-column filter `{key, type, operator, value}` against
 -- a row's custom_data. Every branch is written so a mismatched/dirty value
 -- excludes the row rather than raising — no PostgREST text-path lexicographic
@@ -410,6 +430,15 @@ RETURNS TABLE(id uuid) LANGUAGE sql STABLE AS $$
       COALESCE(filters->>'email', 'any') AS email_filter,
       COALESCE(filters->>'phone', 'any') AS phone_filter,
       COALESCE(filters->'virtualFilters', '{}'::jsonb) AS virtual_filters,
+      -- Push-status filter (ticket #127), extracted once here (not re-dug per
+      -- use site). `pushStatus` absent or inactive (JSON null) -> all three are
+      -- NULL -> the predicate's CASE falls to ELSE true, a no-op byte-identical
+      -- to pre-#127 behavior. Present -> {clientId, platform, status}; clientId
+      -- is cast cast-safe via safe_uuid (URL-supplied, only "non-empty"-checked
+      -- upstream, so it must not throw — see safe_uuid).
+      filters#>>'{pushStatus,status}' AS push_status_kind,
+      filters#>>'{pushStatus,platform}' AS push_platform,
+      safe_uuid(filters#>>'{pushStatus,clientId}') AS push_client_id,
       ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,include}', '[]'::jsonb))) AS niche_inc,
       ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,exclude}', '[]'::jsonb))) AS niche_exc,
       ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{source,include}', '[]'::jsonb))) AS source_inc,
@@ -489,6 +518,39 @@ RETURNS TABLE(id uuid) LANGUAGE sql STABLE AS $$
         )
       END
     )
+    -- Push-status filter (ticket #127), company "has work left" semantics —
+    -- keep in lockstep with company_filter_options' base CTE (canonical-columns.sql).
+    -- not_pushed: >=1 linked person NOT yet pushed to this client/platform.
+    -- pushed: has >=1 linked person AND none of them is un-pushed (every linked
+    -- person already pushed). Absent/inactive filter -> push_status_kind NULL ->
+    -- ELSE true (no-op). Inlined EXISTS/NOT EXISTS (not a wrapper fn) so the
+    -- planner can use platform_pushes_client_platform_person_idx instead of an
+    -- opaque per-row call.
+    AND CASE p.push_status_kind
+      WHEN 'not_pushed' THEN EXISTS (
+        SELECT 1 FROM people pe
+        WHERE pe.company_id = c.id
+          AND NOT EXISTS (
+            SELECT 1 FROM platform_pushes pp
+            WHERE pp.person_id = pe.id
+              AND pp.client_id = p.push_client_id
+              AND pp.platform = p.push_platform
+          )
+      )
+      WHEN 'pushed' THEN
+        EXISTS (SELECT 1 FROM people pe WHERE pe.company_id = c.id)
+        AND NOT EXISTS (
+          SELECT 1 FROM people pe
+          WHERE pe.company_id = c.id
+            AND NOT EXISTS (
+              SELECT 1 FROM platform_pushes pp
+              WHERE pp.person_id = pe.id
+                AND pp.client_id = p.push_client_id
+                AND pp.platform = p.push_platform
+            )
+        )
+      ELSE true
+    END
   ORDER BY c.id
 $$;
 
@@ -508,6 +570,15 @@ RETURNS TABLE(id uuid) LANGUAGE sql STABLE AS $$
       COALESCE(filters->>'email', 'any') AS email_filter,
       COALESCE(filters->>'phone', 'any') AS phone_filter,
       COALESCE(filters->'virtualFilters', '{}'::jsonb) AS virtual_filters,
+      -- Push-status filter (ticket #127), extracted once here (not re-dug per
+      -- use site). `pushStatus` absent or inactive (JSON null) -> all three are
+      -- NULL -> the predicate's CASE falls to ELSE true, a no-op byte-identical
+      -- to pre-#127 behavior. Present -> {clientId, platform, status}; clientId
+      -- is cast cast-safe via safe_uuid (URL-supplied, only "non-empty"-checked
+      -- upstream, so it must not throw — see safe_uuid).
+      filters#>>'{pushStatus,status}' AS push_status_kind,
+      filters#>>'{pushStatus,platform}' AS push_platform,
+      safe_uuid(filters#>>'{pushStatus,clientId}') AS push_client_id,
       ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,include}', '[]'::jsonb))) AS niche_inc,
       ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,exclude}', '[]'::jsonb))) AS niche_exc,
       ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{source,include}', '[]'::jsonb))) AS source_inc,
@@ -585,5 +656,26 @@ RETURNS TABLE(id uuid) LANGUAGE sql STABLE AS $$
         )
       END
     )
+    -- Push-status filter (ticket #127) — keep in lockstep with the same clause
+    -- in person_filter_options' base CTE (people-canonical-columns.sql).
+    -- pushed: person has a push row for this client/platform; not_pushed: none.
+    -- Absent/inactive filter -> push_status_kind NULL -> ELSE true (byte-identical
+    -- to pre-#127). Inlined semi/anti-join so
+    -- platform_pushes_client_platform_person_idx is used.
+    AND CASE pr.push_status_kind
+      WHEN 'pushed' THEN EXISTS (
+        SELECT 1 FROM platform_pushes pp
+        WHERE pp.person_id = p.id
+          AND pp.client_id = pr.push_client_id
+          AND pp.platform = pr.push_platform
+      )
+      WHEN 'not_pushed' THEN NOT EXISTS (
+        SELECT 1 FROM platform_pushes pp
+        WHERE pp.person_id = p.id
+          AND pp.client_id = pr.push_client_id
+          AND pp.platform = pr.push_platform
+      )
+      ELSE true
+    END
   ORDER BY p.id
 $$;

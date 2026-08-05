@@ -21,6 +21,14 @@ CREATE TABLE IF NOT EXISTS platform_pushes (
 CREATE INDEX IF NOT EXISTS platform_pushes_person_id_idx
   ON platform_pushes (person_id);
 
+-- Ticket #127 (Push Status Filters epic, F2): backs the client+platform scoped
+-- semi/anti-join the push-status filter runs in the *_matching_virtual_filters
+-- and *_filter_options RPCs. The existing UNIQUE (person_id, client_id, platform)
+-- leads with person_id, the wrong column order for a (client_id, platform) scan
+-- that then probes person_id — this index leads with the two the filter fixes.
+CREATE INDEX IF NOT EXISTS platform_pushes_client_platform_person_idx
+  ON platform_pushes (client_id, platform, person_id);
+
 ALTER TABLE people ADD COLUMN IF NOT EXISTS pushed_to_ghl boolean NOT NULL DEFAULT false;
 ALTER TABLE people ADD COLUMN IF NOT EXISTS pushed_to_ghl_at timestamptz;
 

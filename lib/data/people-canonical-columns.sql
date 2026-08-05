@@ -92,6 +92,11 @@ WITH params AS (
     COALESCE(filters->>'email', 'any') AS email_filter,
     COALESCE(filters->>'phone', 'any') AS phone_filter,
     COALESCE(filters->'virtualFilters', '{}'::jsonb) AS virtual_filters,
+    -- Push-status filter (ticket #127), extracted once — clientId cast cast-safe
+    -- via safe_uuid (virtual-columns.sql). Absent/inactive -> all NULL -> no-op.
+    filters#>>'{pushStatus,status}' AS push_status_kind,
+    filters#>>'{pushStatus,platform}' AS push_platform,
+    safe_uuid(filters#>>'{pushStatus,clientId}') AS push_client_id,
     ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,include}', '[]'::jsonb))) AS niche_inc,
     ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,exclude}', '[]'::jsonb))) AS niche_exc,
     ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{source,include}', '[]'::jsonb))) AS source_inc,
@@ -162,6 +167,24 @@ base AS MATERIALIZED (
         )
       END
     )
+    -- Push-status filter (ticket #127) — identical to the clause in
+    -- people_matching_virtual_filters (virtual-columns.sql); keep in lockstep so
+    -- the six facet counts stay scoped to the same rows the list returns.
+    AND CASE pr.push_status_kind
+      WHEN 'pushed' THEN EXISTS (
+        SELECT 1 FROM platform_pushes pp
+        WHERE pp.person_id = p.id
+          AND pp.client_id = pr.push_client_id
+          AND pp.platform = pr.push_platform
+      )
+      WHEN 'not_pushed' THEN NOT EXISTS (
+        SELECT 1 FROM platform_pushes pp
+        WHERE pp.person_id = p.id
+          AND pp.client_id = pr.push_client_id
+          AND pp.platform = pr.push_platform
+      )
+      ELSE true
+    END
 ),
 niches AS (
   SELECT token AS id, count(*) AS count FROM (

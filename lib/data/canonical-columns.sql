@@ -86,6 +86,11 @@ WITH params AS (
     COALESCE(filters->>'email', 'any') AS email_filter,
     COALESCE(filters->>'phone', 'any') AS phone_filter,
     COALESCE(filters->'virtualFilters', '{}'::jsonb) AS virtual_filters,
+    -- Push-status filter (ticket #127), extracted once — clientId cast cast-safe
+    -- via safe_uuid (virtual-columns.sql). Absent/inactive -> all NULL -> no-op.
+    filters#>>'{pushStatus,status}' AS push_status_kind,
+    filters#>>'{pushStatus,platform}' AS push_platform,
+    safe_uuid(filters#>>'{pushStatus,clientId}') AS push_client_id,
     ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,include}', '[]'::jsonb))) AS niche_inc,
     ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,exclude}', '[]'::jsonb))) AS niche_exc,
     ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{source,include}', '[]'::jsonb))) AS source_inc,
@@ -154,6 +159,34 @@ base AS MATERIALIZED (
         )
       END
     )
+    -- Push-status filter (ticket #127), company "has work left" semantics —
+    -- identical to companies_matching_virtual_filters (virtual-columns.sql);
+    -- keep in lockstep so facet counts match the list.
+    AND CASE p.push_status_kind
+      WHEN 'not_pushed' THEN EXISTS (
+        SELECT 1 FROM people pe
+        WHERE pe.company_id = c.id
+          AND NOT EXISTS (
+            SELECT 1 FROM platform_pushes pp
+            WHERE pp.person_id = pe.id
+              AND pp.client_id = p.push_client_id
+              AND pp.platform = p.push_platform
+          )
+      )
+      WHEN 'pushed' THEN
+        EXISTS (SELECT 1 FROM people pe WHERE pe.company_id = c.id)
+        AND NOT EXISTS (
+          SELECT 1 FROM people pe
+          WHERE pe.company_id = c.id
+            AND NOT EXISTS (
+              SELECT 1 FROM platform_pushes pp
+              WHERE pp.person_id = pe.id
+                AND pp.client_id = p.push_client_id
+                AND pp.platform = p.push_platform
+            )
+        )
+      ELSE true
+    END
 ),
 niches AS (
   SELECT base.niche AS id, count(*) AS count FROM base, params
