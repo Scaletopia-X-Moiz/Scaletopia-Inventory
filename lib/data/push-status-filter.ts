@@ -29,8 +29,37 @@ export function parsePushStatusFilter(sp: URLSearchParams): PushStatusFilter | u
   const clientId = sp.get("pushClient") ?? undefined;
   const platform = asPushPlatform(sp.get("pushPlatform"));
   const status = asPushStatus(sp.get("pushStatus"));
+  return buildPushStatusFilter(clientId, platform, status);
+}
+
+/** Display labels for the shared push-status filter UI (see
+ * PushStatusFilterPopover). Kept beside the type so People and Companies render
+ * the same platform/status wording. */
+export const PUSH_PLATFORM_LABELS: Record<PushPlatform, string> = {
+  ghl: "GHL",
+  emailbison: "EmailBison",
+};
+
+export const PUSH_STATUS_LABELS: Record<PushStatus, string> = {
+  pushed: "Already pushed",
+  not_pushed: "Not yet pushed",
+};
+
+/** Assembles a complete filter only when all three fields are set, else
+ * undefined — the UI-draft mirror of parsePushStatusFilter's all-or-nothing
+ * rule, so the popover emits the same shape the URL parser accepts. */
+export function buildPushStatusFilter(
+  clientId: string | undefined,
+  platform: PushPlatform | undefined,
+  status: PushStatus | undefined
+): PushStatusFilter | undefined {
   if (!clientId || !platform || !status) return undefined;
   return { clientId, platform, status };
+}
+
+/** Human-readable active label, e.g. "Not yet pushed to GHL for Acme". */
+export function pushStatusFilterLabel(filter: PushStatusFilter, clientName: string): string {
+  return `${PUSH_STATUS_LABELS[filter.status]} to ${PUSH_PLATFORM_LABELS[filter.platform]} for ${clientName}`;
 }
 
 /** For toFilterOptionsRpcPayload — returns null when inactive. */
