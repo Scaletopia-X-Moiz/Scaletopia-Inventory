@@ -179,6 +179,29 @@ export async function claimNextQueuedJob(): Promise<PushJob | null> {
   return toPushJob(data as unknown as RawPushJob);
 }
 
+/** Returns the next job the worker should process this tick: an already-
+ * `running` job first (so an invocation that ran out of time mid-run resumes
+ * the same job rather than stranding it), else the oldest `queued` job via
+ * claimNextQueuedJob (which flips it to `running`).
+ *
+ * Serialization is global FIFO — a single running job at a time across all
+ * clients. Per-client serialization (letting two different clients' pushes run
+ * concurrently) is issue #121; this shape doesn't preclude it — #121 refines
+ * the claim predicate here without touching the worker. */
+export async function getResumableJob(): Promise<PushJob | null> {
+  const { data, error } = await supabaseAdmin
+    .from("push_jobs")
+    .select(PUSH_JOB_COLUMNS)
+    .eq("status", "running")
+    .order("started_at", { ascending: true })
+    .limit(1);
+  if (error) throw error;
+  if (data && data.length > 0) {
+    return toPushJob(data[0] as unknown as RawPushJob);
+  }
+  return claimNextQueuedJob();
+}
+
 /** Updates the live progress counters a running job reports mid-run. */
 export async function updateJobProgress(
   id: string,

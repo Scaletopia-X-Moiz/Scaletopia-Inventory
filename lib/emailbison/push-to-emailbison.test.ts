@@ -513,7 +513,17 @@ describe("runPeopleAddToEmailBison", () => {
 
     const result = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
-    expect(result).toEqual({ total_matched: 0, pushed: 0, errors: 0, failed_people: [], failed: [] });
+    expect(result).toEqual({
+      total_matched: 0,
+      pushed: 0,
+      errors: 0,
+      failed_people: [],
+      failed: [],
+      succeededPersonIds: [],
+      failedPersonIds: [],
+      nextOffset: 0,
+      done: true,
+    });
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
@@ -571,7 +581,17 @@ describe("runCompaniesAddToEmailBison", () => {
 
     const result = await runCompaniesAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
-    expect(result).toEqual({ total_matched: 0, pushed: 0, errors: 0, failed_people: [], failed: [] });
+    expect(result).toEqual({
+      total_matched: 0,
+      pushed: 0,
+      errors: 0,
+      failed_people: [],
+      failed: [],
+      succeededPersonIds: [],
+      failedPersonIds: [],
+      nextOffset: 0,
+      done: true,
+    });
   });
 });
 
@@ -797,7 +817,17 @@ describe("runPeopleAddToCampaign", () => {
       fetchImpl: okFetchWithCampaign(attachCalls),
     });
 
-    expect(result).toEqual({ total_matched: 0, attached: 0, errors: 0, failed_people: [], failed: [] });
+    expect(result).toEqual({
+      total_matched: 0,
+      attached: 0,
+      errors: 0,
+      failed_people: [],
+      failed: [],
+      succeededPersonIds: [],
+      failedPersonIds: [],
+      nextOffset: 0,
+      done: true,
+    });
     expect(attachCalls).toEqual([]);
   });
 });

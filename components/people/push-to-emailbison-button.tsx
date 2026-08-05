@@ -5,10 +5,9 @@ import { AlertDialog } from "radix-ui";
 import { Loader2, Send, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
-import { runSse } from "@/components/shared/use-sse-run";
+import { pollJob, type PolledPushJob, type PollJobEvent } from "@/components/shared/use-sse-run";
 import { fetchActiveClients } from "@/lib/data/active-clients-client";
 import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
-import type { EmailBisonPushResult, EmailBisonPushProgress } from "@/lib/emailbison/push-to-emailbison";
 import type { EmailBisonCustomVariableEntry, EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
 import type { EmailBisonCustomVariable } from "@/lib/emailbison/client";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
@@ -32,11 +31,6 @@ interface ActiveClient {
   name: string;
   hasEmailBisonCredentials: boolean;
 }
-
-type SseEvent =
-  | ({ type: "progress" } & EmailBisonPushProgress)
-  | { type: "done"; action: "workspace"; result: EmailBisonPushResult; note: string }
-  | { type: "error"; message: string };
 
 type Status = "idle" | "open" | "pushing";
 type Step = "picker" | "options" | "confirm" | "summary";
@@ -116,8 +110,7 @@ export function PushToEmailBisonButton({
   );
   const [standardFieldMappingError, setStandardFieldMappingError] = useState<string | null>(null);
 
-  const [result, setResult] = useState<EmailBisonPushResult | null>(null);
-  const [note, setNote] = useState<string | null>(null);
+  const [result, setResult] = useState<PolledPushJob | null>(null);
 
   const busy = status === "pushing";
   const selectedClient = clients?.find((c) => c.id === selectedClientId) ?? null;
@@ -143,7 +136,6 @@ export function PushToEmailBisonButton({
     setStandardFieldMapping(null);
     setStandardFieldMappingError(null);
     setResult(null);
-    setNote(null);
   }
 
   async function handleClick() {
@@ -280,36 +272,41 @@ export function PushToEmailBisonButton({
       } satisfies SavedEmailBisonFieldMapping).catch(() => {});
     }
 
+    // The push now runs as a durable background job (issue #120): POST
+    // enqueues a push_jobs row and returns its id, then we poll the job to
+    // terminal instead of holding an SSE stream open for the whole run.
     try {
-      await runSse<SseEvent>(
-        `/api/emailbison/push?${paramsStr}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            entity: "people",
-            action: "workspace",
-            clientId: selectedClient.id,
-            existingLeadBehavior,
-            customVariables: customVariablesForPush(),
-            standardFieldMapping: standardFieldMapping ?? undefined,
-          }),
-        },
-        (event) => {
-          if (event.type === "done") reachedDone = true;
-          handleSseEvent(event);
-        }
-      );
+      const res = await fetch(`/api/emailbison/push?${paramsStr}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          entity: "people",
+          action: "workspace",
+          clientId: selectedClient.id,
+          existingLeadBehavior,
+          customVariables: customVariablesForPush(),
+          standardFieldMapping: standardFieldMapping ?? undefined,
+        }),
+      });
+      if (!res.ok) {
+        const message = (await res.json().catch(() => null))?.error ?? "Failed to start push";
+        throw new Error(message);
+      }
+      const { jobId } = (await res.json()) as { jobId: string };
+      await pollJob(jobId, (event) => {
+        if (event.type === "done") reachedDone = true;
+        handlePollEvent(event);
+      });
     } catch (error) {
       showToast((error as Error).message || "Push interrupted — try again.", "error");
-      console.error("Push to EmailBison stream error:", error);
+      console.error("Push to EmailBison error:", error);
       reset();
       return;
     }
 
-    // A terminal `{type: "error"}` frame (e.g. missing EmailBison credentials)
-    // closes the stream without ever sending `done` — treat that as a failed
-    // run and close the dialog rather than leaving it stuck mid-"pushing".
+    // A terminal error event (e.g. missing EmailBison credentials) never
+    // sends `done` — treat that as a failed run and close the dialog rather
+    // than leaving it stuck mid-"pushing".
     if (!reachedDone) {
       reset();
       return;
@@ -318,11 +315,9 @@ export function PushToEmailBisonButton({
     setPushLabel(null);
   }
 
-  function handleSseEvent(event: SseEvent) {
+  function handlePollEvent(event: PollJobEvent) {
     if (event.type === "progress") {
-      setPushLabel(
-        event.phase === "resolving" ? "Resolving…" : `Pushing ${event.done}/${event.total}…`
-      );
+      setPushLabel(event.total > 0 ? `Pushing ${event.done}/${event.total}…` : "Pushing…");
       return;
     }
 
@@ -332,8 +327,7 @@ export function PushToEmailBisonButton({
     }
 
     if (event.type === "done") {
-      setResult(event.result);
-      setNote(event.note);
+      setResult(event.job);
       setStatus("open");
       setStep("summary");
       onDone?.();
@@ -699,30 +693,31 @@ export function PushToEmailBisonButton({
             <AlertDialog.Description asChild>
               <div className="mt-2 text-sm text-ink-soft">
                 {result ? (
+                  // Temporary generic summary (succeeded/failed/total) pending
+                  // issue #122's Push Activity panel, which restores the richer
+                  // per-platform detail the durable push_jobs row doesn't carry.
                   <ul className="flex flex-col gap-1">
                     <li>
-                      {/* EmailBison's create-or-update response doesn't reliably
-                          distinguish created from updated (client.ts's
-                          EmailBisonLeadResult comment) — report the combined
-                          count rather than fabricate a created/updated split. */}
-                      Created or updated: <strong className="text-ink">{result.pushed}</strong>
+                      Created or updated: <strong className="text-ink">{result.succeeded}</strong>
                     </li>
                     <li>
-                      Failed: <strong className="text-ink">{result.errors}</strong>
+                      Failed: <strong className="text-ink">{result.failed}</strong>
                     </li>
-                    {result.failed.length > 0 ? (
+                    <li>
+                      Total selected: <strong className="text-ink">{result.total}</strong>
+                    </li>
+                    {result.failures.length > 0 ? (
                       <li className="mt-1 flex flex-col gap-0.5 text-xs text-ink-mute">
-                        {result.failed.slice(0, 5).map((f, i) => (
+                        {result.failures.slice(0, 5).map((f, i) => (
                           <span key={i}>
                             Failed: {f.name} — {f.reason}
                           </span>
                         ))}
-                        {result.failed.length > 5 ? (
-                          <span>…and {result.failed.length - 5} more</span>
+                        {result.failures.length > 5 ? (
+                          <span>…and {result.failures.length - 5} more</span>
                         ) : null}
                       </li>
                     ) : null}
-                    {note ? <li className="mt-2 text-xs text-ink-mute">{note}</li> : null}
                   </ul>
                 ) : null}
               </div>

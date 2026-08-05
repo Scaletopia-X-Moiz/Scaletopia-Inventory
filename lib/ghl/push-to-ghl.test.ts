@@ -332,6 +332,10 @@ describe("runPeopleGhlPush", () => {
       tagAppended: 0,
       errors: 0,
       failed_people: [],
+      succeededPersonIds: [],
+      failedPersonIds: [],
+      nextOffset: 0,
+      done: true,
     });
     expect(fetchImpl).not.toHaveBeenCalled();
   });
