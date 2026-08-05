@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   getPeople,
   getPersonDetail,
@@ -9,6 +9,8 @@ import {
 import { includeOnly } from "@/lib/data/include-exclude";
 import { filterSet } from "@/lib/data/virtual-columns";
 import { getPersonEnrichmentFields } from "@/lib/data/enrichment-fields";
+import { supabaseAdmin } from "@/lib/supabase/admin";
+import type { PushStatusFilter } from "@/lib/data/push-status-filter";
 
 describe("getPersonFilterOptions", () => {
   it("returns normalized, deduped options for every filter dimension", async () => {
@@ -485,5 +487,145 @@ describe("getPersonDetail", () => {
   it("returns null for a non-existent id", async () => {
     const detail = await getPersonDetail("00000000-0000-0000-0000-000000000000");
     expect(detail).toBeNull();
+  });
+});
+
+// Issue #129: the People data layer honors filters.pushStatus on every read
+// path, client- and platform-aware, via the F2 RPC predicate. A push filter
+// alone would match ~half the ~110k-row table (everyone not_pushed), so every
+// assertion here also carries `search` on the seeded person's unique name —
+// the RPC AND-s the standard filters with the push clause in one scan, keeping
+// the working set to the single test row.
+describe("getPeople — push-status filter (issue #129)", () => {
+  const TEST_PREFIX = "__test-pushstatus-129__";
+  let personId: string;
+  let searchToken: string;
+  let clientA: string;
+  let clientB: string;
+
+  async function cleanupAll() {
+    const { data: people } = await supabaseAdmin
+      .from("people")
+      .select("id")
+      .like("linkedin_url", `%${TEST_PREFIX}%`);
+    const personIds = (people ?? []).map((p) => (p as { id: string }).id);
+    if (personIds.length > 0) {
+      await supabaseAdmin.from("platform_pushes").delete().in("person_id", personIds);
+    }
+    await supabaseAdmin.from("people").delete().like("linkedin_url", `%${TEST_PREFIX}%`);
+    await supabaseAdmin.from("clients").delete().like("slug", `${TEST_PREFIX}%`);
+  }
+
+  async function insertClient(): Promise<string> {
+    const slug = `${TEST_PREFIX}client-${Math.random().toString(36).slice(2)}`;
+    const { data, error } = await supabaseAdmin
+      .from("clients")
+      .insert({ slug, name: slug })
+      .select("id")
+      .single();
+    if (error) throw error;
+    return (data as { id: string }).id;
+  }
+
+  beforeAll(async () => {
+    await cleanupAll();
+
+    // Unique, spaceless full_name so `search` (full_name ILIKE '%token%')
+    // narrows the RPC scan to exactly this person.
+    searchToken = `${TEST_PREFIX}${Math.random().toString(36).slice(2)}`;
+    const { data, error } = await supabaseAdmin
+      .from("people")
+      .insert({
+        linkedin_url: `https://linkedin.com/in/${searchToken}`,
+        full_name: searchToken,
+        // Unique niche token so getPersonFilterOptions has a facet bucket that
+        // this person, and only this person, populates.
+        niche_tokens: [searchToken],
+      })
+      .select("id")
+      .single();
+    if (error) throw error;
+    personId = (data as { id: string }).id;
+
+    clientA = await insertClient();
+    clientB = await insertClient();
+
+    // Pushed to Client A via GHL only. Client B has no push; EmailBison unused.
+    const { error: pushError } = await supabaseAdmin.from("platform_pushes").insert({
+      person_id: personId,
+      client_id: clientA,
+      platform: "ghl",
+      pushed_at: "2026-01-01T00:00:00Z",
+    });
+    if (pushError) throw pushError;
+  });
+
+  afterAll(cleanupAll);
+
+  function withPush(pushStatus: PushStatusFilter): PersonListFilters {
+    return { search: searchToken, pushStatus };
+  }
+
+  async function matchedIds(pushStatus: PushStatusFilter): Promise<string[]> {
+    const { rows } = await getPeople(withPush(pushStatus), 1, 50);
+    return rows.map((r) => r.id);
+  }
+
+  it("includes a person under 'already pushed' for the client/platform they were pushed to", async () => {
+    expect(await matchedIds({ clientId: clientA, platform: "ghl", status: "pushed" })).toContain(
+      personId
+    );
+  });
+
+  it("excludes that same person from 'not yet pushed' for that client/platform", async () => {
+    expect(
+      await matchedIds({ clientId: clientA, platform: "ghl", status: "not_pushed" })
+    ).not.toContain(personId);
+  });
+
+  it("is client-aware: the person is 'not yet pushed' for a second client with no push row", async () => {
+    expect(
+      await matchedIds({ clientId: clientB, platform: "ghl", status: "not_pushed" })
+    ).toContain(personId);
+    expect(await matchedIds({ clientId: clientB, platform: "ghl", status: "pushed" })).not.toContain(
+      personId
+    );
+  });
+
+  it("is platform-aware: a GHL push does not count as an EmailBison push", async () => {
+    expect(
+      await matchedIds({ clientId: clientA, platform: "emailbison", status: "not_pushed" })
+    ).toContain(personId);
+  });
+
+  it("narrows the export path (getAllFilteredPeople) the same way", async () => {
+    const pushedExport = await getAllFilteredPeople(
+      withPush({ clientId: clientA, platform: "ghl", status: "pushed" })
+    );
+    expect(pushedExport.map((r) => r.id)).toContain(personId);
+
+    const notPushedExport = await getAllFilteredPeople(
+      withPush({ clientId: clientA, platform: "ghl", status: "not_pushed" })
+    );
+    expect(notPushedExport.map((r) => r.id)).not.toContain(personId);
+  });
+
+  it("scopes facets (getPersonFilterOptions) to the push-narrowed set", async () => {
+    const nicheCount = (options: { niches: { id: string; count: number }[] }) =>
+      options.niches.find((n) => n.id === searchToken)?.count ?? 0;
+
+    // Pushed side: the seeded person is in the set, so its unique niche bucket
+    // counts 1. Not-pushed side: the person is excluded, so the bucket is gone.
+    expect(
+      nicheCount(await getPersonFilterOptions(withPush({ clientId: clientA, platform: "ghl", status: "pushed" })))
+    ).toBe(1);
+    expect(
+      nicheCount(await getPersonFilterOptions(withPush({ clientId: clientA, platform: "ghl", status: "not_pushed" })))
+    ).toBe(0);
+  });
+
+  it("regression: with pushStatus undefined the seeded person is still reachable by search alone", async () => {
+    const { rows } = await getPeople({ search: searchToken }, 1, 50);
+    expect(rows.map((r) => r.id)).toContain(personId);
   });
 });

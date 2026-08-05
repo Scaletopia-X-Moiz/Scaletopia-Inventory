@@ -272,11 +272,14 @@ function chunkIds(ids: string[], size: number): string[][] {
  * lib/data/companies.ts. */
 const RPC_PAGE_SIZE = 1000;
 
-/** Resolves the id set filters.virtualFilters narrows to via the shared SQL
- * predicate (lib/data/virtual-columns.sql), or `null` when no virtual filter
- * is active — the no-op case every list/export/push call site below must
- * preserve exactly, since this ticket introduces the seam with no operator UI
- * and existing behavior must stay unchanged. Kept separate from
+/** Resolves the id set filters.virtualFilters (or filters.pushStatus) narrows
+ * to via the shared SQL predicate (lib/data/virtual-columns.sql), or `null`
+ * when neither a virtual filter nor a push filter is active — the no-op case
+ * every list/export/push call site below must preserve exactly, so existing
+ * behavior with no filter active stays byte-identical. The push predicate rides
+ * the same seam: people_matching_virtual_filters (F2) applies it in SQL from
+ * the payload's `pushStatus` key, and a virtual filter AND a push filter active
+ * together intersect in that one scan. Kept separate from
  * applyPersonFilters because PostgREST's query builder can't express the
  * predicate's cast-safe numeric/date comparisons (see ADR-0002) — the
  * predicate has to be evaluated in SQL, not built through the builder. Sends
@@ -286,7 +289,7 @@ const RPC_PAGE_SIZE = 1000;
  * instead of the whole table. Mirrors resolveVirtualFilterIds in
  * lib/data/companies.ts. */
 async function resolveVirtualFilterIds(filters: PersonListFilters): Promise<string[] | null> {
-  if (!isFilterSetActive(filters.virtualFilters)) return null;
+  if (!isFilterSetActive(filters.virtualFilters) && !filters.pushStatus) return null;
   const payload = toFilterOptionsRpcPayload(filters);
 
   const first = await supabaseAdmin
