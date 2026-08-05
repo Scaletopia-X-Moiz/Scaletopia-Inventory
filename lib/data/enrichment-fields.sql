@@ -167,7 +167,7 @@ CREATE OR REPLACE FUNCTION company_enrichment_fields(
       COALESCE(filters->'employeeBucketRanges', '[]'::jsonb) AS emp_ranges,
       COALESCE(filters->>'email', 'any') AS email_filter,
       COALESCE(filters->>'phone', 'any') AS phone_filter,
-      COALESCE(filters->'virtualFilters', '[]'::jsonb) AS virtual_filters,
+      COALESCE(filters->'virtualFilters', '{}'::jsonb) AS virtual_filters,
       ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,include}', '[]'::jsonb))) AS niche_inc,
       ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,exclude}', '[]'::jsonb))) AS niche_exc,
       ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{source,include}', '[]'::jsonb))) AS source_inc,
@@ -217,10 +217,34 @@ CREATE OR REPLACE FUNCTION company_enrichment_fields(
       AND (cardinality(p.emailstatus_exc) = 0 OR c.email_status IS NULL OR NOT (c.email_status = ANY(p.emailstatus_exc)))
       AND (cardinality(p.phonetype_inc) = 0 OR c.phone_type = ANY(p.phonetype_inc))
       AND (cardinality(p.phonetype_exc) = 0 OR c.phone_type IS NULL OR NOT (c.phone_type = ANY(p.phonetype_exc)))
-      AND (jsonb_array_length(p.virtual_filters) = 0 OR NOT EXISTS (
-        SELECT 1 FROM jsonb_array_elements(p.virtual_filters) AS vf
-        WHERE NOT virtual_filter_predicate_matches(c.custom_data, vf)
-      ))
+      -- Grouped virtual-filter fold (ticket #117) — keep in lockstep with all
+      -- six inlined copies so discovery honors the same predicate as the list.
+      AND (
+        COALESCE(jsonb_array_length(p.virtual_filters->'groups'), 0) = 0
+        OR CASE WHEN COALESCE(p.virtual_filters->>'combinator', 'and') = 'or' THEN
+          EXISTS (
+            SELECT 1 FROM jsonb_array_elements(p.virtual_filters->'groups') AS grp
+            WHERE CASE WHEN COALESCE(grp->>'combinator', 'and') = 'or' THEN
+                EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
+                        WHERE virtual_filter_predicate_matches(c.custom_data, cond))
+              ELSE
+                NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
+                            WHERE NOT virtual_filter_predicate_matches(c.custom_data, cond))
+              END
+          )
+        ELSE
+          NOT EXISTS (
+            SELECT 1 FROM jsonb_array_elements(p.virtual_filters->'groups') AS grp
+            WHERE NOT (CASE WHEN COALESCE(grp->>'combinator', 'and') = 'or' THEN
+                EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
+                        WHERE virtual_filter_predicate_matches(c.custom_data, cond))
+              ELSE
+                NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
+                            WHERE NOT virtual_filter_predicate_matches(c.custom_data, cond))
+              END)
+          )
+        END
+      )
     LIMIT sample_size
   )
   SELECT jsonb_build_object(
@@ -253,7 +277,7 @@ CREATE OR REPLACE FUNCTION person_enrichment_fields(
       COALESCE(filters->'employeeBucketRanges', '[]'::jsonb) AS emp_ranges,
       COALESCE(filters->>'email', 'any') AS email_filter,
       COALESCE(filters->>'phone', 'any') AS phone_filter,
-      COALESCE(filters->'virtualFilters', '[]'::jsonb) AS virtual_filters,
+      COALESCE(filters->'virtualFilters', '{}'::jsonb) AS virtual_filters,
       ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,include}', '[]'::jsonb))) AS niche_inc,
       ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,exclude}', '[]'::jsonb))) AS niche_exc,
       ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{source,include}', '[]'::jsonb))) AS source_inc,
@@ -304,10 +328,34 @@ CREATE OR REPLACE FUNCTION person_enrichment_fields(
       AND (cardinality(pr.emailstatus_exc) = 0 OR p.email_status IS NULL OR NOT (p.email_status = ANY(pr.emailstatus_exc)))
       AND (cardinality(pr.phonetype_inc) = 0 OR p.phone_type = ANY(pr.phonetype_inc))
       AND (cardinality(pr.phonetype_exc) = 0 OR p.phone_type IS NULL OR NOT (p.phone_type = ANY(pr.phonetype_exc)))
-      AND (jsonb_array_length(pr.virtual_filters) = 0 OR NOT EXISTS (
-        SELECT 1 FROM jsonb_array_elements(pr.virtual_filters) AS vf
-        WHERE NOT virtual_filter_predicate_matches(p.custom_data, vf)
-      ))
+      -- Grouped virtual-filter fold (ticket #117) — keep in lockstep with all
+      -- six inlined copies so discovery honors the same predicate as the list.
+      AND (
+        COALESCE(jsonb_array_length(pr.virtual_filters->'groups'), 0) = 0
+        OR CASE WHEN COALESCE(pr.virtual_filters->>'combinator', 'and') = 'or' THEN
+          EXISTS (
+            SELECT 1 FROM jsonb_array_elements(pr.virtual_filters->'groups') AS grp
+            WHERE CASE WHEN COALESCE(grp->>'combinator', 'and') = 'or' THEN
+                EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
+                        WHERE virtual_filter_predicate_matches(p.custom_data, cond))
+              ELSE
+                NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
+                            WHERE NOT virtual_filter_predicate_matches(p.custom_data, cond))
+              END
+          )
+        ELSE
+          NOT EXISTS (
+            SELECT 1 FROM jsonb_array_elements(pr.virtual_filters->'groups') AS grp
+            WHERE NOT (CASE WHEN COALESCE(grp->>'combinator', 'and') = 'or' THEN
+                EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
+                        WHERE virtual_filter_predicate_matches(p.custom_data, cond))
+              ELSE
+                NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
+                            WHERE NOT virtual_filter_predicate_matches(p.custom_data, cond))
+              END)
+          )
+        END
+      )
     LIMIT sample_size
   )
   SELECT jsonb_build_object(

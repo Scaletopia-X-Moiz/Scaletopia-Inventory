@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import {
   MULTI_SELECT_VALUE_CAP,
+  filterSet,
   isLowCardinalityTextField,
   parseVirtualColumnsParam,
   parseVirtualFiltersParam,
@@ -9,6 +10,7 @@ import {
   serializeVirtualFiltersParam,
   type ActiveVirtualColumn,
   type VirtualColumnFilter,
+  type VirtualFilterSet,
 } from "@/lib/data/virtual-columns";
 
 /** Exercises the shared SQL predicate (lib/data/virtual-columns.sql) directly
@@ -264,8 +266,8 @@ describe("value-list validation on the vf param (ticket #38)", () => {
       { key: "stage", type: "text", operator: "is_not", value: ["lost"] },
     ];
     const params = new URLSearchParams();
-    params.set("vf", serializeVirtualFiltersParam(filters)!);
-    expect(parseVirtualFiltersParam(params)).toEqual(filters);
+    params.set("vf", serializeVirtualFiltersParam(filterSet(...filters))!);
+    expect(parseVirtualFiltersParam(params)).toEqual(filterSet(...filters));
   });
 
   it("drops a value list that is empty or carries a blank/non-string entry", () => {
@@ -280,9 +282,9 @@ describe("value-list validation on the vf param (ticket #38)", () => {
         { key: "e", type: "text", operator: "is", value: ["real"] }, // valid — survives
       ])
     );
-    expect(parseVirtualFiltersParam(params)).toEqual([
+    expect(parseVirtualFiltersParam(params)).toEqual(filterSet(
       { key: "e", type: "text", operator: "is", value: ["real"] },
-    ]);
+    ));
   });
 });
 
@@ -295,8 +297,8 @@ describe("value-list validation on Text/List contains/not_contains (ticket #116)
       { key: "specialties", type: "list", operator: "not_contains", value: ["a30"] },
     ];
     const params = new URLSearchParams();
-    params.set("vf", serializeVirtualFiltersParam(filters)!);
-    expect(parseVirtualFiltersParam(params)).toEqual(filters);
+    params.set("vf", serializeVirtualFiltersParam(filterSet(...filters))!);
+    expect(parseVirtualFiltersParam(params)).toEqual(filterSet(...filters));
   });
 
   it("keeps the single-string form valid for contains/not_contains (no regression)", () => {
@@ -305,8 +307,8 @@ describe("value-list validation on Text/List contains/not_contains (ticket #116)
       { key: "specialties", type: "list", operator: "contains", value: "a3" },
     ];
     const params = new URLSearchParams();
-    params.set("vf", serializeVirtualFiltersParam(filters)!);
-    expect(parseVirtualFiltersParam(params)).toEqual(filters);
+    params.set("vf", serializeVirtualFiltersParam(filterSet(...filters))!);
+    expect(parseVirtualFiltersParam(params)).toEqual(filterSet(...filters));
   });
 
   it("drops a contains/not_contains array that is empty or carries a blank/non-string entry", () => {
@@ -320,9 +322,9 @@ describe("value-list validation on Text/List contains/not_contains (ticket #116)
         { key: "d", type: "text", operator: "contains", value: ["real"] }, // valid — survives
       ])
     );
-    expect(parseVirtualFiltersParam(params)).toEqual([
+    expect(parseVirtualFiltersParam(params)).toEqual(filterSet(
       { key: "d", type: "text", operator: "contains", value: ["real"] },
-    ]);
+    ));
   });
 });
 
@@ -333,8 +335,8 @@ describe("vf/vc URL param round-trip (ticket #34)", () => {
       { key: "tier", type: "text", operator: "is_empty" },
     ];
     const params = new URLSearchParams();
-    params.set("vf", serializeVirtualFiltersParam(filters)!);
-    expect(parseVirtualFiltersParam(params)).toEqual(filters);
+    params.set("vf", serializeVirtualFiltersParam(filterSet(...filters))!);
+    expect(parseVirtualFiltersParam(params)).toEqual(filterSet(...filters));
   });
 
   it("serializes and re-parses an active-columns set unchanged", () => {
@@ -367,10 +369,10 @@ describe("vf/vc URL param round-trip (ticket #34)", () => {
         { key: "d", type: "text", operator: "is", value: "ok" },
       ])
     );
-    expect(parseVirtualFiltersParam(params)).toEqual([
+    expect(parseVirtualFiltersParam(params)).toEqual(filterSet(
       { key: "b", type: "boolean", operator: "is_true" },
       { key: "d", type: "text", operator: "is", value: "ok" },
-    ]);
+    ));
   });
 
   it("round-trips number and date filters, including between ranges (ticket #35)", () => {
@@ -381,8 +383,8 @@ describe("vf/vc URL param round-trip (ticket #34)", () => {
       { key: "seen", type: "date", operator: "between", value: ["2025-01-01", "2025-12-31"] },
     ];
     const params = new URLSearchParams();
-    params.set("vf", serializeVirtualFiltersParam(filters)!);
-    expect(parseVirtualFiltersParam(params)).toEqual(filters);
+    params.set("vf", serializeVirtualFiltersParam(filterSet(...filters))!);
+    expect(parseVirtualFiltersParam(params)).toEqual(filterSet(...filters));
   });
 
   it("drops number/date filters whose value has the wrong shape (ticket #35)", () => {
@@ -397,9 +399,9 @@ describe("vf/vc URL param round-trip (ticket #34)", () => {
         { key: "e", type: "number", operator: "is", value: 7 }, // valid — survives
       ])
     );
-    expect(parseVirtualFiltersParam(params)).toEqual([
+    expect(parseVirtualFiltersParam(params)).toEqual(filterSet(
       { key: "e", type: "number", operator: "is", value: 7 },
-    ]);
+    ));
   });
 
   it("accepts number and date active columns (ticket #35)", () => {
@@ -420,8 +422,8 @@ describe("vf/vc URL param round-trip (ticket #34)", () => {
       { key: "specialties", type: "list", operator: "is_not_empty" },
     ];
     const params = new URLSearchParams();
-    params.set("vf", serializeVirtualFiltersParam(filters)!);
-    expect(parseVirtualFiltersParam(params)).toEqual(filters);
+    params.set("vf", serializeVirtualFiltersParam(filterSet(...filters))!);
+    expect(parseVirtualFiltersParam(params)).toEqual(filterSet(...filters));
   });
 
   it("drops boolean/list filters with the wrong shape (ticket #36)", () => {
@@ -436,10 +438,10 @@ describe("vf/vc URL param round-trip (ticket #34)", () => {
         { key: "e", type: "list", operator: "is_empty" }, // valid — survives
       ])
     );
-    expect(parseVirtualFiltersParam(params)).toEqual([
+    expect(parseVirtualFiltersParam(params)).toEqual(filterSet(
       { key: "a", type: "boolean", operator: "is_true", value: true },
       { key: "e", type: "list", operator: "is_empty" },
-    ]);
+    ));
   });
 
   it("accepts boolean and list active columns (ticket #36)", () => {
@@ -453,33 +455,156 @@ describe("vf/vc URL param round-trip (ticket #34)", () => {
   });
 });
 
-describe("virtual_filters_match", () => {
-  it("matches every row when given an empty filter list (no active virtual filter)", async () => {
-    const { data, error } = await supabaseAdmin.rpc("virtual_filters_match", {
-      data: { anything: "goes" },
-      filters: [],
-    });
-    if (error) throw error;
-    expect(data).toBe(true);
+describe("grouped vf param parse/serialize (ticket #117)", () => {
+  it("parses a legacy flat array as one AND group (backward compatible)", () => {
+    const params = new URLSearchParams();
+    params.set(
+      "vf",
+      JSON.stringify([
+        { key: "lead_score", type: "number", operator: "gt", value: 50 },
+        { key: "tier", type: "text", operator: "is", value: "gold" },
+      ])
+    );
+    expect(parseVirtualFiltersParam(params)).toEqual(
+      filterSet(
+        { key: "lead_score", type: "number", operator: "gt", value: 50 },
+        { key: "tier", type: "text", operator: "is", value: "gold" }
+      )
+    );
   });
 
-  it("ANDs multiple filters together", async () => {
-    const filters: VirtualColumnFilter[] = [
-      { key: "lead_score", type: "number", operator: "gt", value: 50 },
-      { key: "tier", type: "text", operator: "is", value: "gold" },
-    ];
-    const { data: bothMatch, error: e1 } = await supabaseAdmin.rpc("virtual_filters_match", {
-      data: { lead_score: 90, tier: "gold" },
-      filters,
-    });
-    if (e1) throw e1;
-    expect(bothMatch).toBe(true);
+  it("round-trips a grouped (A OR B) AND (C) set through serialize/parse", () => {
+    const set: VirtualFilterSet = {
+      combinator: "and",
+      groups: [
+        {
+          combinator: "or",
+          conditions: [
+            { key: "tier", type: "text", operator: "is", value: "gold" },
+            { key: "tier", type: "text", operator: "is", value: "silver" },
+          ],
+        },
+        {
+          combinator: "and",
+          conditions: [{ key: "lead_score", type: "number", operator: "gt", value: 50 }],
+        },
+      ],
+    };
+    const params = new URLSearchParams();
+    params.set("vf", serializeVirtualFiltersParam(set)!);
+    expect(parseVirtualFiltersParam(params)).toEqual(set);
+  });
 
-    const { data: oneMatches, error: e2 } = await supabaseAdmin.rpc("virtual_filters_match", {
-      data: { lead_score: 90, tier: "silver" },
-      filters,
+  it("serializes a single AND group back to the legacy flat array (short URL)", () => {
+    const set = filterSet({ key: "tier", type: "text", operator: "is", value: "gold" });
+    expect(serializeVirtualFiltersParam(set)).toBe(
+      JSON.stringify([{ key: "tier", type: "text", operator: "is", value: "gold" }])
+    );
+  });
+
+  it("drops malformed conditions and empty groups rather than throwing", () => {
+    const params = new URLSearchParams();
+    params.set(
+      "vf",
+      JSON.stringify({
+        combinator: "or",
+        groups: [
+          { combinator: "and", conditions: [{ key: "a", type: "text", operator: "bogus", value: "x" }] }, // whole group empties out
+          {
+            combinator: "or",
+            conditions: [
+              { key: "b", type: "text", operator: "is", value: "" }, // dropped
+              { key: "c", type: "text", operator: "is", value: "ok" }, // survives
+            ],
+          },
+        ],
+      })
+    );
+    expect(parseVirtualFiltersParam(params)).toEqual({
+      combinator: "or",
+      groups: [{ combinator: "or", conditions: [{ key: "c", type: "text", operator: "is", value: "ok" }] }],
     });
-    if (e2) throw e2;
-    expect(oneMatches).toBe(false);
+  });
+
+  it("returns undefined for a set whose groups are all empty (no virtual filter)", () => {
+    const params = new URLSearchParams();
+    params.set("vf", JSON.stringify({ combinator: "and", groups: [{ combinator: "and", conditions: [] }] }));
+    expect(parseVirtualFiltersParam(params)).toBeUndefined();
+  });
+
+  it("defaults a missing/invalid combinator to 'and'", () => {
+    const params = new URLSearchParams();
+    params.set(
+      "vf",
+      JSON.stringify({ groups: [{ conditions: [{ key: "c", type: "text", operator: "is", value: "ok" }] }] })
+    );
+    expect(parseVirtualFiltersParam(params)).toEqual(
+      filterSet({ key: "c", type: "text", operator: "is", value: "ok" })
+    );
+  });
+});
+
+/** Drives the grouped fold (lib/data/virtual-columns.sql) directly with a
+ * synthetic row + grouped set, independent of any real data — the ticket #117
+ * counterpart to the per-predicate `matches()` suite above. */
+async function setMatches(data: Record<string, unknown>, set: VirtualFilterSet): Promise<boolean> {
+  const { data: result, error } = await supabaseAdmin.rpc("virtual_filters_match", { data, filters: set });
+  if (error) throw error;
+  return result as boolean;
+}
+
+const HIGH_SCORE: VirtualColumnFilter = { key: "lead_score", type: "number", operator: "gt", value: 50 };
+const IS_GOLD: VirtualColumnFilter = { key: "tier", type: "text", operator: "is", value: "gold" };
+const IS_SILVER: VirtualColumnFilter = { key: "tier", type: "text", operator: "is", value: "silver" };
+
+describe("virtual_filters_match — grouped AND/OR fold (ticket #117)", () => {
+  it("matches every row for an empty set (no active virtual filter)", async () => {
+    expect(await setMatches({ anything: "goes" }, { combinator: "and", groups: [] })).toBe(true);
+  });
+
+  it("a single AND group reproduces the pre-#117 flat-AND behavior", async () => {
+    const set = filterSet(HIGH_SCORE, IS_GOLD);
+    expect(await setMatches({ lead_score: 90, tier: "gold" }, set)).toBe(true);
+    expect(await setMatches({ lead_score: 90, tier: "silver" }, set)).toBe(false);
+    expect(await setMatches({ lead_score: 10, tier: "gold" }, set)).toBe(false);
+  });
+
+  it("an OR group matches a row satisfying either condition", async () => {
+    const set: VirtualFilterSet = {
+      combinator: "and",
+      groups: [{ combinator: "or", conditions: [IS_GOLD, IS_SILVER] }],
+    };
+    expect(await setMatches({ tier: "gold" }, set)).toBe(true);
+    expect(await setMatches({ tier: "silver" }, set)).toBe(true);
+    expect(await setMatches({ tier: "bronze" }, set)).toBe(false);
+  });
+
+  it("(A OR B) AND C matches only the intersection", async () => {
+    // (tier is gold OR silver) AND lead_score > 50
+    const set: VirtualFilterSet = {
+      combinator: "and",
+      groups: [
+        { combinator: "or", conditions: [IS_GOLD, IS_SILVER] },
+        { combinator: "and", conditions: [HIGH_SCORE] },
+      ],
+    };
+    expect(await setMatches({ tier: "gold", lead_score: 90 }, set)).toBe(true);
+    expect(await setMatches({ tier: "silver", lead_score: 90 }, set)).toBe(true);
+    expect(await setMatches({ tier: "gold", lead_score: 10 }, set)).toBe(false); // fails C
+    expect(await setMatches({ tier: "bronze", lead_score: 90 }, set)).toBe(false); // fails (A OR B)
+  });
+
+  it("a top-level OR across groups matches a row satisfying either group", async () => {
+    // (lead_score > 50) OR (tier is gold)
+    const set: VirtualFilterSet = {
+      combinator: "or",
+      groups: [
+        { combinator: "and", conditions: [HIGH_SCORE] },
+        { combinator: "and", conditions: [IS_GOLD] },
+      ],
+    };
+    expect(await setMatches({ lead_score: 90, tier: "bronze" }, set)).toBe(true); // first group
+    expect(await setMatches({ lead_score: 10, tier: "gold" }, set)).toBe(true); // second group
+    expect(await setMatches({ lead_score: 10, tier: "bronze" }, set)).toBe(false); // neither
   });
 });

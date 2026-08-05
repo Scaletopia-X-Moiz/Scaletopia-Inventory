@@ -91,7 +91,7 @@ WITH params AS (
     COALESCE(filters->'employeeBucketRanges', '[]'::jsonb) AS emp_ranges,
     COALESCE(filters->>'email', 'any') AS email_filter,
     COALESCE(filters->>'phone', 'any') AS phone_filter,
-    COALESCE(filters->'virtualFilters', '[]'::jsonb) AS virtual_filters,
+    COALESCE(filters->'virtualFilters', '{}'::jsonb) AS virtual_filters,
     ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,include}', '[]'::jsonb))) AS niche_inc,
     ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{niche,exclude}', '[]'::jsonb))) AS niche_exc,
     ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{source,include}', '[]'::jsonb))) AS source_inc,
@@ -133,10 +133,35 @@ base AS MATERIALIZED (
     AND (pr.phone_filter = 'any'
       OR (pr.phone_filter = 'not_empty' AND p.phone IS NOT NULL AND p.phone <> '')
       OR (pr.phone_filter = 'empty' AND (p.phone IS NULL OR p.phone = '')))
-    AND (jsonb_array_length(pr.virtual_filters) = 0 OR NOT EXISTS (
-      SELECT 1 FROM jsonb_array_elements(pr.virtual_filters) AS vf
-      WHERE NOT virtual_filter_predicate_matches(p.custom_data, vf)
-    ))
+    -- Grouped virtual-filter fold (ticket #117) — keep in lockstep with all
+    -- six inlined copies (virtual-columns.sql, canonical-columns.sql,
+    -- enrichment-fields.sql).
+    AND (
+      COALESCE(jsonb_array_length(pr.virtual_filters->'groups'), 0) = 0
+      OR CASE WHEN COALESCE(pr.virtual_filters->>'combinator', 'and') = 'or' THEN
+        EXISTS (
+          SELECT 1 FROM jsonb_array_elements(pr.virtual_filters->'groups') AS grp
+          WHERE CASE WHEN COALESCE(grp->>'combinator', 'and') = 'or' THEN
+              EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
+                      WHERE virtual_filter_predicate_matches(p.custom_data, cond))
+            ELSE
+              NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
+                          WHERE NOT virtual_filter_predicate_matches(p.custom_data, cond))
+            END
+        )
+      ELSE
+        NOT EXISTS (
+          SELECT 1 FROM jsonb_array_elements(pr.virtual_filters->'groups') AS grp
+          WHERE NOT (CASE WHEN COALESCE(grp->>'combinator', 'and') = 'or' THEN
+              EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
+                      WHERE virtual_filter_predicate_matches(p.custom_data, cond))
+            ELSE
+              NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
+                          WHERE NOT virtual_filter_predicate_matches(p.custom_data, cond))
+            END)
+        )
+      END
+    )
 ),
 niches AS (
   SELECT token AS id, count(*) AS count FROM (

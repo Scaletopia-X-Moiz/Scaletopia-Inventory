@@ -11,7 +11,8 @@ import type { GhlPushRecord } from "@/lib/ghl/types";
 import type { EmailBisonPushRecord } from "@/lib/emailbison/types";
 import { getAllFilteredCompanies, type CompanyListFilters } from "@/lib/data/companies";
 import type { IncludeExclude } from "@/lib/data/include-exclude";
-import type { ActiveVirtualColumn, VirtualColumnFilter } from "@/lib/data/virtual-columns";
+import type { ActiveVirtualColumn, VirtualFilterSet } from "@/lib/data/virtual-columns";
+import { isFilterSetActive } from "@/lib/data/virtual-columns";
 import { pushStatusRpcPayload, type PushStatusFilter } from "@/lib/data/push-status-filter";
 
 export type SingleSelectFilter = "any" | "not_empty" | "empty";
@@ -38,7 +39,7 @@ export interface PersonListFilters {
    * docs/adr/0002-virtual-column-enrichment-filtering.md). Evaluated by the
    * shared SQL predicate (lib/data/virtual-columns.sql), not the PostgREST
    * builder below — see resolveVirtualFilterIds. */
-  virtualFilters?: VirtualColumnFilter[];
+  virtualFilters?: VirtualFilterSet;
   /** Enrichment fields added as display-only virtual columns on the rendered
    * page (independent of virtualFilters — a column can be shown before it has
    * a filter). Only getPeople (the rendered page) reads this; it has no
@@ -271,7 +272,7 @@ const RPC_PAGE_SIZE = 1000;
  * instead of the whole table. Mirrors resolveVirtualFilterIds in
  * lib/data/companies.ts. */
 async function resolveVirtualFilterIds(filters: PersonListFilters): Promise<string[] | null> {
-  if (!filters.virtualFilters?.length) return null;
+  if (!isFilterSetActive(filters.virtualFilters)) return null;
   const payload = toFilterOptionsRpcPayload(filters);
 
   const first = await supabaseAdmin
@@ -824,7 +825,7 @@ export function toFilterOptionsRpcPayload(filters: PersonListFilters): Record<st
     country: filters.country ?? { include: [], exclude: [] },
     emailStatus: filters.emailStatus ?? { include: [], exclude: [] },
     phoneType: filters.phoneType ?? { include: [], exclude: [] },
-    virtualFilters: filters.virtualFilters ?? [],
+    virtualFilters: filters.virtualFilters ?? { combinator: "and", groups: [] },
     pushStatus: pushStatusRpcPayload(filters.pushStatus),
   };
 }

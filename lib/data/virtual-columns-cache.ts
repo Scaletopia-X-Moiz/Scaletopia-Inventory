@@ -4,9 +4,8 @@ import {
   parseVirtualColumnsParam,
   parseVirtualFiltersParam,
   serializeVirtualColumnsParam,
-  serializeVirtualFiltersParam,
   type ActiveVirtualColumn,
-  type VirtualColumnFilter,
+  type VirtualFilterSet,
 } from "@/lib/data/virtual-columns";
 
 /** Client-side ephemeral persistence for the active virtual-column set
@@ -32,7 +31,11 @@ function cacheKey(table: VirtualColumnsCacheTable): string {
 
 interface CachedVirtualColumns {
   columns: ActiveVirtualColumn[];
-  filters: VirtualColumnFilter[];
+  /** The grouped filter set (ticket #117), or undefined when no filter is
+   * active. Older cache entries wrote a flat `VirtualColumnFilter[]` here —
+   * parseVirtualFiltersParam normalizes that legacy shape on read, so a stale
+   * entry restores as one AND group rather than being dropped. */
+  filters: VirtualFilterSet | undefined;
   expiresAt: number;
 }
 
@@ -42,7 +45,7 @@ interface CachedVirtualColumns {
  * schema-stale entry degrades to "no cache" rather than restoring garbage. */
 export function readVirtualColumnsCache(table: VirtualColumnsCacheTable): {
   columns: ActiveVirtualColumn[];
-  filters: VirtualColumnFilter[];
+  filters: VirtualFilterSet | undefined;
 } | null {
   if (typeof window === "undefined") return null;
   const key = cacheKey(table);
@@ -59,12 +62,15 @@ export function readVirtualColumnsCache(table: VirtualColumnsCacheTable): {
       const c = serializeVirtualColumnsParam(parsed.columns as ActiveVirtualColumn[]);
       if (c) params.set("vc", c);
     }
-    if (Array.isArray(parsed.filters)) {
-      const f = serializeVirtualFiltersParam(parsed.filters as VirtualColumnFilter[]);
-      if (f) params.set("vf", f);
+    // Round-trip the raw cached filters through the param parser so both the
+    // grouped shape and a legacy flat `VirtualColumnFilter[]` entry are
+    // validated (and the legacy one normalized to a set) the same way a
+    // hand-edited URL would be.
+    if (parsed.filters != null) {
+      params.set("vf", JSON.stringify(parsed.filters));
     }
     const columns = parseVirtualColumnsParam(params);
-    const filters = parseVirtualFiltersParam(params) ?? [];
+    const filters = parseVirtualFiltersParam(params);
     if (columns.length === 0) return null;
     return { columns, filters };
   } catch {
@@ -78,7 +84,7 @@ export function readVirtualColumnsCache(table: VirtualColumnsCacheTable): {
 export function writeVirtualColumnsCache(
   table: VirtualColumnsCacheTable,
   columns: ActiveVirtualColumn[],
-  filters: VirtualColumnFilter[]
+  filters: VirtualFilterSet | undefined
 ): void {
   if (typeof window === "undefined") return;
   const key = cacheKey(table);

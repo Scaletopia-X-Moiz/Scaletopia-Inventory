@@ -38,6 +38,25 @@ export interface VirtualColumnFilter {
   value?: string | number | boolean | string[] | [string | number, string | number] | null;
 }
 
+/** Two-level grouped filter logic (ticket #117), matching Clay's nesting
+ * depth: conditions combine inside a group with the group's `combinator`
+ * (AND/OR), and groups combine at the top with the set's `combinator` — so
+ * `(A OR B) AND (C OR D)` is expressible. Depth is fixed at exactly two levels
+ * (conditions in groups in a set); the leaf `VirtualColumnFilter` is unchanged.
+ * A single AND group of ANDed conditions reproduces the pre-#117 flat-AND
+ * behavior exactly (backward compatible — see parseVirtualFiltersParam). */
+export type FilterCombinator = "and" | "or";
+
+export interface VirtualFilterGroup {
+  combinator: FilterCombinator;
+  conditions: VirtualColumnFilter[];
+}
+
+export interface VirtualFilterSet {
+  combinator: FilterCombinator;
+  groups: VirtualFilterGroup[];
+}
+
 /** A virtual column added to the Companies/People table for display, distinct
  * from VirtualColumnFilter: a column can be added and rendered before (or
  * without) a filter being applied to it. Carried in the URL as its own `vc`
@@ -229,26 +248,96 @@ export function isValidActiveVirtualColumn(value: unknown): value is ActiveVirtu
   return isNonEmptyKey(c.key) && typeof c.type === "string" && SUPPORTED_TYPES.includes(c.type as VirtualColumnType);
 }
 
-/** Parses the `vf` URL param (a JSON-encoded VirtualColumnFilter[]) shared by
- * the Companies page and its CSV export/Clay push routes, mirroring how
- * parseCompanyFilters/parsePeopleFilters read every other filter. Malformed
- * or invalid entries are dropped rather than thrown, since a hand-edited or
- * stale URL should degrade to "no virtual filter" rather than error the page. */
-export function parseVirtualFiltersParam(searchParams: URLSearchParams): VirtualColumnFilter[] | undefined {
+function isCombinator(value: unknown): value is FilterCombinator {
+  return value === "and" || value === "or";
+}
+
+/** Validates + normalizes one group: drops malformed conditions, and drops
+ * the whole group when none survive (an empty group is meaningless — a vacuous
+ * AND would match everything, a vacuous OR nothing — so we never carry one). */
+function sanitizeGroup(value: unknown): VirtualFilterGroup | null {
+  if (typeof value !== "object" || value === null) return null;
+  const g = value as Record<string, unknown>;
+  if (!Array.isArray(g.conditions)) return null;
+  const conditions = g.conditions.filter(isValidVirtualColumnFilter);
+  if (conditions.length === 0) return null;
+  return { combinator: isCombinator(g.combinator) ? g.combinator : "and", conditions };
+}
+
+/** Coerces either the legacy flat `VirtualColumnFilter[]` (interpreted as one
+ * AND group, so pre-#117 bookmarked/shared URLs keep working) or the grouped
+ * `{combinator, groups}` object into a validated VirtualFilterSet. Malformed
+ * conditions and empty groups are dropped rather than thrown; when nothing
+ * valid survives the result is `undefined` ("no virtual filter"), consistent
+ * with how every other filter param degrades a stale/hand-edited URL. */
+export function sanitizeFilterSet(parsed: unknown): VirtualFilterSet | undefined {
+  if (Array.isArray(parsed)) {
+    const conditions = parsed.filter(isValidVirtualColumnFilter);
+    return conditions.length ? { combinator: "and", groups: [{ combinator: "and", conditions }] } : undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const s = parsed as Record<string, unknown>;
+  if (!Array.isArray(s.groups)) return undefined;
+  const groups = s.groups.map(sanitizeGroup).filter((g): g is VirtualFilterGroup => g !== null);
+  return groups.length ? { combinator: isCombinator(s.combinator) ? s.combinator : "and", groups } : undefined;
+}
+
+/** Parses the `vf` URL param — a JSON-encoded VirtualFilterSet, or the legacy
+ * flat `VirtualColumnFilter[]` (pre-#117), which parses as one AND group so
+ * existing bookmarked/shared `/companies?...&vf=[...]` URLs keep working.
+ * Shared by the Companies/People pages and their CSV export/Clay push routes,
+ * mirroring how parseCompanyFilters/parsePeopleFilters read every other filter.
+ * Malformed or invalid entries are dropped rather than thrown, since a
+ * hand-edited or stale URL should degrade to "no virtual filter" not error. */
+export function parseVirtualFiltersParam(searchParams: URLSearchParams): VirtualFilterSet | undefined {
   const raw = searchParams.get("vf");
   if (!raw) return undefined;
   try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return undefined;
-    const valid = parsed.filter(isValidVirtualColumnFilter);
-    return valid.length ? valid : undefined;
+    return sanitizeFilterSet(JSON.parse(raw));
   } catch {
     return undefined;
   }
 }
 
-export function serializeVirtualFiltersParam(filters: VirtualColumnFilter[]): string | null {
-  return filters.length ? JSON.stringify(filters) : null;
+/** Serializes a VirtualFilterSet to the `vf` param. A single AND group emits
+ * the legacy flat `VirtualColumnFilter[]` shape so the common single-group
+ * case keeps byte-identical URLs to pre-#117 (backward-compatible bookmarks,
+ * minimal diffs); anything with OR or multiple groups emits the grouped
+ * object. Returns null for an empty/inactive set (clears the param). */
+export function serializeVirtualFiltersParam(set: VirtualFilterSet | null | undefined): string | null {
+  if (!set || set.groups.length === 0) return null;
+  if (set.groups.length === 1 && set.groups[0].combinator === "and") {
+    return set.groups[0].conditions.length ? JSON.stringify(set.groups[0].conditions) : null;
+  }
+  return JSON.stringify(set);
+}
+
+/** Wraps a flat list of conditions as a single AND group — the grouped-set
+ * equivalent of the pre-#117 flat array. Handy for callers and tests that just
+ * want a simple all-must-match filter without spelling out the group nesting. */
+export function filterSet(...conditions: VirtualColumnFilter[]): VirtualFilterSet {
+  return { combinator: "and", groups: [{ combinator: "and", conditions }] };
+}
+
+/** True when the set carries at least one condition — the "a virtual filter is
+ * active" gate the data layer uses to decide whether to resolve the id set at
+ * all (an inactive set leaves native filtering behavior unchanged). */
+export function isFilterSetActive(set: VirtualFilterSet | null | undefined): boolean {
+  return !!set && set.groups.some((g) => g.conditions.length > 0);
+}
+
+/** Drops every condition on `key` across all groups (used when a display
+ * column is removed), pruning any group left empty; returns undefined when no
+ * condition remains. */
+export function removeColumnFromFilterSet(
+  set: VirtualFilterSet | null | undefined,
+  key: string
+): VirtualFilterSet | undefined {
+  if (!set) return undefined;
+  const groups = set.groups
+    .map((g) => ({ ...g, conditions: g.conditions.filter((c) => c.key !== key) }))
+    .filter((g) => g.conditions.length > 0);
+  return groups.length ? { ...set, groups } : undefined;
 }
 
 /** Parses the `vc` URL param (a JSON-encoded ActiveVirtualColumn[]) — the set

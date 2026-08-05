@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ActiveVirtualColumn, VirtualColumnFilter } from "@/lib/data/virtual-columns";
+import { filterSet, type ActiveVirtualColumn, type VirtualFilterSet } from "@/lib/data/virtual-columns";
 
 /** The cache module reads `typeof window` to no-op server-side, so tests
  * stand up a minimal in-memory localStorage on `globalThis.window` — the
@@ -21,9 +21,12 @@ function installFakeLocalStorage() {
 }
 
 const columns: ActiveVirtualColumn[] = [{ key: "lead_score", type: "number" }];
-const filters: VirtualColumnFilter[] = [
-  { key: "lead_score", type: "number", operator: "gt", value: 50 },
-];
+const filters: VirtualFilterSet = filterSet({
+  key: "lead_score",
+  type: "number",
+  operator: "gt",
+  value: 50,
+});
 
 describe("virtual-columns-cache", () => {
   beforeEach(() => {
@@ -73,7 +76,7 @@ describe("virtual-columns-cache", () => {
       "@/lib/data/virtual-columns-cache"
     );
     writeVirtualColumnsCache("companies", columns, filters);
-    writeVirtualColumnsCache("companies", [], []);
+    writeVirtualColumnsCache("companies", [], undefined);
     expect(readVirtualColumnsCache("companies")).toBeNull();
   });
 

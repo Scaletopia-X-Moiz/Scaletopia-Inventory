@@ -5,11 +5,12 @@ import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import {
   parseVirtualColumnsParam,
   parseVirtualFiltersParam,
+  removeColumnFromFilterSet,
   serializeVirtualColumnsParam,
   serializeVirtualFiltersParam,
   type ActiveVirtualColumn,
-  type VirtualColumnFilter,
   type VirtualColumnType,
+  type VirtualFilterSet,
 } from "@/lib/data/virtual-columns";
 import {
   readVirtualColumnsCache,
@@ -31,20 +32,20 @@ export function useVirtualColumnsState(table: VirtualColumnsCacheTable = "compan
   const searchParams = useSearchParams();
 
   const activeColumns = parseVirtualColumnsParam(searchParams);
-  const activeFilters = parseVirtualFiltersParam(searchParams) ?? [];
+  const activeFilterSet = parseVirtualFiltersParam(searchParams);
 
   const persist = useCallback(
-    (nextColumns: ActiveVirtualColumn[], nextFilters: VirtualColumnFilter[]) => {
+    (nextColumns: ActiveVirtualColumn[], nextFilterSet: VirtualFilterSet | undefined) => {
       const params = new URLSearchParams(searchParams.toString());
       const c = serializeVirtualColumnsParam(nextColumns);
       if (c) params.set("vc", c);
       else params.delete("vc");
-      const f = serializeVirtualFiltersParam(nextFilters);
+      const f = serializeVirtualFiltersParam(nextFilterSet);
       if (f) params.set("vf", f);
       else params.delete("vf");
       params.delete("page");
       router.replace(`${pathname}?${params.toString()}`, { scroll: false });
-      writeVirtualColumnsCache(table, nextColumns, nextFilters);
+      writeVirtualColumnsCache(table, nextColumns, nextFilterSet);
     },
     [router, pathname, searchParams, table]
   );
@@ -55,7 +56,7 @@ export function useVirtualColumnsState(table: VirtualColumnsCacheTable = "compan
   // long working session doesn't expire mid-use.
   useEffect(() => {
     if (searchParams.get("vc")) {
-      if (activeColumns.length > 0) writeVirtualColumnsCache(table, activeColumns, activeFilters);
+      if (activeColumns.length > 0) writeVirtualColumnsCache(table, activeColumns, activeFilterSet);
       return;
     }
     const cached = readVirtualColumnsCache(table);
@@ -67,35 +68,39 @@ export function useVirtualColumnsState(table: VirtualColumnsCacheTable = "compan
   const addColumn = useCallback(
     (key: string, type: VirtualColumnType) => {
       if (activeColumns.some((c) => c.key === key)) return;
-      persist([...activeColumns, { key, type }], activeFilters);
+      persist([...activeColumns, { key, type }], activeFilterSet);
     },
-    [activeColumns, activeFilters, persist]
+    [activeColumns, activeFilterSet, persist]
   );
 
   const removeColumn = useCallback(
     (key: string) => {
       persist(
         activeColumns.filter((c) => c.key !== key),
-        activeFilters.filter((f) => f.key !== key)
+        removeColumnFromFilterSet(activeFilterSet, key)
       );
     },
-    [activeColumns, activeFilters, persist]
+    [activeColumns, activeFilterSet, persist]
   );
 
-  const setFilter = useCallback(
-    (key: string, filter: VirtualColumnFilter | null) => {
-      const rest = activeFilters.filter((f) => f.key !== key);
-      persist(activeColumns, filter ? [...rest, filter] : rest);
+  /** Replaces the whole grouped filter set at once — the group/condition
+   * editing surface (VirtualColumnsBar) owns the immutable updates and hands
+   * back the next set (or undefined to clear). Generalizes the pre-#117
+   * key-addressed `setFilter` now that the same column can appear in several
+   * conditions across groups. */
+  const setFilterSet = useCallback(
+    (next: VirtualFilterSet | undefined) => {
+      persist(activeColumns, next);
     },
-    [activeColumns, activeFilters, persist]
+    [activeColumns, persist]
   );
 
   /** Removes every active virtual column and filter at once — used by the
    * manual clear path and by the post-push "remove these temporary columns?"
    * prompt (ticket #40). */
   const clearAll = useCallback(() => {
-    persist([], []);
+    persist([], undefined);
   }, [persist]);
 
-  return { activeColumns, activeFilters, addColumn, removeColumn, setFilter, clearAll };
+  return { activeColumns, activeFilterSet, addColumn, removeColumn, setFilterSet, clearAll };
 }

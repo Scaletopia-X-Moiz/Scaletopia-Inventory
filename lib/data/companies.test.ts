@@ -7,6 +7,7 @@ import {
   type CompanyListFilters,
 } from "@/lib/data/companies";
 import { includeOnly } from "@/lib/data/include-exclude";
+import { filterSet } from "@/lib/data/virtual-columns";
 import { getCompanyEnrichmentFields } from "@/lib/data/enrichment-fields";
 
 describe("getCompanyFilterOptions", () => {
@@ -204,7 +205,7 @@ describe("getCompanyFilterOptions — facet scoping under virtual filters (ticke
     const value = nums[0];
 
     const filters: CompanyListFilters = {
-      virtualFilters: [{ key: field!.key, type: "number", operator: "is", value }],
+      virtualFilters: filterSet({ key: field!.key, type: "number", operator: "is", value }),
     };
 
     const options = await getCompanyFilterOptions(filters);
@@ -222,6 +223,67 @@ describe("getCompanyFilterOptions — facet scoping under virtual filters (ticke
   }, 30000);
 });
 
+describe("grouped virtual filters — facet + discovery lockstep (ticket #117, #37 class)", () => {
+  it("the facet and discovery RPCs honor a grouped OR predicate the same way the list does", async () => {
+    // The highest-risk #117 regression surface: the grouped fold is inlined
+    // in six places, and a facet/discovery copy that diverges from the list
+    // copy is exactly the ticket #37 class of bug. Drive an OR group (not a
+    // single AND group) through getCompanyFilterOptions AND
+    // getCompanyEnrichmentFields, and assert both stay consistent with
+    // getCompanies. Uses Number 'is' equality for the same low-cardinality,
+    // timeout-safe reason as the #37 test above.
+    const discovery = await getCompanyEnrichmentFields({}, 2000, 25);
+    const field = discovery.fields.find((f) => f.type === "Number" && f.sampleValues.length >= 2);
+    expect(field).toBeDefined();
+    const nums = field!.sampleValues.map(Number).filter((n) => Number.isFinite(n));
+    expect(nums.length).toBeGreaterThanOrEqual(2);
+    const [v1, v2] = nums;
+
+    // (field is v1) OR (field is v2) — a single OR group.
+    const grouped: CompanyListFilters = {
+      virtualFilters: {
+        combinator: "and",
+        groups: [
+          {
+            combinator: "or",
+            conditions: [
+              { key: field!.key, type: "number", operator: "is", value: v1 },
+              { key: field!.key, type: "number", operator: "is", value: v2 },
+            ],
+          },
+        ],
+      },
+    };
+
+    const list = await getCompanies(grouped, 1, 1);
+    const onlyV1 = await getCompanies(
+      { virtualFilters: filterSet({ key: field!.key, type: "number", operator: "is", value: v1 }) },
+      1,
+      1
+    );
+
+    // The OR union matches at least as many rows as either branch alone.
+    expect(list.total).toBeGreaterThanOrEqual(onlyV1.total);
+    expect(list.total).toBeGreaterThan(0);
+
+    // Facet RPC: scoped counts never exceed the grouped list total (lockstep).
+    const options = await getCompanyFilterOptions(grouped);
+    const scopedTotal = [
+      ...options.niches,
+      ...options.sources,
+      ...options.industries,
+      ...options.countries,
+    ].reduce((max, o) => Math.max(max, o.count), 0);
+    expect(scopedTotal).toBeLessThanOrEqual(list.total);
+    expect(scopedTotal).toBeGreaterThan(0);
+
+    // Discovery RPC: runs the same grouped predicate without erroring and
+    // still surfaces the filtered field within the narrowed scope.
+    const scopedDiscovery = await getCompanyEnrichmentFields(grouped, 2000, 25);
+    expect(scopedDiscovery.fields.some((f) => f.key === field!.key)).toBe(true);
+  }, 30000);
+});
+
 describe("getCompanies — virtual-column Text filter (ticket #34)", () => {
   it("'is' narrows to rows carrying that exact value, and total reflects the narrowed set", async () => {
     // Find a real Text enrichment key with at least one sample value, rather
@@ -235,7 +297,7 @@ describe("getCompanies — virtual-column Text filter (ticket #34)", () => {
     const all = await getCompanies({}, 1, 1);
     const result = await getCompanies(
       {
-        virtualFilters: [{ key: field!.key, type: "text", operator: "is", value }],
+        virtualFilters: filterSet({ key: field!.key, type: "text", operator: "is", value }),
         virtualColumns: [{ key: field!.key, type: "text" }],
       },
       1,
@@ -259,13 +321,13 @@ describe("getCompanies — virtual-column Text filter (ticket #34)", () => {
     // value alone, and every returned row must carry one of them.
     const [a] = values;
     const onlyA = await getCompanies(
-      { virtualFilters: [{ key: field!.key, type: "text", operator: "is", value: a }] },
+      { virtualFilters: filterSet({ key: field!.key, type: "text", operator: "is", value: a }) },
       1,
       1
     );
     const list = await getCompanies(
       {
-        virtualFilters: [{ key: field!.key, type: "text", operator: "is", value: values }],
+        virtualFilters: filterSet({ key: field!.key, type: "text", operator: "is", value: values }),
         virtualColumns: [{ key: field!.key, type: "text" }],
       },
       1,
@@ -289,7 +351,7 @@ describe("getCompanies — virtual-column Text filter (ticket #34)", () => {
     const substring = sample.slice(0, Math.max(2, sample.length - 1));
 
     const result = await getCompanies(
-      { virtualFilters: [{ key: field!.key, type: "text", operator: "contains", value: substring }] },
+      { virtualFilters: filterSet({ key: field!.key, type: "text", operator: "contains", value: substring }) },
       1,
       1
     );
@@ -303,12 +365,12 @@ describe("getCompanies — virtual-column Text filter (ticket #34)", () => {
 
     const all = await getCompanies({}, 1, 1);
     const empty = await getCompanies(
-      { virtualFilters: [{ key: field!.key, type: "text", operator: "is_empty" }] },
+      { virtualFilters: filterSet({ key: field!.key, type: "text", operator: "is_empty" }) },
       1,
       1
     );
     const notEmpty = await getCompanies(
-      { virtualFilters: [{ key: field!.key, type: "text", operator: "is_not_empty" }] },
+      { virtualFilters: filterSet({ key: field!.key, type: "text", operator: "is_not_empty" }) },
       1,
       1
     );
@@ -330,7 +392,7 @@ describe("getCompanies — virtual-column Number filter (ticket #35)", () => {
 
     const result = await getCompanies(
       {
-        virtualFilters: [{ key: field.key, type: "number", operator: "gt", value: min - 1 }],
+        virtualFilters: filterSet({ key: field.key, type: "number", operator: "gt", value: min - 1 }),
         virtualColumns: [{ key: field.key, type: "number" }],
       },
       1,
@@ -340,7 +402,7 @@ describe("getCompanies — virtual-column Number filter (ticket #35)", () => {
 
     // `is` an exact sample narrows to a subset of the `gt` set, never larger.
     const exact = await getCompanies(
-      { virtualFilters: [{ key: field.key, type: "number", operator: "is", value: nums[0] }] },
+      { virtualFilters: filterSet({ key: field.key, type: "number", operator: "is", value: nums[0] }) },
       1,
       1
     );
@@ -358,9 +420,9 @@ describe("getCompanies — virtual-column Number filter (ticket #35)", () => {
     const all = await getCompanies({}, 1, 1);
     const between = await getCompanies(
       {
-        virtualFilters: [
+        virtualFilters: filterSet(
           { key: field.key, type: "number", operator: "between", value: [Math.min(...nums), Math.max(...nums)] },
-        ],
+        ),
       },
       1,
       1
@@ -382,7 +444,7 @@ describe("getCompanies — virtual-column Date filter (ticket #35)", () => {
 
     // `on` a real sample date matches at least that row.
     const on = await getCompanies(
-      { virtualFilters: [{ key: field.key, type: "date", operator: "on", value: earliest }] },
+      { virtualFilters: filterSet({ key: field.key, type: "date", operator: "on", value: earliest }) },
       1,
       1
     );
@@ -393,12 +455,12 @@ describe("getCompanies — virtual-column Date filter (ticket #35)", () => {
     // compare against whatever malformed dates the key also holds without
     // throwing.
     const afterEarly = await getCompanies(
-      { virtualFilters: [{ key: field.key, type: "date", operator: "after", value: earliest }] },
+      { virtualFilters: filterSet({ key: field.key, type: "date", operator: "after", value: earliest }) },
       1,
       1
     );
     const afterLate = await getCompanies(
-      { virtualFilters: [{ key: field.key, type: "date", operator: "after", value: latest }] },
+      { virtualFilters: filterSet({ key: field.key, type: "date", operator: "after", value: latest }) },
       1,
       1
     );
@@ -406,7 +468,7 @@ describe("getCompanies — virtual-column Date filter (ticket #35)", () => {
 
     const all = await getCompanies({}, 1, 1);
     const between = await getCompanies(
-      { virtualFilters: [{ key: field.key, type: "date", operator: "between", value: [earliest, latest] }] },
+      { virtualFilters: filterSet({ key: field.key, type: "date", operator: "between", value: [earliest, latest] }) },
       1,
       1
     );
@@ -423,12 +485,12 @@ describe("getCompanies — virtual-column Boolean filter (ticket #36)", () => {
 
     const all = await getCompanies({}, 1, 1);
     const isTrue = await getCompanies(
-      { virtualFilters: [{ key: field.key, type: "boolean", operator: "is_true" }] },
+      { virtualFilters: filterSet({ key: field.key, type: "boolean", operator: "is_true" }) },
       1,
       1
     );
     const isFalse = await getCompanies(
-      { virtualFilters: [{ key: field.key, type: "boolean", operator: "is_false" }] },
+      { virtualFilters: filterSet({ key: field.key, type: "boolean", operator: "is_false" }) },
       1,
       1
     );
@@ -449,7 +511,7 @@ describe("getCompanies — virtual-column List filter (ticket #36)", () => {
 
     const result = await getCompanies(
       {
-        virtualFilters: [{ key: field.key, type: "list", operator: "contains", value }],
+        virtualFilters: filterSet({ key: field.key, type: "list", operator: "contains", value }),
         virtualColumns: [{ key: field.key, type: "list" }],
       },
       1,
@@ -461,7 +523,7 @@ describe("getCompanies — virtual-column List filter (ticket #36)", () => {
     // false positive from a substring/ILIKE-style match.
     const nearString = `${value}_not_a_real_member`;
     const nearResult = await getCompanies(
-      { virtualFilters: [{ key: field.key, type: "list", operator: "contains", value: nearString }] },
+      { virtualFilters: filterSet({ key: field.key, type: "list", operator: "contains", value: nearString }) },
       1,
       1
     );
@@ -483,12 +545,12 @@ describe("getCompanies — virtual-column List filter (ticket #36)", () => {
 
     const all = await getCompanies({}, 1, 1);
     const empty = await getCompanies(
-      { virtualFilters: [{ key: field.key, type: "list", operator: "is_empty" }] },
+      { virtualFilters: filterSet({ key: field.key, type: "list", operator: "is_empty" }) },
       1,
       1
     );
     const notEmpty = await getCompanies(
-      { virtualFilters: [{ key: field.key, type: "list", operator: "is_not_empty" }] },
+      { virtualFilters: filterSet({ key: field.key, type: "list", operator: "is_not_empty" }) },
       1,
       1
     );

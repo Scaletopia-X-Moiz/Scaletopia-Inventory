@@ -67,10 +67,10 @@ export function PeopleResultsClient() {
 
   const {
     activeColumns: virtualColumns,
-    activeFilters: virtualFilters,
+    activeFilterSet: virtualFilterSet,
     addColumn: addVirtualColumn,
     removeColumn: removeVirtualColumn,
-    setFilter: setVirtualFilter,
+    setFilterSet: setVirtualFilterSet,
     clearAll: clearVirtualColumns,
   } = useVirtualColumnsState("people");
 
@@ -187,10 +187,10 @@ export function PeopleResultsClient() {
 
       <VirtualColumnsBar
         activeColumns={virtualColumns}
-        activeFilters={virtualFilters}
+        activeFilterSet={virtualFilterSet}
         addColumn={addVirtualColumn}
         removeColumn={removeVirtualColumn}
-        setFilter={setVirtualFilter}
+        setFilterSet={setVirtualFilterSet}
         onScreenValues={onScreenValues}
         endpoint="/api/people/enrichment-fields"
       />

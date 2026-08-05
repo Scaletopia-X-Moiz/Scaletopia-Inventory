@@ -67,10 +67,10 @@ export function CompaniesResultsClient() {
 
   const {
     activeColumns: virtualColumns,
-    activeFilters: virtualFilters,
+    activeFilterSet: virtualFilterSet,
     addColumn: addVirtualColumn,
     removeColumn: removeVirtualColumn,
-    setFilter: setVirtualFilter,
+    setFilterSet: setVirtualFilterSet,
     clearAll: clearVirtualColumns,
   } = useVirtualColumnsState();
 
@@ -172,10 +172,10 @@ export function CompaniesResultsClient() {
 
       <VirtualColumnsBar
         activeColumns={virtualColumns}
-        activeFilters={virtualFilters}
+        activeFilterSet={virtualFilterSet}
         addColumn={addVirtualColumn}
         removeColumn={removeVirtualColumn}
-        setFilter={setVirtualFilter}
+        setFilterSet={setVirtualFilterSet}
         onScreenValues={onScreenValues}
       />
 

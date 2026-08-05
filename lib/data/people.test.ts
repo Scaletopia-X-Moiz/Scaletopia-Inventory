@@ -7,6 +7,7 @@ import {
   type PersonListFilters,
 } from "@/lib/data/people";
 import { includeOnly } from "@/lib/data/include-exclude";
+import { filterSet } from "@/lib/data/virtual-columns";
 import { getPersonEnrichmentFields } from "@/lib/data/enrichment-fields";
 
 describe("getPersonFilterOptions", () => {
@@ -53,9 +54,9 @@ describe("getPersonFilterOptions — facet scoping under virtual filters (ticket
       const candidateValue = candidate.sampleValues[0];
       const probe = await getPeople(
         {
-          virtualFilters: [
+          virtualFilters: filterSet(
             { key: candidate.key, type: "text", operator: "is", value: candidateValue },
-          ],
+          ),
         },
         1,
         1
@@ -69,7 +70,7 @@ describe("getPersonFilterOptions — facet scoping under virtual filters (ticket
     expect(field).toBeDefined();
 
     const filters: PersonListFilters = {
-      virtualFilters: [{ key: field!.key, type: "text", operator: "is", value: value! }],
+      virtualFilters: filterSet({ key: field!.key, type: "text", operator: "is", value: value! }),
     };
 
     const options = await getPersonFilterOptions(filters);
@@ -226,7 +227,7 @@ describe("getPeople — virtual-column Text filter (ticket #41)", () => {
     const all = await getPeople({}, 1, 1);
     const result = await getPeople(
       {
-        virtualFilters: [{ key: field!.key, type: "text", operator: "is", value }],
+        virtualFilters: filterSet({ key: field!.key, type: "text", operator: "is", value }),
         virtualColumns: [{ key: field!.key, type: "text" }],
       },
       1,
@@ -250,7 +251,7 @@ describe("getPeople — virtual-column Text filter (ticket #41)", () => {
     const substring = sample.slice(0, Math.max(2, sample.length - 1));
 
     const result = await getPeople(
-      { virtualFilters: [{ key: field!.key, type: "text", operator: "contains", value: substring }] },
+      { virtualFilters: filterSet({ key: field!.key, type: "text", operator: "contains", value: substring }) },
       1,
       1
     );
@@ -264,12 +265,12 @@ describe("getPeople — virtual-column Text filter (ticket #41)", () => {
 
     const all = await getPeople({}, 1, 1);
     const empty = await getPeople(
-      { virtualFilters: [{ key: field!.key, type: "text", operator: "is_empty" }] },
+      { virtualFilters: filterSet({ key: field!.key, type: "text", operator: "is_empty" }) },
       1,
       1
     );
     const notEmpty = await getPeople(
-      { virtualFilters: [{ key: field!.key, type: "text", operator: "is_not_empty" }] },
+      { virtualFilters: filterSet({ key: field!.key, type: "text", operator: "is_not_empty" }) },
       1,
       1
     );
@@ -288,7 +289,7 @@ describe("getPeople — virtual-column Number filter (ticket #41)", () => {
 
     const result = await getPeople(
       {
-        virtualFilters: [{ key: field.key, type: "number", operator: "gt", value: min - 1 }],
+        virtualFilters: filterSet({ key: field.key, type: "number", operator: "gt", value: min - 1 }),
         virtualColumns: [{ key: field.key, type: "number" }],
       },
       1,
@@ -297,7 +298,7 @@ describe("getPeople — virtual-column Number filter (ticket #41)", () => {
     expect(result.total).toBeGreaterThan(0);
 
     const exact = await getPeople(
-      { virtualFilters: [{ key: field.key, type: "number", operator: "is", value: nums[0] }] },
+      { virtualFilters: filterSet({ key: field.key, type: "number", operator: "is", value: nums[0] }) },
       1,
       1
     );
@@ -315,9 +316,9 @@ describe("getPeople — virtual-column Number filter (ticket #41)", () => {
     const all = await getPeople({}, 1, 1);
     const between = await getPeople(
       {
-        virtualFilters: [
+        virtualFilters: filterSet(
           { key: field.key, type: "number", operator: "between", value: [Math.min(...nums), Math.max(...nums)] },
-        ],
+        ),
       },
       1,
       1
@@ -338,19 +339,19 @@ describe("getPeople — virtual-column Date filter (ticket #41)", () => {
     const latest = dates[dates.length - 1];
 
     const on = await getPeople(
-      { virtualFilters: [{ key: field.key, type: "date", operator: "on", value: earliest }] },
+      { virtualFilters: filterSet({ key: field.key, type: "date", operator: "on", value: earliest }) },
       1,
       1
     );
     expect(on.total).toBeGreaterThan(0);
 
     const afterEarly = await getPeople(
-      { virtualFilters: [{ key: field.key, type: "date", operator: "after", value: earliest }] },
+      { virtualFilters: filterSet({ key: field.key, type: "date", operator: "after", value: earliest }) },
       1,
       1
     );
     const afterLate = await getPeople(
-      { virtualFilters: [{ key: field.key, type: "date", operator: "after", value: latest }] },
+      { virtualFilters: filterSet({ key: field.key, type: "date", operator: "after", value: latest }) },
       1,
       1
     );
@@ -358,7 +359,7 @@ describe("getPeople — virtual-column Date filter (ticket #41)", () => {
 
     const all = await getPeople({}, 1, 1);
     const between = await getPeople(
-      { virtualFilters: [{ key: field.key, type: "date", operator: "between", value: [earliest, latest] }] },
+      { virtualFilters: filterSet({ key: field.key, type: "date", operator: "between", value: [earliest, latest] }) },
       1,
       1
     );
@@ -375,12 +376,12 @@ describe("getPeople — virtual-column Boolean filter (ticket #41)", () => {
 
     const all = await getPeople({}, 1, 1);
     const isTrue = await getPeople(
-      { virtualFilters: [{ key: field.key, type: "boolean", operator: "is_true" }] },
+      { virtualFilters: filterSet({ key: field.key, type: "boolean", operator: "is_true" }) },
       1,
       1
     );
     const isFalse = await getPeople(
-      { virtualFilters: [{ key: field.key, type: "boolean", operator: "is_false" }] },
+      { virtualFilters: filterSet({ key: field.key, type: "boolean", operator: "is_false" }) },
       1,
       1
     );
@@ -399,7 +400,7 @@ describe("getPeople — virtual-column List filter (ticket #41)", () => {
 
     const result = await getPeople(
       {
-        virtualFilters: [{ key: field.key, type: "list", operator: "contains", value }],
+        virtualFilters: filterSet({ key: field.key, type: "list", operator: "contains", value }),
         virtualColumns: [{ key: field.key, type: "list" }],
       },
       1,
@@ -409,7 +410,7 @@ describe("getPeople — virtual-column List filter (ticket #41)", () => {
 
     const nearString = `${value}_not_a_real_member`;
     const nearResult = await getPeople(
-      { virtualFilters: [{ key: field.key, type: "list", operator: "contains", value: nearString }] },
+      { virtualFilters: filterSet({ key: field.key, type: "list", operator: "contains", value: nearString }) },
       1,
       1
     );
@@ -423,12 +424,12 @@ describe("getPeople — virtual-column List filter (ticket #41)", () => {
 
     const all = await getPeople({}, 1, 1);
     const empty = await getPeople(
-      { virtualFilters: [{ key: field.key, type: "list", operator: "is_empty" }] },
+      { virtualFilters: filterSet({ key: field.key, type: "list", operator: "is_empty" }) },
       1,
       1
     );
     const notEmpty = await getPeople(
-      { virtualFilters: [{ key: field.key, type: "list", operator: "is_not_empty" }] },
+      { virtualFilters: filterSet({ key: field.key, type: "list", operator: "is_not_empty" }) },
       1,
       1
     );
