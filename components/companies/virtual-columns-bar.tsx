@@ -321,6 +321,17 @@ function VirtualColumnChip({
     setInputs(initialInputs(filter));
   }, [filter?.value]);
 
+  // Value/min/max text inputs debounce the commit the same way the native
+  // search box does (filter-slip.tsx, issue #91) — the input itself updates
+  // instantly, but `onChangeFilter` (and the resulting navigation/refetch)
+  // only fires once typing pauses, unless Enter/blur flush it sooner
+  // (ticket #115). Operator changes and multi-select toggles bypass this
+  // entirely by calling `emit` directly.
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+  }, []);
+
   // A Text column may offer a multi-select of its real values — make sure the
   // authoritative set is being fetched so the preview can reconcile.
   useEffect(() => {
@@ -388,8 +399,19 @@ function VirtualColumnChip({
   function changeInput(part: "a" | "b", raw: string) {
     const next = { ...inputs, [part]: raw };
     setInputs(next);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      const meta = operators.find((o) => o.id === operator);
+      emit(operator, meta ? coerceValue(column.type, meta, next.a, next.b) : undefined);
+    }, 300);
+  }
+
+  function flushInput() {
+    if (!debounceRef.current) return;
+    clearTimeout(debounceRef.current);
+    debounceRef.current = null;
     const meta = operators.find((o) => o.id === operator);
-    emit(operator, meta ? coerceValue(column.type, meta, next.a, next.b) : undefined);
+    emit(operator, meta ? coerceValue(column.type, meta, inputs.a, inputs.b) : undefined);
   }
 
   function toggleValue(v: string) {
@@ -440,6 +462,8 @@ function VirtualColumnChip({
           type={inputType}
           value={inputs.a}
           onChange={(e) => changeInput("a", e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && flushInput()}
+          onBlur={flushInput}
           placeholder="value"
           className="w-28 rounded border border-rule bg-card px-1.5 py-1 text-ink outline-none placeholder:text-ink-mute focus:border-stamp"
         />
@@ -449,6 +473,8 @@ function VirtualColumnChip({
             type={inputType}
             value={inputs.a}
             onChange={(e) => changeInput("a", e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && flushInput()}
+            onBlur={flushInput}
             placeholder="min"
             className="w-24 rounded border border-rule bg-card px-1.5 py-1 text-ink outline-none placeholder:text-ink-mute focus:border-stamp"
           />
@@ -457,6 +483,8 @@ function VirtualColumnChip({
             type={inputType}
             value={inputs.b}
             onChange={(e) => changeInput("b", e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && flushInput()}
+            onBlur={flushInput}
             placeholder="max"
             className="w-24 rounded border border-rule bg-card px-1.5 py-1 text-ink outline-none placeholder:text-ink-mute focus:border-stamp"
           />
