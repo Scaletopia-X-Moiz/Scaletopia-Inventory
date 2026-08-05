@@ -331,6 +331,7 @@ export function PeopleFilterSlip({
         clientOptions={clientOptions}
         value={pushStatusValue}
         onChange={setPushStatus}
+        countsEndpoint="/api/people/push-status-counts"
       />
 
       <button

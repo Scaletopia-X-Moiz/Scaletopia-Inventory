@@ -14,7 +14,12 @@ import { getPushJobPersonIds, type PushJobOutcome } from "@/lib/data/push-jobs";
 import type { IncludeExclude } from "@/lib/data/include-exclude";
 import type { ActiveVirtualColumn, VirtualFilterSet } from "@/lib/data/virtual-columns";
 import { isFilterSetActive } from "@/lib/data/virtual-columns";
-import { pushStatusRpcPayload, type PushStatusFilter } from "@/lib/data/push-status-filter";
+import {
+  pushStatusRpcPayload,
+  type PushPlatform,
+  type PushStatusCounts,
+  type PushStatusFilter,
+} from "@/lib/data/push-status-filter";
 
 export type SingleSelectFilter = "any" | "not_empty" | "empty";
 
@@ -939,6 +944,28 @@ export async function getPersonFilterOptions(
       .map(({ id, count }) => ({ id, label: id, count }))
       .sort(sortByCountDesc),
   };
+}
+
+/** Live per-status preview counts for the push-status popover (E1, issue #133).
+ * Scoped by every *other* active filter (push status is self-excluded — the RPC
+ * ignores the pushStatus key), then split into pushed vs not-pushed for the
+ * selected client + platform, so `pushed + notPushed` equals the total the
+ * filter would yield. Person-level semantics: pushed iff a platform_pushes row
+ * exists. Backed by person_push_status_counts (lib/data/push-status-counts.sql);
+ * mirrors getCompanyPushStatusCounts. */
+export async function getPersonPushStatusCounts(
+  filters: PersonListFilters,
+  clientId: string,
+  platform: PushPlatform
+): Promise<PushStatusCounts> {
+  const { data, error } = await supabaseAdmin.rpc("person_push_status_counts", {
+    filters: toFilterOptionsRpcPayload(filters),
+    client_id: clientId,
+    platform,
+  });
+  if (error) throw error;
+  const result = data as { pushed: number; notPushed: number };
+  return { pushed: result.pushed, notPushed: result.notPushed };
 }
 
 export interface CompanyPersonRow {

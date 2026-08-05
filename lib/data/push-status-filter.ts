@@ -15,7 +15,15 @@ export interface PushStatusFilter {
   status: PushStatus;
 }
 
-function asPushPlatform(value: string | null): PushPlatform | undefined {
+/** Live preview counts for the push-status popover (E1, issue #133): how many
+ * rows the currently-scoped filter set would yield for each status, given a
+ * selected client + platform. `pushed + notPushed` equals the filtered total. */
+export interface PushStatusCounts {
+  pushed: number;
+  notPushed: number;
+}
+
+export function asPushPlatform(value: string | null): PushPlatform | undefined {
   return value === "ghl" || value === "emailbison" ? value : undefined;
 }
 

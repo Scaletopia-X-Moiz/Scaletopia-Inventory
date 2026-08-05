@@ -323,6 +323,7 @@ export function FilterSlip({
             clientOptions={clientOptions}
             value={pushStatusValue}
             onChange={setPushStatus}
+            countsEndpoint="/api/companies/push-status-counts"
           />
         </span>
 
