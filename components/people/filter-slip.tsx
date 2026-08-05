@@ -6,6 +6,7 @@ import { Search } from "lucide-react";
 import { FilterChipGroup, type ChipOption } from "@/components/companies/filter-chip-group";
 import { FilterPopover } from "@/components/shared/filter-popover";
 import { SingleSelectGroup } from "@/components/people/single-select-group";
+import { PushJobFilterChip } from "@/components/shared/push-job-filter-chip";
 import type { PersonFilterOptions } from "@/lib/data/people";
 
 const MULTI_PARAMS = [
@@ -138,6 +139,7 @@ export function PeopleFilterSlip({ options }: { options: PersonFilterOptions }) 
     Boolean(searchParams.get("phone")) ||
     Boolean(searchParams.get("empmin")) ||
     Boolean(searchParams.get("empmax")) ||
+    Boolean(searchParams.get("pushJobId")) ||
     MULTI_PARAMS.some((p) => searchParams.getAll(p).length > 0 || searchParams.getAll(`${p}_exclude`).length > 0);
 
   const toOptions = (entries: { id: string; label: string; count: number }[]): ChipOption[] =>
@@ -148,6 +150,7 @@ export function PeopleFilterSlip({ options }: { options: PersonFilterOptions }) 
 
   return (
     <div className="flex flex-wrap items-center gap-2">
+      <PushJobFilterChip />
       <div className="relative min-w-[220px] max-w-sm flex-1">
         <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-soft" />
         <input

@@ -3,6 +3,11 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 
 export type PushJobStatus = "queued" | "running" | "succeeded" | "failed" | "partial" | "canceled";
 
+/** Per-record push outcome, as stored in `push_job_records.outcome`. Also the
+ * optional sub-scope for the `pushJobId` filter (#123): restrict a job's
+ * deep-linked set to only its succeeded or only its failed records. */
+export type PushJobOutcome = "succeeded" | "failed";
+
 export interface PushJobFailure {
   name: string;
   reason: string;
@@ -148,6 +153,84 @@ export async function getPushJob(id: string): Promise<PushJob | null> {
     throw error;
   }
   return toPushJob(data as unknown as RawPushJob);
+}
+
+/** The minimal push-job facts the "From push <client> · <timestamp>" deep-link
+ * filter chip (#123) renders — just the client name and when the run happened,
+ * so the chip labels the filter instead of showing a raw uuid. Kept a
+ * self-contained projection (its own tiny select) rather than reusing the
+ * fuller list-row join, so it depends only on columns present since the #119
+ * schema and stays exactly the fields the chip consumes. */
+export interface PushJobSummary {
+  id: string;
+  clientName: string | null;
+  createdAt: string;
+}
+
+/** Fetches the deep-link chip's summary for a job, or null if it doesn't
+ * exist. */
+export async function getPushJobSummary(id: string): Promise<PushJobSummary | null> {
+  const { data, error } = await supabaseAdmin
+    .from("push_jobs")
+    .select("id,created_at,client:clients(name)")
+    .eq("id", id)
+    .single();
+  if (error) {
+    if (error.code === "PGRST116") return null;
+    throw error;
+  }
+  const raw = data as unknown as {
+    id: string;
+    created_at: string;
+    client: { name: string | null } | null;
+  };
+  return {
+    id: raw.id,
+    clientName: raw.client?.name ?? null,
+    createdAt: raw.created_at,
+  };
+}
+
+/** Every person_id tagged by a push job in `push_job_records`, optionally
+ * scoped to a single outcome (#123). Backs the People/Companies `pushJobId`
+ * filter — the stable, exact per-run set (unlike a trigger-time filter replay,
+ * which drifts, or `platform_pushes`, which overwrites across runs). Paged
+ * manually rather than via fetchAllRows because `push_job_records` has no `id`
+ * column (its PK is composite), so a large run's >1000 records still come back
+ * whole. Ordering by `person_id` pins the page boundaries (fetchAllRows's
+ * rationale) since the set is unioned, not sliced. */
+export async function getPushJobPersonIds(
+  jobId: string,
+  outcome?: PushJobOutcome
+): Promise<string[]> {
+  const PAGE_SIZE = 1000;
+
+  let countQuery = supabaseAdmin
+    .from("push_job_records")
+    .select("person_id", { count: "exact", head: true })
+    .eq("push_job_id", jobId);
+  if (outcome) countQuery = countQuery.eq("outcome", outcome);
+  const { count, error: countError } = await countQuery;
+  if (countError) throw countError;
+
+  const total = count ?? 0;
+  if (total === 0) return [];
+
+  const pageCount = Math.ceil(total / PAGE_SIZE);
+  const pages = await Promise.all(
+    Array.from({ length: pageCount }, (_, i) => {
+      let query = supabaseAdmin.from("push_job_records").select("person_id").eq("push_job_id", jobId);
+      if (outcome) query = query.eq("outcome", outcome);
+      return query.order("person_id", { ascending: true }).range(i * PAGE_SIZE, i * PAGE_SIZE + PAGE_SIZE - 1);
+    })
+  );
+
+  const ids: string[] = [];
+  for (const page of pages) {
+    if (page.error) throw page.error;
+    for (const row of (page.data ?? []) as { person_id: string }[]) ids.push(row.person_id);
+  }
+  return ids;
 }
 
 /** Claims the oldest queued job by flipping it to `running`, or null if

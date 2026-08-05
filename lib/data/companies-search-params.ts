@@ -7,6 +7,10 @@ function asSingleSelect(value: string | null): SingleSelectFilter | undefined {
   return value === "any" || value === "not_empty" || value === "empty" ? value : undefined;
 }
 
+function asPushJobOutcome(value: string | null): "succeeded" | "failed" | undefined {
+  return value === "succeeded" || value === "failed" ? value : undefined;
+}
+
 /** Shared between the Companies page (server-rendered searchParams) and the
  * CSV export route (URL query string) so both read filters identically. */
 export function parseCompanyFilters(searchParams: URLSearchParams): CompanyListFilters {
@@ -25,6 +29,8 @@ export function parseCompanyFilters(searchParams: URLSearchParams): CompanyListF
     phone: asSingleSelect(searchParams.get("phone")),
     emailStatus: parseIncludeExcludeParam(searchParams, "emailStatus"),
     phoneType: parseIncludeExcludeParam(searchParams, "phoneType"),
+    pushJobId: searchParams.get("pushJobId") ?? undefined,
+    pushJobOutcome: asPushJobOutcome(searchParams.get("pushJobOutcome")),
     pushStatus: parsePushStatusFilter(searchParams),
     virtualFilters: parseVirtualFiltersParam(searchParams),
     virtualColumns: parseVirtualColumnsParam(searchParams),

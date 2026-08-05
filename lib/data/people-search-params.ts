@@ -7,6 +7,10 @@ function asSingleSelect(value: string | null): SingleSelectFilter | undefined {
   return value === "any" || value === "not_empty" || value === "empty" ? value : undefined;
 }
 
+function asPushJobOutcome(value: string | null): "succeeded" | "failed" | undefined {
+  return value === "succeeded" || value === "failed" ? value : undefined;
+}
+
 /** Shared between the People page (server-rendered searchParams) and the
  * CSV export route (URL query string) so both read filters identically. */
 export function parsePersonFilters(searchParams: URLSearchParams): PersonListFilters {
@@ -26,6 +30,8 @@ export function parsePersonFilters(searchParams: URLSearchParams): PersonListFil
     jobTitle: searchParams.get("title") ?? undefined,
     employeeMin: Number.isFinite(Number(empMin)) && empMin ? Number(empMin) : undefined,
     employeeMax: Number.isFinite(Number(empMax)) && empMax ? Number(empMax) : undefined,
+    pushJobId: searchParams.get("pushJobId") ?? undefined,
+    pushJobOutcome: asPushJobOutcome(searchParams.get("pushJobOutcome")),
     pushStatus: parsePushStatusFilter(searchParams),
     virtualFilters: parseVirtualFiltersParam(searchParams),
     virtualColumns: parseVirtualColumnsParam(searchParams),

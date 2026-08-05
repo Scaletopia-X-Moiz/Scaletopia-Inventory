@@ -11,6 +11,7 @@ import type { IncludeExclude } from "@/lib/data/include-exclude";
 import type { ActiveVirtualColumn, VirtualFilterSet } from "@/lib/data/virtual-columns";
 import { isFilterSetActive } from "@/lib/data/virtual-columns";
 import { pushStatusRpcPayload, type PushStatusFilter } from "@/lib/data/push-status-filter";
+import { getPushJobPersonIds, type PushJobOutcome } from "@/lib/data/push-jobs";
 
 export type SingleSelectFilter = "any" | "not_empty" | "empty";
 
@@ -27,6 +28,16 @@ export interface CompanyListFilters {
   phone?: SingleSelectFilter;
   emailStatus?: IncludeExclude;
   phoneType?: IncludeExclude;
+  /** Restrict to companies a push run touched — the companies linked (via
+   * people.company_id) to the people tagged in `push_job_records` for this job
+   * (#123). Same people→company link the Companies-triggered push uses in
+   * getPeopleForEmailBisonByCompanyFilters. Resolved to a company-id set
+   * (resolvePushJobCompanyIds); there's no company-level push record. */
+  pushJobId?: string;
+  /** Optional outcome sub-scope for pushJobId — restrict the underlying people
+   * to only succeeded / only failed records before mapping to companies.
+   * Undefined (default) keeps all touched records. */
+  pushJobOutcome?: PushJobOutcome;
   /** Push-status filter (client × platform × pushed/not_pushed). Shared shape
    * with PersonListFilters via lib/data/push-status-filter.ts. Only the type
    * and RPC payload key land here (#126) — predicate evaluation is F2/C1. */
@@ -34,7 +45,9 @@ export interface CompanyListFilters {
   /** Virtual-column predicates over custom_data enrichment fields (ticket #33,
    * docs/adr/0002-virtual-column-enrichment-filtering.md). Evaluated by the
    * shared SQL predicate (lib/data/virtual-columns.sql), not the PostgREST
-   * builder below — see resolveVirtualFilterIds. */
+   * builder below — see resolveVirtualFilterIds. Two-level grouped AND/OR
+   * logic since ticket #117 (a single AND group reproduces the pre-#117 flat
+   * behavior). */
   virtualFilters?: VirtualFilterSet;
   /** Enrichment fields added as display-only virtual columns on the rendered
    * page (independent of virtualFilters — a column can be shown before it has
@@ -275,8 +288,8 @@ async function resolveVirtualFilterIds(filters: CompanyListFilters): Promise<str
 }
 
 async function fetchFilteredRows(filters: CompanyListFilters): Promise<RawCompanyRow[]> {
-  const virtualIds = await resolveVirtualFilterIds(filters);
-  if (virtualIds !== null) return fetchRowsForVirtualIds(virtualIds);
+  const restricted = await resolveRestrictedRows(filters);
+  if (restricted !== null) return restricted;
   return fetchAllRows<RawCompanyRow>("companies", LIST_COLUMNS, (query) =>
     applyCompanyFilters(query, filters)
   );
@@ -350,6 +363,74 @@ async function fetchRowsForVirtualIds(ids: string[]): Promise<RawCompanyRow[]> {
     )
   );
   return chunkResults.flat();
+}
+
+/** Ids per `.in("id", ...)` chunk when mapping person ids → company ids below. */
+const PUSH_JOB_PERSON_ID_CHUNK_SIZE = 200;
+
+/** The distinct company ids that filters.pushJobId restricts to — the
+ * companies linked (via people.company_id) to the people tagged in
+ * `push_job_records` for that job — or null when no pushJobId is set. People
+ * with no linked company are dropped; a job that touched only such people (or
+ * an empty job) yields an empty set, not null. */
+async function resolvePushJobCompanyIds(filters: CompanyListFilters): Promise<string[] | null> {
+  if (!filters.pushJobId) return null;
+  const personIds = await getPushJobPersonIds(filters.pushJobId, filters.pushJobOutcome);
+  if (personIds.length === 0) return [];
+
+  const chunks = chunkIds(personIds, PUSH_JOB_PERSON_ID_CHUNK_SIZE);
+  const chunkResults = await Promise.all(
+    chunks.map((chunk) =>
+      fetchAllRows<{ company_id: string | null }>("people", "company_id", (query) =>
+        query.in("id", chunk)
+      )
+    )
+  );
+  const companyIds = new Set<string>();
+  for (const rows of chunkResults) {
+    for (const row of rows) if (row.company_id) companyIds.add(row.company_id);
+  }
+  return [...companyIds];
+}
+
+/** LIST_COLUMNS rows for a company-id set with the *standard* filters reapplied
+ * per chunk — the pushJobId path, where the id set comes from
+ * push_job_records→people and hasn't had the standard filters applied (unlike
+ * the virtual-filter RPC, which bakes them in). Chunked for the same
+ * URL-length reason as fetchRowsForVirtualIds. */
+async function fetchRowsForRestrictedIds(
+  ids: string[],
+  filters: CompanyListFilters
+): Promise<RawCompanyRow[]> {
+  if (ids.length === 0) return [];
+  const chunks = chunkIds(ids, VIRTUAL_FILTER_ROW_CHUNK_SIZE);
+  const chunkResults = await Promise.all(
+    chunks.map((chunk) =>
+      fetchAllRows<RawCompanyRow>("companies", LIST_COLUMNS, (query) =>
+        applyCompanyFilters(query.in("id", chunk), filters)
+      )
+    )
+  );
+  return chunkResults.flat();
+}
+
+/** The fully filtered LIST rows (unsorted) when any id-restricting dimension is
+ * active — virtualFilters, pushJobId, or both — or null to signal "use the
+ * plain PostgREST path". Mirrors resolveRestrictedRows in lib/data/people.ts:
+ *  - virtual only: the RPC already applied the standard filters, fetch by id.
+ *  - pushJobId (± other standard filters): reapply standard filters per chunk.
+ *  - both: intersect the sets; the virtual RPC already carries standard
+ *    filters, so the intersection needs only an id lookup. */
+async function resolveRestrictedRows(filters: CompanyListFilters): Promise<RawCompanyRow[] | null> {
+  const [virtualIds, pushCompanyIds] = await Promise.all([
+    resolveVirtualFilterIds(filters),
+    resolvePushJobCompanyIds(filters),
+  ]);
+  if (virtualIds === null && pushCompanyIds === null) return null;
+  if (pushCompanyIds === null) return fetchRowsForVirtualIds(virtualIds as string[]);
+  if (virtualIds === null) return fetchRowsForRestrictedIds(pushCompanyIds, filters);
+  const virtualSet = new Set(virtualIds);
+  return fetchRowsForVirtualIds(pushCompanyIds.filter((id) => virtualSet.has(id)));
 }
 
 /** Ids per `.in()` chunk when querying people-by-company below. */
@@ -429,19 +510,19 @@ export async function getCompanies(
   page = 1,
   pageSize = 50
 ): Promise<CompanyListResult> {
-  const virtualIds = await resolveVirtualFilterIds(filters);
+  const restricted = await resolveRestrictedRows(filters);
   const start = (page - 1) * pageSize;
 
   let pageRows: CompanyListRow[];
   let total: number;
 
-  if (virtualIds !== null) {
-    // A virtual filter is active: the matched id set can't be pushed into a
-    // single `.in()`/`.range()` Postgres query past a few hundred ids (see
-    // fetchRowsForVirtualIds), so order/paginate in app code over the
-    // already-resolved full match instead — the same tradeoff
-    // getAllFilteredCompanies already makes for export.
-    const matched = sortByLastUpdatedDesc(await fetchRowsForVirtualIds(virtualIds));
+  if (restricted !== null) {
+    // An id-restricting dimension is active (virtualFilters and/or pushJobId):
+    // the matched id set can't be pushed into a single `.in()`/`.range()`
+    // Postgres query past a few hundred ids (see fetchRowsForVirtualIds), so
+    // order/paginate in app code over the already-resolved full match instead —
+    // the same tradeoff getAllFilteredCompanies already makes for export.
+    const matched = sortByLastUpdatedDesc(restricted);
     total = matched.length;
     pageRows = matched.slice(start, start + pageSize).map(toListRow);
   } else {

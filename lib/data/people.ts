@@ -10,6 +10,7 @@ import type { ClayPushRecord } from "@/lib/clay/types";
 import type { GhlPushRecord } from "@/lib/ghl/types";
 import type { EmailBisonPushRecord } from "@/lib/emailbison/types";
 import { getAllFilteredCompanies, type CompanyListFilters } from "@/lib/data/companies";
+import { getPushJobPersonIds, type PushJobOutcome } from "@/lib/data/push-jobs";
 import type { IncludeExclude } from "@/lib/data/include-exclude";
 import type { ActiveVirtualColumn, VirtualFilterSet } from "@/lib/data/virtual-columns";
 import { isFilterSetActive } from "@/lib/data/virtual-columns";
@@ -31,6 +32,17 @@ export interface PersonListFilters {
   jobTitle?: string;
   employeeMin?: number;
   employeeMax?: number;
+  /** Restrict to exactly the people a push run touched, via the per-record
+   * tags in `push_job_records` (#123) — `id IN (SELECT person_id FROM
+   * push_job_records WHERE push_job_id = pushJobId)`. Stable across later
+   * pushes to the same client, unlike a trigger-time filter replay. Resolved to
+   * an id set (resolvePushJobIds) rather than pushed through the PostgREST
+   * builder, since PostgREST can't express the subselect. */
+  pushJobId?: string;
+  /** Optional outcome sub-scope for pushJobId — only succeeded / only failed
+   * records. Undefined (default) keeps all touched records so failures stay
+   * visible for troubleshooting. */
+  pushJobOutcome?: PushJobOutcome;
   /** Push-status filter (client × platform × pushed/not_pushed). Shared shape
    * with CompanyListFilters via lib/data/push-status-filter.ts. Only the type
    * and RPC payload key land here (#126) — predicate evaluation is F2/P1. */
@@ -38,7 +50,9 @@ export interface PersonListFilters {
   /** Virtual-column predicates over custom_data enrichment fields (ticket #33,
    * docs/adr/0002-virtual-column-enrichment-filtering.md). Evaluated by the
    * shared SQL predicate (lib/data/virtual-columns.sql), not the PostgREST
-   * builder below — see resolveVirtualFilterIds. */
+   * builder below — see resolveVirtualFilterIds. Two-level grouped AND/OR logic
+   * since ticket #117 (a single AND group reproduces the pre-#117 flat
+   * behavior). */
   virtualFilters?: VirtualFilterSet;
   /** Enrichment fields added as display-only virtual columns on the rendered
    * page (independent of virtualFilters — a column can be shown before it has
@@ -322,9 +336,58 @@ async function fetchRowsForVirtualIds(ids: string[]): Promise<RawPersonRow[]> {
   return chunkResults.flat();
 }
 
+/** The person-id set filters.pushJobId restricts to (its `push_job_records`
+ * tags, optionally outcome-scoped), or null when no pushJobId is set — the
+ * no-op every call site preserves, exactly like resolveVirtualFilterIds. */
+async function resolvePushJobIds(filters: PersonListFilters): Promise<string[] | null> {
+  if (!filters.pushJobId) return null;
+  return getPushJobPersonIds(filters.pushJobId, filters.pushJobOutcome);
+}
+
+/** LIST_COLUMNS rows for an id set with the *standard* filters (search, niche,
+ * status, …) reapplied per chunk — used for the pushJobId path, where the id
+ * set comes straight from `push_job_records` and hasn't had those filters
+ * applied yet (unlike the virtual-filter RPC, which bakes them in). Chunked for
+ * the same URL-length reason as fetchRowsForVirtualIds. */
+async function fetchRowsForRestrictedIds(
+  ids: string[],
+  filters: PersonListFilters
+): Promise<RawPersonRow[]> {
+  if (ids.length === 0) return [];
+  const chunks = chunkIds(ids, VIRTUAL_FILTER_ROW_CHUNK_SIZE);
+  const chunkResults = await Promise.all(
+    chunks.map((chunk) =>
+      fetchAllRows<RawPersonRow>("people", LIST_COLUMNS, (query) =>
+        applyPersonFilters(query.in("id", chunk), filters)
+      )
+    )
+  );
+  return chunkResults.flat();
+}
+
+/** The fully filtered LIST rows (unsorted) when any id-restricting dimension is
+ * active — virtualFilters, pushJobId, or both — or null to signal "use the
+ * plain PostgREST path". Unifies the two id-set dimensions so getPeople and the
+ * export/push fetches share one branch:
+ *  - virtual only: the RPC already applied the standard filters, so fetch by id.
+ *  - pushJobId (± other standard filters): reapply standard filters per chunk.
+ *  - both: intersect the sets; the virtual RPC already carries standard
+ *    filters, so the intersection needs only an id lookup. */
+async function resolveRestrictedRows(filters: PersonListFilters): Promise<RawPersonRow[] | null> {
+  const [virtualIds, pushIds] = await Promise.all([
+    resolveVirtualFilterIds(filters),
+    resolvePushJobIds(filters),
+  ]);
+  if (virtualIds === null && pushIds === null) return null;
+  if (pushIds === null) return fetchRowsForVirtualIds(virtualIds as string[]);
+  if (virtualIds === null) return fetchRowsForRestrictedIds(pushIds, filters);
+  const virtualSet = new Set(virtualIds);
+  return fetchRowsForVirtualIds(pushIds.filter((id) => virtualSet.has(id)));
+}
+
 async function fetchFilteredRows(filters: PersonListFilters): Promise<RawPersonRow[]> {
-  const virtualIds = await resolveVirtualFilterIds(filters);
-  if (virtualIds !== null) return fetchRowsForVirtualIds(virtualIds);
+  const restricted = await resolveRestrictedRows(filters);
+  if (restricted !== null) return restricted;
   return fetchAllRows<RawPersonRow>("people", LIST_COLUMNS, (query) =>
     applyPersonFilters(query, filters)
   );
@@ -405,19 +468,19 @@ export async function getPeople(
   page = 1,
   pageSize = 50
 ): Promise<PersonListResult> {
-  const virtualIds = await resolveVirtualFilterIds(filters);
+  const restricted = await resolveRestrictedRows(filters);
   const start = (page - 1) * pageSize;
 
   let pageRows: PersonListRow[];
   let total: number;
 
-  if (virtualIds !== null) {
-    // A virtual filter is active: the matched id set can't be pushed into a
-    // single `.in()`/`.range()` Postgres query past a few hundred ids (see
-    // fetchRowsForVirtualIds), so order/paginate in app code over the
-    // already-resolved full match instead — mirrors getCompanies in
-    // lib/data/companies.ts.
-    const matched = sortByLastUpdatedDesc(await fetchRowsForVirtualIds(virtualIds));
+  if (restricted !== null) {
+    // An id-restricting dimension is active (virtualFilters and/or pushJobId):
+    // the matched id set can't be pushed into a single `.in()`/`.range()`
+    // Postgres query past a few hundred ids (see fetchRowsForVirtualIds), so
+    // order/paginate in app code over the already-resolved full match instead —
+    // mirrors getCompanies in lib/data/companies.ts.
+    const matched = sortByLastUpdatedDesc(restricted);
     total = matched.length;
     pageRows = matched.slice(start, start + pageSize).map(toListRow);
   } else {
