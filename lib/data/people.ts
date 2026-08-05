@@ -12,6 +12,7 @@ import type { EmailBisonPushRecord } from "@/lib/emailbison/types";
 import { getAllFilteredCompanies, type CompanyListFilters } from "@/lib/data/companies";
 import type { IncludeExclude } from "@/lib/data/include-exclude";
 import type { ActiveVirtualColumn, VirtualColumnFilter } from "@/lib/data/virtual-columns";
+import { pushStatusRpcPayload, type PushStatusFilter } from "@/lib/data/push-status-filter";
 
 export type SingleSelectFilter = "any" | "not_empty" | "empty";
 
@@ -29,6 +30,10 @@ export interface PersonListFilters {
   jobTitle?: string;
   employeeMin?: number;
   employeeMax?: number;
+  /** Push-status filter (client × platform × pushed/not_pushed). Shared shape
+   * with CompanyListFilters via lib/data/push-status-filter.ts. Only the type
+   * and RPC payload key land here (#126) — predicate evaluation is F2/P1. */
+  pushStatus?: PushStatusFilter;
   /** Virtual-column predicates over custom_data enrichment fields (ticket #33,
    * docs/adr/0002-virtual-column-enrichment-filtering.md). Evaluated by the
    * shared SQL predicate (lib/data/virtual-columns.sql), not the PostgREST
@@ -820,6 +825,7 @@ export function toFilterOptionsRpcPayload(filters: PersonListFilters): Record<st
     emailStatus: filters.emailStatus ?? { include: [], exclude: [] },
     phoneType: filters.phoneType ?? { include: [], exclude: [] },
     virtualFilters: filters.virtualFilters ?? [],
+    pushStatus: pushStatusRpcPayload(filters.pushStatus),
   };
 }
 

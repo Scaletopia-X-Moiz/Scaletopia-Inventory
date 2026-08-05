@@ -1,6 +1,7 @@
 import type { CompanyListFilters, SingleSelectFilter } from "@/lib/data/companies";
 import { parseIncludeExcludeParam } from "@/lib/data/include-exclude";
 import { parseVirtualFiltersParam, parseVirtualColumnsParam } from "@/lib/data/virtual-columns";
+import { parsePushStatusFilter } from "@/lib/data/push-status-filter";
 
 function asSingleSelect(value: string | null): SingleSelectFilter | undefined {
   return value === "any" || value === "not_empty" || value === "empty" ? value : undefined;
@@ -24,6 +25,7 @@ export function parseCompanyFilters(searchParams: URLSearchParams): CompanyListF
     phone: asSingleSelect(searchParams.get("phone")),
     emailStatus: parseIncludeExcludeParam(searchParams, "emailStatus"),
     phoneType: parseIncludeExcludeParam(searchParams, "phoneType"),
+    pushStatus: parsePushStatusFilter(searchParams),
     virtualFilters: parseVirtualFiltersParam(searchParams),
     virtualColumns: parseVirtualColumnsParam(searchParams),
   };
