@@ -354,6 +354,16 @@ function VirtualColumnChip({
     return isLowCardinalityTextField(authoritativeValues);
   }
 
+  /** Whether operator `op` on this column is edited as a stacked keyword chip
+   * input rather than a single free-text field: Text/List contains/not_contains
+   * (ticket #116, Clay-style "match any of these keywords"). Unlike
+   * isValueListMode, this doesn't depend on discovery — any Text or List
+   * contains/not_contains always gets the chip input, since the keywords
+   * being matched are free text the user types, not a fixed real-value set. */
+  function isChipInputMode(op: string): boolean {
+    return (column.type === "text" || column.type === "list") && (op === "contains" || op === "not_contains");
+  }
+
   function currentSelected(): string[] {
     if (Array.isArray(filter?.value)) return filter.value as string[];
     if (typeof filter?.value === "string") return [filter.value];
@@ -388,12 +398,32 @@ function VirtualColumnChip({
       onChangeFilter(null);
       return;
     }
-    if (isValueListMode(next)) {
+    if (isValueListMode(next) || isChipInputMode(next)) {
       const selected = currentSelected();
       emit(next, selected.length ? selected : undefined);
     } else {
       emit(next, coerceValue(column.type, meta, inputs.a, inputs.b));
     }
+  }
+
+  function addChip(v: string) {
+    const trimmed = v.trim();
+    if (!trimmed) return;
+    const selected = currentSelected();
+    if (selected.includes(trimmed)) return;
+    emit(operator, [...selected, trimmed]);
+  }
+
+  function removeChip(v: string) {
+    const next = currentSelected().filter((x) => x !== v);
+    emit(operator, next.length ? next : undefined);
+  }
+
+  function removeLastChip() {
+    const selected = currentSelected();
+    if (selected.length === 0) return;
+    const next = selected.slice(0, -1);
+    emit(operator, next.length ? next : undefined);
   }
 
   function changeInput(part: "a" | "b", raw: string) {
@@ -421,6 +451,7 @@ function VirtualColumnChip({
   }
 
   const useValueList = isValueListMode(operator);
+  const useChipInput = isChipInputMode(operator);
   const selectedValues = currentSelected();
   const pickerOptions = (() => {
     const set = new Set<string>(authoritativeValues ?? onScreenValues);
@@ -457,6 +488,8 @@ function VirtualColumnChip({
           reconciling={authoritativeValues === null}
           onToggle={toggleValue}
         />
+      ) : useChipInput ? (
+        <ChipValueInput chips={selectedValues} onAdd={addChip} onRemove={removeChip} onRemoveLast={removeLastChip} />
       ) : operatorMeta?.requiresValue ? (
         <input
           type={inputType}
@@ -575,6 +608,73 @@ function ValueMultiSelect({
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/** Clay-style multi-value keyword input for Text/List contains/not_contains
+ * (ticket #116): type a keyword, press Enter to turn it into a removable
+ * chip, repeat to stack several. Backspace on an empty draft pops the last
+ * chip; each chip also has its own × button. Chips commit immediately (no
+ * debounce, unlike the free-text inputs) since Enter is already a discrete
+ * "add" action — there's no per-keystroke churn to coalesce. */
+function ChipValueInput({
+  chips,
+  onAdd,
+  onRemove,
+  onRemoveLast,
+}: {
+  chips: string[];
+  onAdd: (value: string) => void;
+  onRemove: (value: string) => void;
+  onRemoveLast: () => void;
+}) {
+  const [draft, setDraft] = useState("");
+
+  function commitDraft() {
+    if (!draft.trim()) return;
+    onAdd(draft);
+    setDraft("");
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commitDraft();
+    } else if (e.key === "Backspace" && draft === "" && chips.length > 0) {
+      onRemoveLast();
+    }
+  }
+
+  return (
+    <div className="flex max-w-[16rem] flex-wrap items-center gap-1 rounded border border-rule bg-card px-1.5 py-1 focus-within:border-stamp">
+      {chips.map((chip) => (
+        <span
+          key={chip}
+          className="inline-flex items-center gap-1 rounded bg-hover px-1.5 py-0.5 text-ink"
+        >
+          <span className="max-w-[8rem] truncate" title={chip}>
+            {chip}
+          </span>
+          <button
+            type="button"
+            aria-label={`Remove ${chip}`}
+            onClick={() => onRemove(chip)}
+            className="text-ink-soft hover:text-ink"
+          >
+            <X size={10} />
+          </button>
+        </span>
+      ))}
+      <input
+        type="text"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={handleKeyDown}
+        onBlur={commitDraft}
+        placeholder={chips.length === 0 ? "value, Enter to add" : "add another…"}
+        className="min-w-[5rem] flex-1 bg-transparent text-ink outline-none placeholder:text-ink-mute"
+      />
     </div>
   );
 }

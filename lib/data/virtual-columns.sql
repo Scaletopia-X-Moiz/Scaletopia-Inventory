@@ -10,6 +10,14 @@
 -- follow-on tickets (#34 Text, #35 Number/Date, #36 Boolean/List) add the
 -- app-side wiring that populates `filters.virtualFilters`.
 
+-- Ticket #116 revised its first draft of the contains/not_contains chip-input
+-- helpers mid-review (a nested CASE inside text_filter_matches/list_filter_matches
+-- knocked those functions off Postgres's inliner — see text_contains_matches'
+-- comment below) — drop the earlier names so a re-run of this file doesn't
+-- leave them behind as orphaned, unused functions.
+DROP FUNCTION IF EXISTS text_contains_any(text, jsonb);
+DROP FUNCTION IF EXISTS list_contains_any(jsonb, jsonb);
+
 -- Empty-value normalization, defined once and reused by every "is empty" /
 -- "is not empty" case below. Mirrors (but is not identical to) the simpler
 -- display-only isEmptyValue in lib/data/custom-data.ts: filtering also treats
@@ -109,6 +117,33 @@ $$;
 --    expression with no function-call overhead left, exactly like the
 --    smaller test cases. Semantics (types/operators/branches) are
 --    unchanged, only decomposed into smaller pieces.
+-- Chip-input dispatch helper for Text contains/not_contains (ticket #116):
+-- true iff `text_value` ILIKE-matches the scalar `value`, or (when `value` is
+-- a jsonb array — the chip input's stacked keywords) ILIKE-matches *any* of
+-- its elements. Kept as its own function, called as a single flat FuncExpr
+-- from each of text_filter_matches' 'contains'/'not_contains' arms, rather
+-- than inlined as a *nested* CASE directly in text_filter_matches' own body:
+-- empirically (EXPLAIN ANALYZE against the live ~146k-row companies table),
+-- nesting a second CASE inside one arm was enough added branch complexity to
+-- knock text_filter_matches itself off Postgres's inliner — it went from the
+-- fully-inlined ~69ms-class scan every other operator here still gets to a
+-- 9.4s opaque-function-call scan, matching this file's earlier "~24 WHEN arms
+-- across nested CASEs was NOT inlined" finding above. Every arm in
+-- text_filter_matches' CASE must stay a single flat expression the way it was
+-- before this ticket; this function is where the array/scalar branching (and
+-- the array case's inherently non-inlinable EXISTS subquery, reading a jsonb
+-- array needs a FROM-clause SRF) lives instead.
+CREATE OR REPLACE FUNCTION text_contains_matches(text_value text, value jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE jsonb_typeof(value)
+    WHEN 'array' THEN EXISTS (
+      SELECT 1 FROM jsonb_array_elements_text(value) AS kw
+      WHERE text_value ILIKE ('%' || kw || '%')
+    )
+    ELSE text_value ILIKE ('%' || (value #>> '{}') || '%')
+  END
+$$;
+
 CREATE OR REPLACE FUNCTION text_filter_matches(data jsonb, f jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
   SELECT CASE f->>'operator'
@@ -122,8 +157,11 @@ LANGUAGE sql IMMUTABLE AS $$
     -- row that lacks the key, matching the pre-#38 `<>` behavior.
     WHEN 'is' THEN (f->'value') @> to_jsonb(COALESCE((data -> (f->>'key')) #>> '{}', ''))
     WHEN 'is_not' THEN NOT ((f->'value') @> to_jsonb(COALESCE((data -> (f->>'key')) #>> '{}', '')))
-    WHEN 'contains' THEN COALESCE((data -> (f->>'key')) #>> '{}', '') ILIKE ('%' || ((f->'value') #>> '{}') || '%')
-    WHEN 'not_contains' THEN COALESCE((data -> (f->>'key')) #>> '{}', '') NOT ILIKE ('%' || ((f->'value') #>> '{}') || '%')
+    -- 'contains'/'not_contains' additionally accept a JSON array of keywords
+    -- (ticket #116's chip input): "matches any of" / "matches none of",
+    -- delegated to text_contains_matches above (kept flat — see its comment).
+    WHEN 'contains' THEN text_contains_matches(COALESCE((data -> (f->>'key')) #>> '{}', ''), f->'value')
+    WHEN 'not_contains' THEN NOT text_contains_matches(COALESCE((data -> (f->>'key')) #>> '{}', ''), f->'value')
     WHEN 'is_empty' THEN is_empty_enrichment_value(data -> (f->>'key'))
     WHEN 'is_not_empty' THEN NOT is_empty_enrichment_value(data -> (f->>'key'))
     ELSE false
@@ -192,11 +230,41 @@ $$;
 -- key to definite false for contains (no array, so it can't contain
 -- anything) and definite true for not_contains (same reasoning Text's
 -- not_contains already applies to a missing value via its own COALESCE).
+-- Chip-input dispatch helper for List contains (ticket #116): true iff
+-- `data_value` (the row's array) is a jsonb array containing the scalar
+-- `value` as an exact member, or — when `value` is itself a jsonb array, the
+-- chip input's stacked keywords — shares *any* member with it. The array
+-- branch uses `?|` ("does any of these text[] elements exist as a top-level
+-- array element"), the same operator ticket #36 chose over
+-- `jsonb_build_array` for the scalar case: a plain built-in binary op, no
+-- per-row function call, once `value` is materialized to a text[]. Kept as
+-- its own function — called as a single flat FuncExpr from list_filter_matches'
+-- 'contains'/'not_contains' arms, not a *nested* CASE inside its own body —
+-- for the same reason as text_contains_matches above: a second CASE nested in
+-- one arm was enough to knock the whole calling function off Postgres's
+-- inliner in the Text case (confirmed via EXPLAIN ANALYZE against the live
+-- table), and every arm here must stay flat to avoid the same regression.
+-- `ARRAY(SELECT jsonb_array_elements_text(...))` is itself a SubLink, so it
+-- has to live in a called function rather than list_filter_matches' own body
+-- either way. Missing-key COALESCE reasoning matches ticket #36's original
+-- single-value branches (false for contains, true for not_contains via the
+-- NOT at the call site — see below).
+CREATE OR REPLACE FUNCTION list_contains_matches(data_value jsonb, value jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE jsonb_typeof(value)
+    WHEN 'array' THEN COALESCE(
+      jsonb_typeof(data_value) = 'array' AND data_value ?| ARRAY(SELECT jsonb_array_elements_text(value)),
+      false
+    )
+    ELSE COALESCE(jsonb_typeof(data_value) = 'array' AND data_value ? (value #>> '{}'), false)
+  END
+$$;
+
 CREATE OR REPLACE FUNCTION list_filter_matches(data jsonb, f jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
   SELECT CASE f->>'operator'
-    WHEN 'contains' THEN COALESCE(jsonb_typeof(data -> (f->>'key')) = 'array' AND (data -> (f->>'key')) ? (f->>'value'), false)
-    WHEN 'not_contains' THEN COALESCE(NOT (jsonb_typeof(data -> (f->>'key')) = 'array' AND (data -> (f->>'key')) ? (f->>'value')), true)
+    WHEN 'contains' THEN list_contains_matches(data -> (f->>'key'), f->'value')
+    WHEN 'not_contains' THEN NOT list_contains_matches(data -> (f->>'key'), f->'value')
     WHEN 'is_empty' THEN is_empty_enrichment_value(data -> (f->>'key'))
     WHEN 'is_not_empty' THEN NOT is_empty_enrichment_value(data -> (f->>'key'))
     ELSE false
