@@ -26,3 +26,6 @@ env.local
 
 # local test data (large CSV/XLSX exports, kept out of git)
 /testcsv/
+
+# supabase CLI link state (local machine only)
+/supabase/
