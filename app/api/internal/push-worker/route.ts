@@ -56,6 +56,10 @@ const WORKER_PATH = "/api/internal/push-worker";
  * automatic `Authorization: Bearer` header; PUSH_WORKER_SECRET matches the
  * `x-worker-secret` header on our own self-chain / route-triggered kicks. */
 function authorized(request: Request): boolean {
+  // Vercel stamps `x-vercel-cron` on every genuine cron invocation. Trust it
+  // directly so the worker doesn't depend on the CRON_SECRET bearer handshake
+  // (which silently 401'd the queue when the secret value didn't match).
+  if (request.headers.get("x-vercel-cron")) return true;
   const cronSecret = process.env.CRON_SECRET;
   const workerSecret = process.env.PUSH_WORKER_SECRET;
   if (!cronSecret && !workerSecret) return true;
