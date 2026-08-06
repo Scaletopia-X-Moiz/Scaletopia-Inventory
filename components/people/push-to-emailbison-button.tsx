@@ -108,6 +108,9 @@ export function PushToEmailBisonButton({
     null
   );
   const [standardFieldMappingError, setStandardFieldMappingError] = useState<string | null>(null);
+  // In-flight guard for the picker → options transition: keeps a re-click (or
+  // a reopen) from re-firing the field-mapping endpoints while they're loading.
+  const [pickerLoading, setPickerLoading] = useState(false);
 
   const busy = status === "pushing";
   const selectedClient = clients?.find((c) => c.id === selectedClientId) ?? null;
@@ -160,56 +163,75 @@ export function PushToEmailBisonButton({
 
   async function handleContinueFromPicker() {
     if (!selectedClient || !selectedClient.hasEmailBisonCredentials) return;
+    if (pickerLoading) return;
 
+    const client = selectedClient;
     setStep("options");
     setReferenceVariables(null);
     setReferenceError(null);
     setEnrichmentFields([]);
     setStandardFieldMapping(null);
     setStandardFieldMappingError(null);
+    setPickerLoading(true);
 
-    try {
-      const res = await fetch(`/api/clients/${selectedClient.id}/emailbison-custom-variables`);
-      if (!res.ok) throw new Error("Failed to load existing custom variables");
-      const data = (await res.json()) as { variables: EmailBisonCustomVariable[] };
-      setReferenceVariables(data.variables);
-    } catch (error) {
-      setReferenceError((error as Error).message || "Failed to load existing custom variables.");
-    }
+    // These endpoints are independent, so fire them together instead of
+    // awaiting each in series (issue: the dialog took 13-23s to open). Each
+    // keeps its own error handling; the saved-mapping override is applied on
+    // top of the auto-mapping default purely for ordering, not because the two
+    // requests depend on each other — so it fetches in parallel too.
+    const referencePromise = (async () => {
+      try {
+        const res = await fetch(`/api/clients/${client.id}/emailbison-custom-variables`);
+        if (!res.ok) throw new Error("Failed to load existing custom variables");
+        const data = (await res.json()) as { variables: EmailBisonCustomVariable[] };
+        setReferenceVariables(data.variables);
+      } catch (error) {
+        setReferenceError((error as Error).message || "Failed to load existing custom variables.");
+      }
+    })();
 
     // Best-effort: the column dropdown just falls back to the standard +
     // active-virtual-column fields if this fails, so a fetch error here
     // isn't worth its own error banner.
-    try {
-      const res = await fetch(`/api/people/enrichment-fields?${paramsStr}`);
-      if (!res.ok) throw new Error(res.status.toString());
-      const data = (await res.json()) as { fields: EnrichmentField[] };
-      setEnrichmentFields(data.fields);
-    } catch {
-      setEnrichmentFields([]);
-    }
-
-    try {
-      const res = await fetch(`/api/emailbison/default-field-mapping?entity=people&${paramsStr}`);
-      if (!res.ok) throw new Error("Failed to load default field mapping");
-      const data = (await res.json()) as { standardFields: EmailBisonStandardFieldMapping };
-      setStandardFieldMapping(data.standardFields);
-
-      // Ticket #114: a saved mapping for this (client, "emailbison_people")
-      // pair — if one exists — overrides the pure auto-mapping default just
-      // applied above. Best-effort: a fetch failure just leaves the
-      // auto-mapping default in place, same as having no saved mapping.
+    const enrichmentPromise = (async () => {
       try {
-        const saved = await fetchSavedPushFieldMapping<SavedEmailBisonFieldMapping>(
-          selectedClient.id,
-          "emailbison_people"
-        );
-        if (saved) setStandardFieldMapping(saved.standardFields);
+        const res = await fetch(`/api/people/enrichment-fields?${paramsStr}`);
+        if (!res.ok) throw new Error(res.status.toString());
+        const data = (await res.json()) as { fields: EnrichmentField[] };
+        setEnrichmentFields(data.fields);
       } catch {
-        // keep auto-mapping default
+        setEnrichmentFields([]);
       }
-    } catch (error) {
-      setStandardFieldMappingError((error as Error).message || "Failed to load default field mapping.");
+    })();
+
+    // Ticket #114: a saved mapping for this (client, "emailbison_people") pair —
+    // if one exists — overrides the pure auto-mapping default. Best-effort: a
+    // fetch failure just leaves the auto-mapping default in place, same as
+    // having no saved mapping.
+    const savedPromise = fetchSavedPushFieldMapping<SavedEmailBisonFieldMapping>(
+      client.id,
+      "emailbison_people"
+    ).catch(() => null);
+
+    const mappingPromise = (async () => {
+      let base: EmailBisonStandardFieldMapping;
+      try {
+        const res = await fetch(`/api/emailbison/default-field-mapping?entity=people&${paramsStr}`);
+        if (!res.ok) throw new Error("Failed to load default field mapping");
+        const data = (await res.json()) as { standardFields: EmailBisonStandardFieldMapping };
+        base = data.standardFields;
+      } catch (error) {
+        setStandardFieldMappingError((error as Error).message || "Failed to load default field mapping.");
+        return;
+      }
+      const saved = await savedPromise;
+      setStandardFieldMapping(saved ? saved.standardFields : base);
+    })();
+
+    try {
+      await Promise.all([referencePromise, enrichmentPromise, mappingPromise]);
+    } finally {
+      setPickerLoading(false);
     }
   }
 
@@ -399,15 +421,15 @@ export function PushToEmailBisonButton({
               <button
                 type="button"
                 onClick={handleContinueFromPicker}
-                disabled={!selectedClient?.hasEmailBisonCredentials}
+                disabled={!selectedClient?.hasEmailBisonCredentials || pickerLoading}
                 className={cn(
                   "rounded-md px-3 py-1.5 text-xs font-medium text-white transition-smooth focus-visible:ring-2 focus-visible:ring-stamp/50",
-                  selectedClient?.hasEmailBisonCredentials
+                  selectedClient?.hasEmailBisonCredentials && !pickerLoading
                     ? "bg-stamp hover:opacity-90"
                     : "bg-stamp/40 cursor-not-allowed"
                 )}
               >
-                Continue →
+                {pickerLoading ? "Loading…" : "Continue →"}
               </button>
             </div>
           </AlertDialog.Content>

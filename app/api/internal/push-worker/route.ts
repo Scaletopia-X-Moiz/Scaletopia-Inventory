@@ -292,6 +292,7 @@ async function processJobTick(job: PushJob, workerDeadline: number): Promise<boo
     created,
     updated,
     failed,
+    failures,
     cursor: { offset: tick.nextOffset },
   });
   return false;

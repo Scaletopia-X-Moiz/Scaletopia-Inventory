@@ -9,6 +9,7 @@ import { sortByLastUpdatedDesc } from "@/lib/data/sort";
 import type { ClayPushRecord } from "@/lib/clay/types";
 import type { GhlPushRecord } from "@/lib/ghl/types";
 import type { EmailBisonPushRecord } from "@/lib/emailbison/types";
+import type { PushRecordCompanyNameFields } from "@/lib/push/resolve-default-field-mapping";
 import { getAllFilteredCompanies, type CompanyListFilters } from "@/lib/data/companies";
 import { getPushJobPersonIds, type PushJobOutcome } from "@/lib/data/push-jobs";
 import type { IncludeExclude } from "@/lib/data/include-exclude";
@@ -856,6 +857,91 @@ export async function getPeopleForEmailBisonByCompanyFilters(
 
   const rows = sortByLastUpdatedDesc(await fetchFullPeopleByCompanyIds(companyIds));
   return rows.map(toEmailBisonPushCandidate);
+}
+
+/** Just the two columns resolveDefaultFieldMapping actually reads to pick the
+ * EmailBison company-name default: the person's raw company_name and the
+ * linked company's cleaned brand_name. Selected in place of the full `*` row
+ * so the default-field-mapping preview never scans every column of the entire
+ * filtered set (perf fix — the preview only needs to know whether any record
+ * carries a brand_name). */
+const COMPANY_NAME_FIELD_COLUMNS = "id, company_name, companies(brand_name)";
+
+interface CompanyNameFieldRow {
+  id: string;
+  company_name: string | null;
+  companies: { brand_name: string | null } | null;
+}
+
+function toCompanyNameFields(row: CompanyNameFieldRow): PushRecordCompanyNameFields {
+  return { companyName: row.company_name, brandName: row.companies?.brand_name ?? null };
+}
+
+/** Narrow (two-column) counterpart to fetchPeopleByIds — same chunking and
+ * bounded concurrency, minus the `*` payload. */
+async function fetchCompanyNameFieldsByIds(ids: string[]): Promise<CompanyNameFieldRow[]> {
+  if (ids.length === 0) return [];
+  const chunks = chunkIds(ids, FULL_ROW_ID_CHUNK_SIZE);
+  const rows: CompanyNameFieldRow[] = [];
+  for (let i = 0; i < chunks.length; i += FULL_ROW_FETCH_CONCURRENCY) {
+    const window = chunks.slice(i, i + FULL_ROW_FETCH_CONCURRENCY);
+    const results = await Promise.all(
+      window.map((chunk) =>
+        fetchAllRows<CompanyNameFieldRow>("people", COMPANY_NAME_FIELD_COLUMNS, (query) =>
+          query.in("id", chunk)
+        )
+      )
+    );
+    rows.push(...results.flat());
+  }
+  return rows;
+}
+
+/** Narrow (two-column) counterpart to fetchFullPeopleByCompanyIds. */
+async function fetchCompanyNameFieldsByCompanyIds(
+  companyIds: string[]
+): Promise<CompanyNameFieldRow[]> {
+  if (companyIds.length === 0) return [];
+  const chunks = chunkIds(companyIds, COMPANY_ID_CHUNK_SIZE);
+  const rows: CompanyNameFieldRow[] = [];
+  for (let i = 0; i < chunks.length; i += FULL_ROW_FETCH_CONCURRENCY) {
+    const window = chunks.slice(i, i + FULL_ROW_FETCH_CONCURRENCY);
+    const results = await Promise.all(
+      window.map((chunk) =>
+        fetchAllRows<CompanyNameFieldRow>("people", COMPANY_NAME_FIELD_COLUMNS, (query) =>
+          query.in("company_id", chunk)
+        )
+      )
+    );
+    rows.push(...results.flat());
+  }
+  return rows;
+}
+
+/** Company-name/brand-name fields for every Person in the current People-table
+ * filtered view — the read-only input resolveDefaultFieldMapping needs for the
+ * EmailBison default-mapping preview. Same matched set as getPeopleForEmailBison
+ * (order is irrelevant: the resolver only checks whether *any* record has a
+ * brand_name), without pulling `*`. */
+export async function getEmailBisonCompanyNameFields(
+  filters: PersonListFilters
+): Promise<PushRecordCompanyNameFields[]> {
+  const ids = (await fetchFilteredRows(filters)).map((row) => row.id);
+  const rows = await fetchCompanyNameFieldsByIds(ids);
+  return rows.map(toCompanyNameFields);
+}
+
+/** Companies-table counterpart of getEmailBisonCompanyNameFields — resolves the
+ * Companies filters to their linked People (ADR 0003), same as the actual push,
+ * but only selects the two company-name columns. */
+export async function getEmailBisonCompanyNameFieldsByCompanyFilters(
+  companyFilters: CompanyListFilters
+): Promise<PushRecordCompanyNameFields[]> {
+  const companies = await getAllFilteredCompanies(companyFilters);
+  const companyIds = companies.map((c) => c.id);
+  if (companyIds.length === 0) return [];
+  const rows = await fetchCompanyNameFieldsByCompanyIds(companyIds);
+  return rows.map(toCompanyNameFields);
 }
 
 interface FacetIdCount {

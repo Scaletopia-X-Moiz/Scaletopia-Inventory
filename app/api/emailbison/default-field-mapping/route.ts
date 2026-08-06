@@ -1,7 +1,10 @@
 import type { NextRequest } from "next/server";
 import { parsePersonFilters } from "@/lib/data/people-search-params";
 import { parseCompanyFilters } from "@/lib/data/companies-search-params";
-import { getPeopleForEmailBison, getPeopleForEmailBisonByCompanyFilters } from "@/lib/data/people";
+import {
+  getEmailBisonCompanyNameFields,
+  getEmailBisonCompanyNameFieldsByCompanyFilters,
+} from "@/lib/data/people";
 import { resolveDefaultFieldMapping } from "@/lib/push/resolve-default-field-mapping";
 import { getUser } from "@/lib/auth/dal";
 
@@ -14,10 +17,12 @@ function isEntity(value: unknown): value is Entity {
 }
 
 /** Resolves the standard-field mapping table's pre-populated default
- * (resolveDefaultFieldMapping, ticket #108) against the exact candidate set
- * the push itself would use — same loaders as the push route
- * (app/api/emailbison/push), just read-only. Companies-table filters resolve
- * to every linked Person (ADR 0003), same as the actual push. */
+ * (resolveDefaultFieldMapping, ticket #108) against the same candidate set the
+ * push itself would use — resolved through the same filters, but selecting only
+ * the two company-name columns the resolver reads instead of the full `*` row
+ * (perf: avoids scanning every column of the entire filtered set). Companies-
+ * table filters resolve to every linked Person (ADR 0003), same as the actual
+ * push. */
 export async function GET(request: NextRequest) {
   const user = await getUser();
   if (!user) {
@@ -29,14 +34,16 @@ export async function GET(request: NextRequest) {
     return Response.json({ error: 'entity must be "people" or "companies"' }, { status: 400 });
   }
 
-  const candidates =
+  const records =
     entity === "people"
-      ? await getPeopleForEmailBison(parsePersonFilters(request.nextUrl.searchParams))
-      : await getPeopleForEmailBisonByCompanyFilters(parseCompanyFilters(request.nextUrl.searchParams));
+      ? await getEmailBisonCompanyNameFields(parsePersonFilters(request.nextUrl.searchParams))
+      : await getEmailBisonCompanyNameFieldsByCompanyFilters(
+          parseCompanyFilters(request.nextUrl.searchParams)
+        );
 
   const { standardFields } = resolveDefaultFieldMapping({
     platform: "emailbison",
-    records: candidates.map((c) => c.record),
+    records,
   });
 
   return Response.json({ standardFields });

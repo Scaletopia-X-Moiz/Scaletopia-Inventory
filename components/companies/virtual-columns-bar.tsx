@@ -538,7 +538,7 @@ function GroupEditor({
       <div className="flex flex-col gap-1.5">
         {group.conditions.map((cond, ci) => (
           <div key={cond.id} className="flex items-start gap-1.5">
-            <div className="w-12 shrink-0 pt-1.5">
+            <div className="min-w-[4.5rem] shrink-0 pt-1.5">
               {ci === 0 ? (
                 <span className="text-[11px] text-ink-soft/70">Where</span>
               ) : (

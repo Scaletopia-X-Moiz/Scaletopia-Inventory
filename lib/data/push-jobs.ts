@@ -329,6 +329,7 @@ export async function updateJobProgress(
     created?: number;
     updated?: number;
     failed: number;
+    failures?: PushJobFailure[];
     cursor?: Record<string, unknown> | null;
   }
 ): Promise<void> {
@@ -343,6 +344,10 @@ export async function updateJobProgress(
     started_at: new Date().toISOString(),
   };
   if (progress.total !== undefined) update.total = progress.total;
+  // Persist the failure reasons alongside the count each tick, so a multi-tick
+  // background job keeps a complete durable `failures` array instead of only
+  // the final tick's (finishJob is otherwise the sole writer of this column).
+  if (progress.failures !== undefined) update.failures = progress.failures ?? [];
   // Only write created/updated when the columns exist, so a DB that predates
   // the migration keeps advancing progress instead of 42703-ing mid-run.
   if (await hasCreatedUpdatedColumns()) {
