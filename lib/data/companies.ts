@@ -375,6 +375,67 @@ async function fetchRowsForVirtualIds(ids: string[]): Promise<RawCompanyRow[]> {
   return chunkResults.flat();
 }
 
+/** One rendered page of the virtual-/push-status-filtered companies list,
+ * resolved DB-side instead of by resolving the *entire* matched id set and
+ * slicing it in app code.
+ *
+ * Why this exists (fix/companies-results-503-timeout): the old
+ * resolveVirtualFilterIds + getCompanies path resolved the complete matched id
+ * set just to render one 50-row page. For a low-selectivity virtual filter
+ * (e.g. `categories contains X`, `size_label is_not_empty`) matching tens of
+ * thousands of the ~110k companies that meant:
+ *   1. an exact window count over the whole predicate scan, then
+ *   2. ceil(total/1000)-1 *more* full-table-scan RPCs fired in parallel via
+ *      Promise.all, each re-running the entire scan+sort from scratch just to
+ *      keep its own 1000-row OFFSET window, then
+ *   3. a chunked by-id refetch of every one of those tens of thousands of rows.
+ * The parallel scan fan-out (2) saturated the connection pool and tripped
+ * statement_timeout → 503 (one slow page failed the whole Promise.all). The
+ * companion /filter-options endpoint stayed healthy precisely because it scans
+ * *once*.
+ *
+ * This fetches only what the page needs, in the shape of that one healthy
+ * single scan:
+ *   - one RPC call, `count: "exact"` + ORDER BY id + range(start, start+size-1):
+ *     a single predicate scan that returns this page's ids AND the exact total
+ *     (no fan-out — the exact count is the same single-scan cost /filter-options
+ *     already pays and tolerates, so it is not the bug; the fan-out was),
+ *   - then a by-id refetch of just those ≤ pageSize rows (one chunk).
+ *
+ * Ordering is by `id` ascending — the RPC's own `ORDER BY c.id`, restated on
+ * the PostgREST side so range()/LIMIT is deterministic — which keeps pagination
+ * gap-/dup-free across pages (id is the unique PK). This differs from the plain
+ * (no-virtual-filter) list path's `last_updated DESC, id ASC`: reproducing that
+ * order for a virtual filter would require sorting the full matched set in app,
+ * i.e. exactly the whole-set resolution this fix removes, and the RPC exposes
+ * only `id` (not last_updated) to order by without an SQL change. Stable,
+ * deterministic id order is the accepted trade-off for keeping the page cheap. */
+async function fetchVirtualFilterPage(
+  filters: CompanyListFilters,
+  start: number,
+  pageSize: number
+): Promise<{ rows: RawCompanyRow[]; total: number }> {
+  const payload = toFilterOptionsRpcPayload(filters);
+
+  const pageResult = await supabaseAdmin
+    .rpc("companies_matching_virtual_filters", { filters: payload }, { count: "exact" })
+    .order("id", { ascending: true })
+    .range(start, start + pageSize - 1);
+  if (pageResult.error) throw pageResult.error;
+
+  const pageIds = (pageResult.data as VirtualFilterIdRow[]).map((row) => row.id);
+  const total = pageResult.count ?? pageIds.length;
+  if (pageIds.length === 0) return { rows: [], total };
+
+  // Refetch display columns for just this page's ids (one chunk — ≤ pageSize
+  // ids). `.in()` doesn't guarantee row order, so restore the id-ascending page
+  // order the RPC resolved.
+  const rows = await fetchRowsForVirtualIds(pageIds);
+  const orderIndex = new Map(pageIds.map((id, i) => [id, i]));
+  rows.sort((a, b) => (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0));
+  return { rows, total };
+}
+
 /** Ids per `.in("id", ...)` chunk when mapping person ids → company ids below. */
 const PUSH_JOB_PERSON_ID_CHUNK_SIZE = 200;
 
@@ -520,34 +581,51 @@ export async function getCompanies(
   page = 1,
   pageSize = 50
 ): Promise<CompanyListResult> {
-  const restricted = await resolveRestrictedRows(filters);
   const start = (page - 1) * pageSize;
 
   let pageRows: CompanyListRow[];
   let total: number;
 
-  if (restricted !== null) {
-    // An id-restricting dimension is active (virtualFilters and/or pushJobId):
-    // the matched id set can't be pushed into a single `.in()`/`.range()`
-    // Postgres query past a few hundred ids (see fetchRowsForVirtualIds), so
-    // order/paginate in app code over the already-resolved full match instead —
-    // the same tradeoff getAllFilteredCompanies already makes for export.
-    const matched = sortByLastUpdatedDesc(restricted);
-    total = matched.length;
-    pageRows = matched.slice(start, start + pageSize).map(toListRow);
+  // A virtual-filter / push-status filter (but no pushJobId) is the low-
+  // selectivity 503 case (fix/companies-results-503-timeout): resolve just this
+  // page DB-side in one scan instead of resolving the entire matched id set and
+  // slicing it in app code. pushJobId stays on the app-side branch below — its
+  // id set comes from a bounded push run (push_job_records → people), not a
+  // full-table predicate scan, so the whole-set resolution is cheap there and
+  // keeps its existing last_updated ordering.
+  const virtualPageActive =
+    !filters.pushJobId && (isFilterSetActive(filters.virtualFilters) || filters.pushStatus != null);
+
+  if (virtualPageActive) {
+    const pageResult = await fetchVirtualFilterPage(filters, start, pageSize);
+    total = pageResult.total;
+    pageRows = pageResult.rows.map(toListRow);
   } else {
-    let query = supabaseAdmin.from("companies").select(LIST_COLUMNS, { count: "exact" });
-    query = applyCompanyFilters(query, filters);
-    query = query
-      .order("last_updated", { ascending: false, nullsFirst: false })
-      .order("id", { ascending: true });
+    const restricted = await resolveRestrictedRows(filters);
+    if (restricted !== null) {
+      // An id-restricting dimension is active (pushJobId, possibly intersected
+      // with a virtual filter): the matched id set can't be pushed into a single
+      // `.in()`/`.range()` Postgres query past a few hundred ids (see
+      // fetchRowsForVirtualIds), so order/paginate in app code over the
+      // already-resolved full match — the same tradeoff getAllFilteredCompanies
+      // makes for export.
+      const matched = sortByLastUpdatedDesc(restricted);
+      total = matched.length;
+      pageRows = matched.slice(start, start + pageSize).map(toListRow);
+    } else {
+      let query = supabaseAdmin.from("companies").select(LIST_COLUMNS, { count: "exact" });
+      query = applyCompanyFilters(query, filters);
+      query = query
+        .order("last_updated", { ascending: false, nullsFirst: false })
+        .order("id", { ascending: true });
 
-    const { data, error, count } = await query.range(start, start + pageSize - 1);
-    if (error) throw error;
+      const { data, error, count } = await query.range(start, start + pageSize - 1);
+      if (error) throw error;
 
-    const rows = (data ?? []) as unknown as RawCompanyRow[];
-    pageRows = rows.map(toListRow);
-    total = count ?? 0;
+      const rows = (data ?? []) as unknown as RawCompanyRow[];
+      pageRows = rows.map(toListRow);
+      total = count ?? 0;
+    }
   }
   const peopleCounts = await getPeopleCountsForCompanies(pageRows.map((r) => r.id));
   for (const row of pageRows) {
