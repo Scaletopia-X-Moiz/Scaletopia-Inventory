@@ -5,15 +5,18 @@ import type { ClientRow } from "@/lib/data/clients";
 const { after } = vi.hoisted(() => ({ after: vi.fn() }));
 vi.mock("next/server", () => ({ after }));
 
-const { claimNextRunnableJob, getPushJob, updateJobProgress, finishJob, recordJobPeople } = vi.hoisted(() => ({
-  claimNextRunnableJob: vi.fn(),
-  getPushJob: vi.fn(),
-  updateJobProgress: vi.fn(),
-  finishJob: vi.fn(),
-  recordJobPeople: vi.fn(),
-}));
+const { claimNextRunnableJob, resetStaleRunningJobs, getPushJob, updateJobProgress, finishJob, recordJobPeople } =
+  vi.hoisted(() => ({
+    claimNextRunnableJob: vi.fn(),
+    resetStaleRunningJobs: vi.fn(),
+    getPushJob: vi.fn(),
+    updateJobProgress: vi.fn(),
+    finishJob: vi.fn(),
+    recordJobPeople: vi.fn(),
+  }));
 vi.mock("@/lib/data/push-jobs", () => ({
   claimNextRunnableJob,
+  resetStaleRunningJobs,
   getPushJob,
   updateJobProgress,
   finishJob,
@@ -114,6 +117,7 @@ beforeEach(() => {
   delete process.env.CRON_SECRET;
   delete process.env.PUSH_WORKER_SECRET;
   getClientById.mockResolvedValue(testClient);
+  resetStaleRunningJobs.mockResolvedValue(0);
 });
 
 describe("push-worker auth", () => {
@@ -140,6 +144,42 @@ describe("push-worker auth", () => {
       })
     );
     expect(res.status).toBe(200);
+  });
+});
+
+describe("push-worker stale-job reaper (#137)", () => {
+  it("reaps stale running jobs before claiming, on every invocation", async () => {
+    resetStaleRunningJobs.mockResolvedValue(2);
+    claimNextRunnableJob.mockResolvedValue(null);
+
+    const res = await POST(req());
+    expect(res.status).toBe(200);
+
+    // Runs once per invocation, ahead of the claim path, so a stranded row is
+    // reclaimed before the loop looks for runnable work.
+    expect(resetStaleRunningJobs).toHaveBeenCalledTimes(1);
+    const reaperOrder = resetStaleRunningJobs.mock.invocationCallOrder[0];
+    const claimOrder = claimNextRunnableJob.mock.invocationCallOrder[0];
+    expect(reaperOrder).toBeLessThan(claimOrder);
+  });
+
+  it("runs the reaper on the cron GET backstop too", async () => {
+    claimNextRunnableJob.mockResolvedValue(null);
+
+    const res = await GET(new Request("http://localhost/api/internal/push-worker"));
+    expect(res.status).toBe(200);
+    expect(resetStaleRunningJobs).toHaveBeenCalledTimes(1);
+  });
+
+  it("continues the invocation when the reaper throws (e.g. SQL not yet applied)", async () => {
+    resetStaleRunningJobs.mockRejectedValue(new Error("function reset_stale_running_jobs does not exist"));
+    claimNextRunnableJob.mockResolvedValueOnce(makeJob()).mockResolvedValue(null);
+    runPeopleGhlPush.mockResolvedValue(ghlResult());
+
+    const res = await POST(req());
+    expect(res.status).toBe(200);
+    // The tick loop still ran and finished the claimed job despite the reaper error.
+    expect(finishJob).toHaveBeenCalledWith("job-1", expect.objectContaining({ status: "succeeded" }));
   });
 });
 

@@ -1,6 +1,7 @@
 import { after } from "next/server";
 import {
   claimNextRunnableJob,
+  resetStaleRunningJobs,
   getPushJob,
   updateJobProgress,
   finishJob,
@@ -296,6 +297,25 @@ async function runWorker(request: Request): Promise<Response> {
   const workerDeadline = Date.now() + WORKER_BUDGET_MS;
   let processed = 0;
   let chained = false;
+
+  // Reaper: reclaim jobs stranded in `running` by a crashed/hard-killed
+  // invocation (#137) before doing anything else. Such a row otherwise blocks
+  // its client's queue forever (the per-client claim predicate excludes a
+  // client that has any `running` job) and, in bulk, exhausts the global
+  // MAX_CONCURRENT_JOBS cap for every client. Running on every invocation
+  // (self-chain, kick, or the cron backstop) means recovery lands within ~one
+  // cron minute of the lease lapsing. Best-effort: a missing function (SQL not
+  // yet applied to the DB) or a transient DB error must not abort the tick
+  // loop, so failures are logged and swallowed.
+  try {
+    const reaped = await resetStaleRunningJobs();
+    if (reaped > 0) {
+      console.warn(`[push-worker] reaped ${reaped} stale running job(s) back to queued`);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[push-worker] stale-job reaper failed: ${message}`);
+  }
 
   const scheduleSelfChain = (jobId?: string) => {
     chained = true;

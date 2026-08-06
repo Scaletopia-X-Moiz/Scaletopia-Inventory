@@ -269,6 +269,25 @@ export async function claimNextRunnableJob(maxConcurrent?: number | null): Promi
   return toPushJob(rows[0]);
 }
 
+/** Reaps jobs stranded in `running` by a crashed/hard-killed invocation,
+ * resetting each back to `queued` (keeping its cursor so a re-claim resumes
+ * where it stranded) and returning how many were reclaimed. Delegates to the
+ * `reset_stale_running_jobs` Postgres function (lib/data/push-jobs.sql): a job
+ * is stale when its lease — `started_at`, renewed on every progress tick — has
+ * not advanced within `staleSeconds`.
+ *
+ * The worker calls this once at the start of every invocation so a stranded
+ * job (which permanently blocks its client's queue, and in bulk exhausts the
+ * global concurrency cap for all clients) is auto-recovered within ~one cron
+ * minute of its lease lapsing (ticket #137). */
+export async function resetStaleRunningJobs(staleSeconds = 600): Promise<number> {
+  const { data, error } = await supabaseAdmin.rpc("reset_stale_running_jobs", {
+    stale_seconds: staleSeconds,
+  });
+  if (error) throw error;
+  return ((data ?? []) as unknown[]).length;
+}
+
 /** Updates the live progress counters a running job reports mid-run. */
 export async function updateJobProgress(
   id: string,
@@ -278,6 +297,11 @@ export async function updateJobProgress(
     processed: progress.processed,
     succeeded: progress.succeeded,
     failed: progress.failed,
+    // Renew the lease. `started_at` doubles as the reaper's liveness signal
+    // (#137): every tick pushes it forward, so a healthy multi-tick job is
+    // never seen as stale, while a crashed invocation stops renewing it and
+    // reset_stale_running_jobs reclaims the row once the lease lapses.
+    started_at: new Date().toISOString(),
   };
   if (progress.total !== undefined) update.total = progress.total;
   if (progress.cursor !== undefined) update.cursor = progress.cursor;

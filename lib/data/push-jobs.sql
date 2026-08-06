@@ -70,6 +70,12 @@ CREATE INDEX IF NOT EXISTS push_jobs_client_idx        ON push_jobs (client_id, 
 -- is hit). Only ever claims `queued` jobs — resuming a `running` job left by a
 -- timed-out invocation is the worker's job (it self-chains by id), not this
 -- function's.
+--
+-- `started_at` is set to now() here at claim time and doubles as the job's
+-- lease: the worker renews it on every progress tick (updateJobProgress), so a
+-- healthy multi-tick job keeps it fresh while a crashed invocation stops
+-- renewing it. `reset_stale_running_jobs` (below) reaps rows whose lease has
+-- gone cold.
 CREATE OR REPLACE FUNCTION claim_next_runnable_job(max_concurrent integer DEFAULT NULL)
 RETURNS SETOF push_jobs
 LANGUAGE sql
@@ -92,6 +98,39 @@ AS $$
     FOR UPDATE SKIP LOCKED
     LIMIT 1
   )
+  RETURNING *;
+$$;
+
+-- Lease timeout / reaper (ticket #137).
+--
+-- A job stranded in `running` by a crashed or hard-killed invocation (one that
+-- died before its try/catch could mark it failed) would otherwise block its
+-- client's queue forever — the per-client `NOT EXISTS running` predicate in
+-- claim_next_runnable_job permanently excludes that client — and a few such
+-- rows also exhaust the global MAX_CONCURRENT_JOBS cap, stalling every client.
+-- The `after()` self-chain that normally resumes a running job is best-effort
+-- and `.catch`-swallowed, so nothing reclaims the row on its own (see
+-- docs/adr/0004-push-job-worker-runtime.md).
+--
+-- This resets any `running` job whose lease has gone stale — `started_at` is
+-- renewed on every progress tick, so a job that hasn't advanced it within
+-- `stale_seconds` is presumed dead — back to `queued`, clearing `started_at`.
+-- The row keeps its `cursor`, so a re-claim resumes from where it stranded
+-- rather than restarting (push_job_records' (job, person) PK keeps that
+-- idempotent). The worker calls this once at the start of every invocation, so
+-- a stranded job is auto-recovered within ~one cron minute of its lease
+-- lapsing. The default lease (600s / 10 min) is comfortably above the worker's
+-- ~4.5-min per-invocation budget, so a healthy job spanning several
+-- self-chained invocations is never reaped mid-flight.
+CREATE OR REPLACE FUNCTION reset_stale_running_jobs(stale_seconds integer DEFAULT 600)
+RETURNS SETOF push_jobs
+LANGUAGE sql
+AS $$
+  UPDATE push_jobs
+  SET status = 'queued', started_at = NULL
+  WHERE status = 'running'
+    AND started_at IS NOT NULL
+    AND started_at < now() - make_interval(secs => stale_seconds)
   RETURNING *;
 $$;
 
