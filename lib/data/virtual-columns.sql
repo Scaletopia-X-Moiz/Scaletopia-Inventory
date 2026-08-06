@@ -143,23 +143,54 @@ $$;
 -- its elements. Kept as its own function, called as a single flat FuncExpr
 -- from each of text_filter_matches' 'contains'/'not_contains' arms, rather
 -- than inlined as a *nested* CASE directly in text_filter_matches' own body:
--- empirically (EXPLAIN ANALYZE against the live ~146k-row companies table),
--- nesting a second CASE inside one arm was enough added branch complexity to
--- knock text_filter_matches itself off Postgres's inliner — it went from the
--- fully-inlined ~69ms-class scan every other operator here still gets to a
--- 9.4s opaque-function-call scan, matching this file's earlier "~24 WHEN arms
--- across nested CASEs was NOT inlined" finding above. Every arm in
--- text_filter_matches' CASE must stay a single flat expression the way it was
--- before this ticket; this function is where the array/scalar branching (and
--- the array case's inherently non-inlinable EXISTS subquery, reading a jsonb
--- array needs a FROM-clause SRF) lives instead.
+-- empirically, nesting a second CASE inside one arm was enough added branch
+-- complexity to knock text_filter_matches itself off Postgres's inliner —
+-- every arm in text_filter_matches' CASE must stay a single flat expression.
+--
+-- BUGFIX (categories/specialties contains 503, issue: statement_timeout 57014):
+-- this helper's *first* draft put the array case's `EXISTS (...)` subquery
+-- directly in this function's own body. That was wrong: Postgres's
+-- inline_function() bails on ANY body with `hasSubLinks` set (an EXISTS
+-- qualifies) — so text_contains_matches itself became a non-inlinable, opaque
+-- per-row SQL-function call, exactly the failure mode this file documents for
+-- virtual_filters_match. Every text `contains`/`not_contains` request (scalar
+-- OR array, any key) then ran that opaque call once per row across the full
+-- ~146k-row scan and blew past statement_timeout (reproduced live: scalar
+-- `categories contains 'software'` timed out at ~8.3s / 57014, while the
+-- inlinable `is`/`is_not_empty` on the same key stayed at the ~4.6s baseline).
+-- Moving the EXISTS "down" into this helper kept text_filter_matches inlinable
+-- but left *this* function opaque, which is just as slow.
+--
+-- The fix: keep this function's body SubLink-free so it inlines too, and push
+-- the one unavoidable SubLink (turning a jsonb array into a wildcarded text[])
+-- down one more level into jsonb_ilike_patterns below. Per-row work is then a
+-- plain `ILIKE` (scalar) or a `ILIKE ANY (<text[]>)` ScalarArrayOpExpr (array)
+-- — no SubLink, no SRF, no per-row opaque call — so the whole chain
+-- (text_filter_matches -> text_contains_matches) folds into the caller's WHERE
+-- as a flat expression, the same fully-inlined class every other operator here
+-- already gets. jsonb_ilike_patterns stays opaque (it has the SubLink) but is
+-- invoked with the constant filter `value` only in the array branch, over a
+-- tiny chip-keyword array — not the ILIKE that runs per row. Semantics are
+-- byte-identical: `ILIKE ANY` over `'%kw%'` patterns matches iff any keyword
+-- is a substring, the exact "matches any of" the EXISTS expressed, and the
+-- scalar branch is unchanged. Patterns are never NULL, so the result is always
+-- a definite boolean (needed for the caller's NOT EXISTS AND-fold).
+
+-- Builds the `'%kw%'` ILIKE-pattern text[] for a jsonb array of chip keywords.
+-- Isolated here (not inlined into text_contains_matches) precisely because the
+-- `ARRAY(SELECT ... FROM jsonb_array_elements_text(...))` it needs is a SubLink
+-- — keeping it in its own function leaves text_contains_matches SubLink-free
+-- and therefore inlinable (see the note above). No wildcard-escaping of the
+-- keyword, matching the scalar branch's existing `'%' || value || '%'` exactly.
+CREATE OR REPLACE FUNCTION jsonb_ilike_patterns(value jsonb) RETURNS text[]
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT ARRAY(SELECT '%' || kw || '%' FROM jsonb_array_elements_text(value) AS kw)
+$$;
+
 CREATE OR REPLACE FUNCTION text_contains_matches(text_value text, value jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
   SELECT CASE jsonb_typeof(value)
-    WHEN 'array' THEN EXISTS (
-      SELECT 1 FROM jsonb_array_elements_text(value) AS kw
-      WHERE text_value ILIKE ('%' || kw || '%')
-    )
+    WHEN 'array' THEN text_value ILIKE ANY (jsonb_ilike_patterns(value))
     ELSE text_value ILIKE ('%' || (value #>> '{}') || '%')
   END
 $$;

@@ -184,6 +184,63 @@ describe("virtual_filter_predicate_matches — text contains/not_contains chip i
   });
 });
 
+describe("virtual_filter_predicate_matches — text contains on a string-valued (categories-style) field", () => {
+  // `categories` is classified Text (its dominant value shape is a scalar
+  // string like "/Food & Drink/Food/Snack Foods"), unlike `specialties` (List).
+  // Filtering it with `contains` runs the text path (text_contains_matches);
+  // this pins the semantics after that helper was rewritten to be inlinable
+  // (SubLink pushed down into jsonb_ilike_patterns) to stop timing out (57014)
+  // on the full-table scan. Every shape below must keep matching exactly as the
+  // pre-rewrite EXISTS did.
+  it("substring-matches a scalar keyword against a string value", async () => {
+    const filter: VirtualColumnFilter = { key: "categories", type: "text", operator: "contains", value: "software" };
+    expect(await matches({ categories: "Business Software & Services" }, filter)).toBe(true);
+    expect(await matches({ categories: "/Food & Drink/Food/Snack Foods" }, filter)).toBe(false);
+    expect(await matches({}, filter)).toBe(false);
+  });
+
+  it("a single-element keyword array behaves identically to the scalar form", async () => {
+    const scalar: VirtualColumnFilter = { key: "categories", type: "text", operator: "contains", value: "food" };
+    const array: VirtualColumnFilter = { key: "categories", type: "text", operator: "contains", value: ["food"] };
+    for (const data of [{ categories: "/Food & Drink/Food/Snack Foods" }, { categories: "Software" }, {}]) {
+      expect(await matches(data, array)).toBe(await matches(data, scalar));
+    }
+  });
+
+  it("a multi-keyword array matches any of the keywords (case-insensitive)", async () => {
+    const filter: VirtualColumnFilter = {
+      key: "categories",
+      type: "text",
+      operator: "contains",
+      value: ["software", "snack"],
+    };
+    expect(await matches({ categories: "Enterprise SOFTWARE" }, filter)).toBe(true);
+    expect(await matches({ categories: "/Food & Drink/Food/Snack Foods" }, filter)).toBe(true);
+    expect(await matches({ categories: "Automotive" }, filter)).toBe(false);
+  });
+
+  it("not_contains is the inverse and includes rows missing the key", async () => {
+    const filter: VirtualColumnFilter = {
+      key: "categories",
+      type: "text",
+      operator: "not_contains",
+      value: ["software", "snack"],
+    };
+    expect(await matches({ categories: "Automotive" }, filter)).toBe(true);
+    expect(await matches({ categories: "Enterprise Software" }, filter)).toBe(false);
+    expect(await matches({}, filter)).toBe(true);
+  });
+
+  it("tolerates a mixed-shape row (an array value under a Text-typed key) without error", async () => {
+    // Real custom_data holds the same key as different shapes across rows. When
+    // a Text-typed key happens to carry an array, the text path reads it as its
+    // serialized JSON text — it must never throw, just match on that text.
+    const filter: VirtualColumnFilter = { key: "categories", type: "text", operator: "contains", value: "software" };
+    await expect(matches({ categories: ["software", "retail"] }, filter)).resolves.toBe(true);
+    await expect(matches({ categories: ["retail"] }, filter)).resolves.toBe(false);
+  });
+});
+
 describe("virtual_filter_predicate_matches — list contains/not_contains chip input (ticket #116)", () => {
   it("'contains' with a keyword array matches any exact member (still member-exact, not substring)", async () => {
     const filter: VirtualColumnFilter = { key: "specialties", type: "list", operator: "contains", value: ["a3", "a4"] };
