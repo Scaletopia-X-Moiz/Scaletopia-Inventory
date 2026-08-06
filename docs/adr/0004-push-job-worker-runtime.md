@@ -88,6 +88,14 @@ Supabase Edge Function.
   longer auto-recovered (the old running-first path did so incidentally, at the
   cost of double-processing on cron overlap); a lease/heartbeat reaper is the
   follow-up if that becomes a problem.
+- **Resolved by #137 (stale-`running` reaper):** the follow-up above landed.
+  `started_at` now doubles as a lease — `claim_next_runnable_job` sets it and
+  the worker renews it on every progress tick (`updateJobProgress`), so a
+  healthy job spanning several self-chained invocations keeps it fresh, while a
+  crashed invocation stops renewing it. `reset_stale_running_jobs` (called once
+  at the start of every worker invocation) resets any `running` job whose lease
+  has gone stale (default 10 min) back to `queued`, keeping its `cursor` so a
+  re-claim resumes where it stranded.
 - **Deferred to #122 (Push Activity panel):** the push buttons keep working via
   a minimal polling shim (`pollJob` → `GET /api/push-jobs/[id]`), but the
   completion summary is now generic (succeeded / failed / total, plus failure
