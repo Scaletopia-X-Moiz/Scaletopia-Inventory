@@ -79,6 +79,8 @@ function makeJob(overrides: Partial<PushJob> = {}): PushJob {
     total: 0,
     processed: 0,
     succeeded: 0,
+    created: 0,
+    updated: 0,
     failed: 0,
     failures: [],
     cursor: null,
@@ -99,7 +101,7 @@ function ghlResult(overrides: Record<string, unknown> = {}) {
     skipped: 0,
     pushed: 2,
     created: 2,
-    tagAppended: 0,
+    updated: 0,
     errors: 0,
     failed_people: [],
     succeededPersonIds: ["p1", "p2"],
@@ -208,7 +210,13 @@ describe("push-worker dispatch + finish", () => {
     ]);
     expect(finishJob).toHaveBeenCalledWith("job-1", {
       status: "succeeded",
+      // total/processed persisted on completion so the panel shows the real
+      // count instead of "Total selected: 0" (feedback item 2a).
+      total: 2,
+      processed: 2,
       succeeded: 2,
+      created: 2,
+      updated: 0,
       failed: 0,
       failures: [],
       error: null,
@@ -251,6 +259,8 @@ describe("push-worker dispatch + finish", () => {
     runPeopleAddToEmailBison.mockResolvedValue({
       total_matched: 1,
       pushed: 1,
+      created: 1,
+      updated: 0,
       errors: 0,
       failed_people: [],
       failed: [],
@@ -276,6 +286,8 @@ describe("push-worker dispatch + finish", () => {
     runCompaniesAddToCampaign.mockResolvedValue({
       total_matched: 3,
       attached: 3,
+      created: 3,
+      updated: 0,
       errors: 0,
       failed_people: [],
       failed: [],
@@ -297,7 +309,7 @@ describe("push-worker continue + self-chain", () => {
   it("updates progress and self-chains when a tick is not done", async () => {
     claimNextRunnableJob.mockResolvedValueOnce(makeJob()).mockResolvedValue(null);
     runPeopleGhlPush.mockResolvedValue(
-      ghlResult({ done: false, nextOffset: 100, succeededPersonIds: ["p1"], failedPersonIds: [], pushed: 1 })
+      ghlResult({ done: false, nextOffset: 100, succeededPersonIds: ["p1"], failedPersonIds: [], pushed: 1, created: 1, updated: 0 })
     );
 
     const res = await POST(req());
@@ -307,6 +319,8 @@ describe("push-worker continue + self-chain", () => {
       total: 2,
       processed: 100,
       succeeded: 1,
+      created: 1,
+      updated: 0,
       failed: 0,
       cursor: { offset: 100 },
     });

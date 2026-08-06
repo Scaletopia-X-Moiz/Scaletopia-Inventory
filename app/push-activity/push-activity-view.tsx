@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { cn, formatAbsoluteDateTime, timeAgo } from "@/lib/utils";
 import type { PushJobListRow, PushJobStatus } from "@/lib/data/push-jobs";
+import { PushJobDeepLinkButtons } from "@/components/shared/push-job-deep-link-buttons";
 
 /** Client/platform filter idiom mirrors /push-history, but the platform
  * options are push_jobs' granular vocabulary (`platform` distinguishes
@@ -74,8 +75,13 @@ function CompletionSummary({ job }: { job: PushJobListRow }) {
         <span>
           Total selected: <strong className="text-ink">{job.total.toLocaleString("en-US")}</strong>
         </span>
+        {/* Created vs updated, split per feedback item 2b. Older rows predate
+            the columns, so default each to 0. */}
         <span>
-          Created or updated: <strong className="text-ink">{job.succeeded.toLocaleString("en-US")}</strong>
+          Created: <strong className="text-ink">{(job.created ?? 0).toLocaleString("en-US")}</strong>
+        </span>
+        <span>
+          Updated: <strong className="text-ink">{(job.updated ?? 0).toLocaleString("en-US")}</strong>
         </span>
         <span>
           Failed: <strong className="text-ink">{job.failed.toLocaleString("en-US")}</strong>
@@ -138,7 +144,13 @@ function JobCard({ job }: { job: PushJobListRow }) {
       ) : job.status === "running" ? (
         <ProgressBar processed={job.processed} total={job.total} />
       ) : (
-        <CompletionSummary job={job} />
+        <>
+          <CompletionSummary job={job} />
+          {/* Deep links to the People/Companies tables filtered to exactly this
+              run's records (?pushJobId=<id>). Renders null for non-terminal
+              jobs, but we're already in the terminal branch here. */}
+          <PushJobDeepLinkButtons jobId={job.id} status={job.status} />
+        </>
       )}
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-ink-mute">

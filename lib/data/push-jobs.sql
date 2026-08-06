@@ -46,6 +46,22 @@ CREATE TABLE IF NOT EXISTS push_jobs (
 CREATE INDEX IF NOT EXISTS push_jobs_status_created_idx ON push_jobs (status, created_at);
 CREATE INDEX IF NOT EXISTS push_jobs_client_idx        ON push_jobs (client_id, created_at DESC);
 
+-- ticket: created/updated split (Push Activity feedback item 2b) -------------
+-- Splits the single `succeeded` counter into "created" (records this run
+-- pushed for the first time) vs "updated" (records that already had a
+-- platform_pushes row for (person_id, client_id, platform) before this run
+-- wrote it). The push worker accumulates both across ticks and persists them
+-- alongside `succeeded` (which stays = created + updated). Old rows predate
+-- these columns; the DEFAULT 0 keeps them consistent and the app defaults any
+-- missing value to 0 so the panel never breaks.
+--
+-- MUST be applied by hand in the Supabase SQL editor (the local DATABASE_URL
+-- password for automated DDL is stale) — the worker's finish/progress writes
+-- reference these columns, so apply this before deploying the worker change.
+ALTER TABLE push_jobs ADD COLUMN IF NOT EXISTS created integer NOT NULL DEFAULT 0;
+ALTER TABLE push_jobs ADD COLUMN IF NOT EXISTS updated integer NOT NULL DEFAULT 0;
+-- ---------------------------------------------------------------------------
+
 -- Atomic per-client claim (ticket #121, "queueing / serialization").
 --
 -- Picks the oldest `queued` job whose client has no job already `running`,

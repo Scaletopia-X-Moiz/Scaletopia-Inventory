@@ -88,6 +88,11 @@ interface TickOutcome {
   total: number;
   nextOffset: number;
   done: boolean;
+  /** New records this tick pushed for the first time (no prior platform_pushes
+   * row) vs. records that already had one — the created/updated split
+   * (feedback item 2b), accumulated across ticks in processJobTick. */
+  created: number;
+  updated: number;
   succeededPersonIds: string[];
   failedPersonIds: string[];
   failures: PushJobFailure[];
@@ -121,12 +126,16 @@ async function runTick(
       total: result.total_matched,
       nextOffset: result.nextOffset,
       done: result.done,
+      created: result.created ?? 0,
+      updated: result.updated ?? 0,
       succeededPersonIds: result.succeededPersonIds,
       failedPersonIds: result.failedPersonIds,
-      // GhlPushResult only carries failed display names (reasons go to server
-      // logs), so the reason is generic here — richer per-failure detail is
-      // deferred to #122.
-      failures: result.failed_people.map((name) => ({ name, reason: "GHL push failed — see server logs" })),
+      // GhlPushResult now carries a concrete per-record reason (feedback item
+      // 2c), so surface that instead of a generic whole-batch message. Fall
+      // back to the name-only shape if `failed` is absent (defensive).
+      failures: result.failed
+        ? result.failed
+        : result.failed_people.map((name) => ({ name, reason: "GHL push failed — see server logs" })),
     };
   }
 
@@ -146,6 +155,8 @@ async function runTick(
       total: result.total_matched,
       nextOffset: result.nextOffset,
       done: result.done,
+      created: result.created ?? 0,
+      updated: result.updated ?? 0,
       succeededPersonIds: result.succeededPersonIds,
       failedPersonIds: result.failedPersonIds,
       failures: result.failed,
@@ -182,6 +193,8 @@ async function runTick(
       total: result.total_matched,
       nextOffset: result.nextOffset,
       done: result.done,
+      created: result.created ?? 0,
+      updated: result.updated ?? 0,
       succeededPersonIds: result.succeededPersonIds,
       failedPersonIds: result.failedPersonIds,
       failures: result.failed,
@@ -206,7 +219,11 @@ async function processJobTick(job: PushJob, workerDeadline: number): Promise<boo
   if (!client) {
     await finishJob(job.id, {
       status: "failed",
+      total: job.total,
+      processed: job.processed,
       succeeded: job.succeeded,
+      created: job.created,
+      updated: job.updated,
       failed: job.failed,
       failures: job.failures,
       error: `Client ${job.clientId} not found`,
@@ -223,6 +240,8 @@ async function processJobTick(job: PushJob, workerDeadline: number): Promise<boo
   // Running totals are seeded from the job row and advanced by this tick's
   // delta, so a resumed job keeps accumulating rather than resetting.
   const succeeded = job.succeeded + tick.succeededPersonIds.length;
+  const created = job.created + tick.created;
+  const updated = job.updated + tick.updated;
   const failed = job.failed + tick.failedPersonIds.length;
   const failures = [...job.failures, ...tick.failures].slice(-MAX_FAILURES_KEPT);
 
@@ -236,7 +255,14 @@ async function processJobTick(job: PushJob, workerDeadline: number): Promise<boo
   if (tick.done) {
     await finishJob(job.id, {
       status: terminalStatus(succeeded, failed),
+      // Persist total/processed here (feedback item 2a): a job that finishes in
+      // one tick never calls updateJobProgress, so without this `total` stays 0
+      // and the panel shows "Total selected: 0". processed = total once done.
+      total: tick.total,
+      processed: tick.total,
       succeeded,
+      created,
+      updated,
       failed,
       failures,
       error: null,
@@ -250,6 +276,8 @@ async function processJobTick(job: PushJob, workerDeadline: number): Promise<boo
         jobId: job.id,
         total: tick.total,
         succeeded,
+        created,
+        updated,
         failed,
       },
       actor
@@ -261,6 +289,8 @@ async function processJobTick(job: PushJob, workerDeadline: number): Promise<boo
     total: tick.total,
     processed: tick.nextOffset,
     succeeded,
+    created,
+    updated,
     failed,
     cursor: { offset: tick.nextOffset },
   });
@@ -388,7 +418,11 @@ async function runWorker(request: Request): Promise<Response> {
       const message = err instanceof Error ? err.message : String(err);
       await finishJob(job.id, {
         status: "failed",
+        total: job.total,
+        processed: job.processed,
         succeeded: job.succeeded,
+        created: job.created,
+        updated: job.updated,
         failed: job.failed,
         failures: job.failures,
         error: message,

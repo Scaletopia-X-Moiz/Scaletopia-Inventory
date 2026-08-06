@@ -16,18 +16,35 @@ const PLATFORM = "ghl";
  * anything else, including null/unverified) are skipped. */
 const ELIGIBLE_PHONE_TYPES = new Set(["mobile", "toll_free"]);
 
+/** One failed GHL record's display name plus the concrete reason it failed —
+ * the GHL API error message or the platform_pushes write-back error. Lets the
+ * Push Activity panel render "Failed: {name} — {reason}" per record instead of
+ * a generic whole-batch message (feedback item 2c). */
+export interface GhlPushFailure {
+  name: string;
+  reason: string;
+}
+
 export interface GhlPushResult {
   total_matched: number;
   eligible: number;
   skipped: number;
   pushed: number;
-  /** Of `pushed`, how many were brand-new GHL contacts. */
+  /** Of `pushed`, records with no prior platform_pushes row for
+   * (person_id, client_id, "ghl") before this run wrote it. */
   created: number;
-  /** Of `pushed`, how many were existing GHL contacts that only got the tag appended. */
-  tagAppended: number;
+  /** Of `pushed`, records that already had such a row. `created + updated ===
+   * pushed`. Uses the same DB-side pre-existence heuristic as the EmailBison
+   * paths (applied uniformly per feedback item 2b) rather than GHL's own
+   * new-vs-deduped signal, so every push surface reports created/updated the
+   * same way. */
+  updated: number;
   errors: number;
   /** Display names of people whose push failed, one per failed record. */
   failed_people: string[];
+  /** Same failed records as `failed_people`, paired with the concrete reason
+   * each one failed (feedback item 2c). */
+  failed: GhlPushFailure[];
   /** Person ids pushed successfully this call — used by the background
    * worker (issue #120) to tag push_job_records. Reflects only this call's
    * candidates (see `offset`/`deadline` on RunGhlPushDeps), not necessarily
@@ -113,7 +130,7 @@ export function splitGhlEligibility(candidates: GhlPushCandidate[]): GhlEligibil
   };
 }
 
-type PushOneResult = { ok: true; deduped: boolean } | { ok: false; error: string };
+type PushOneResult = { ok: true } | { ok: false; error: string };
 
 /** Pushes a single person to GHL, then logs the result to platform_pushes and
  * flips the person's pushed_to_ghl flag. platform_pushes is upserted (not
@@ -136,7 +153,7 @@ async function pushOne(
   const payload = buildGhlContactPayload(candidate.record, [tag], customFields, standardFieldMapping);
 
   try {
-    const { contactId, deduped } = await pushContactToGhl(
+    const { contactId } = await pushContactToGhl(
       credentials,
       {
         firstName: payload.firstName ?? undefined,
@@ -175,7 +192,7 @@ async function pushOne(
       .eq("id", candidate.id);
     if (personError) throw personError;
 
-    return { ok: true, deduped };
+    return { ok: true };
   } catch (err) {
     const message =
       err instanceof GhlApiError || err instanceof Error ? err.message : String(err);
@@ -228,9 +245,10 @@ export async function runPeopleGhlPush(
       skipped,
       pushed: 0,
       created: 0,
-      tagAppended: 0,
+      updated: 0,
       errors: 0,
       failed_people: [],
+      failed: [],
       succeededPersonIds: [],
       failedPersonIds: [],
       nextOffset: 0,
@@ -240,14 +258,34 @@ export async function runPeopleGhlPush(
 
   const remaining = eligible.slice(offset);
 
+  // Created vs updated (feedback item 2b), same DB-side heuristic as the
+  // EmailBison paths: snapshot which of this tick's candidates already have a
+  // platform_pushes row for (client, "ghl") BEFORE pushOne overwrites them —
+  // those are "updated", the rest "created". Done once per tick, ahead of the
+  // concurrent pushes below.
+  const preExistingPersonIds = new Set<string>();
+  if (remaining.length > 0) {
+    const { data: existingRows } = await supabaseAdmin
+      .from("platform_pushes")
+      .select("person_id")
+      .eq("client_id", client.id)
+      .eq("platform", PLATFORM)
+      .in(
+        "person_id",
+        remaining.map((c) => c.id)
+      );
+    for (const row of existingRows ?? []) preExistingPersonIds.add(row.person_id as string);
+  }
+
   onProgress?.({ phase: "pushing", done: offset, total: eligible.length, pushed: 0, errors: 0 });
 
   let pushed = 0;
   let created = 0;
-  let tagAppended = 0;
+  let updated = 0;
   let errors = 0;
   let attempted = 0;
   const failed_people: string[] = [];
+  const failed: GhlPushFailure[] = [];
   const succeededPersonIds: string[] = [];
   const failedPersonIds: string[] = [];
 
@@ -274,9 +312,10 @@ export async function runPeopleGhlPush(
       attempted++;
       if (settled.status === "fulfilled" && settled.value.result.ok) {
         pushed++;
-        succeededPersonIds.push(settled.value.candidate.id);
-        if (settled.value.result.deduped) {
-          tagAppended++;
+        const personId = settled.value.candidate.id;
+        succeededPersonIds.push(personId);
+        if (preExistingPersonIds.has(personId)) {
+          updated++;
         } else {
           created++;
         }
@@ -287,7 +326,9 @@ export async function runPeopleGhlPush(
           settled.status === "fulfilled"
             ? (settled.value.result as { ok: false; error: string }).error
             : String((settled as PromiseRejectedResult).reason);
-        failed_people.push(candidate?.displayName || "unknown");
+        const name = candidate?.displayName || "unknown";
+        failed_people.push(name);
+        failed.push({ name, reason });
         if (candidate) failedPersonIds.push(candidate.id);
         // platform_pushes has no column for a failed attempt, so this is the
         // only place a failure's actual cause (vs. just "who failed") is
@@ -317,9 +358,10 @@ export async function runPeopleGhlPush(
     skipped,
     pushed,
     created,
-    tagAppended,
+    updated,
     errors,
     failed_people,
+    failed,
     succeededPersonIds,
     failedPersonIds,
     nextOffset,

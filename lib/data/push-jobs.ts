@@ -27,6 +27,12 @@ export interface PushJob {
   total: number;
   processed: number;
   succeeded: number;
+  /** Of `succeeded`, records this run pushed for the first time (no prior
+   * platform_pushes row). `succeeded === created + updated`. */
+  created: number;
+  /** Of `succeeded`, records that already had a platform_pushes row before
+   * this run wrote it. Defaults to 0 for rows that predate the columns. */
+  updated: number;
   failed: number;
   failures: PushJobFailure[];
   cursor: Record<string, unknown> | null;
@@ -74,12 +80,31 @@ export interface RecordJobPersonOutcome {
   outcome: "succeeded" | "failed";
 }
 
-const PUSH_JOB_COLUMNS =
+/** Every push_jobs column EXCEPT the created/updated split — those are added by
+ * a migration (push-jobs.sql) that must be applied by hand in the Supabase SQL
+ * editor, so they may be absent on a DB that hasn't run it yet. */
+const PUSH_JOB_BASE_COLUMNS =
   "id,client_id,platform,entity,action,campaign_id,niche,filters,options,status,total,processed,succeeded,failed,failures,cursor,error,triggered_by_user_id,triggered_by_email,created_at,started_at,finished_at";
 
-/** listPushJobs' select — the base columns plus the joined client, so the
- * Push Activity panel can show the client name in one round-trip. */
-const PUSH_JOB_LIST_COLUMNS = `${PUSH_JOB_COLUMNS},client:clients(id,name)`;
+/** Whether push_jobs.created/updated exist in the live DB. Probed once and
+ * cached: until the created/updated migration is applied, naming those columns
+ * in a select or update would raise 42703 and crash the Push Activity panel /
+ * enqueue path. Detecting their presence lets every query degrade to a
+ * created/updated of 0 instead (feedback item 2b's graceful-absence guard). */
+let createdUpdatedColumnsExist: boolean | null = null;
+async function hasCreatedUpdatedColumns(): Promise<boolean> {
+  if (createdUpdatedColumnsExist === null) {
+    const { error } = await supabaseAdmin.from("push_jobs").select("created,updated").limit(1);
+    createdUpdatedColumnsExist = !error;
+  }
+  return createdUpdatedColumnsExist;
+}
+
+/** The push_jobs select list, including created/updated only when those columns
+ * exist. `toPushJob` defaults them to 0 when the select omits them. */
+async function pushJobColumns(): Promise<string> {
+  return (await hasCreatedUpdatedColumns()) ? `${PUSH_JOB_BASE_COLUMNS},created,updated` : PUSH_JOB_BASE_COLUMNS;
+}
 
 interface RawPushJob {
   id: string;
@@ -95,6 +120,8 @@ interface RawPushJob {
   total: number;
   processed: number;
   succeeded: number;
+  created: number | null;
+  updated: number | null;
   failed: number;
   failures: PushJobFailure[];
   cursor: Record<string, unknown> | null;
@@ -121,6 +148,10 @@ function toPushJob(raw: RawPushJob): PushJob {
     total: raw.total,
     processed: raw.processed,
     succeeded: raw.succeeded,
+    // Default to 0 so a row that predates the created/updated columns (or a
+    // select that omits them) never surfaces as undefined/NaN in the panel.
+    created: raw.created ?? 0,
+    updated: raw.updated ?? 0,
     failed: raw.failed,
     failures: raw.failures ?? [],
     cursor: raw.cursor,
@@ -150,7 +181,7 @@ export async function createPushJob(input: CreatePushJobInput): Promise<PushJob>
       triggered_by_user_id: input.triggeredByUserId ?? null,
       triggered_by_email: input.triggeredByEmail ?? null,
     })
-    .select(PUSH_JOB_COLUMNS)
+    .select(await pushJobColumns())
     .single();
   if (error) throw error;
   return toPushJob(data as unknown as RawPushJob);
@@ -158,7 +189,7 @@ export async function createPushJob(input: CreatePushJobInput): Promise<PushJob>
 
 /** Fetches a single push job by id, or null if it doesn't exist. */
 export async function getPushJob(id: string): Promise<PushJob | null> {
-  const { data, error } = await supabaseAdmin.from("push_jobs").select(PUSH_JOB_COLUMNS).eq("id", id).single();
+  const { data, error } = await supabaseAdmin.from("push_jobs").select(await pushJobColumns()).eq("id", id).single();
   if (error) {
     if (error.code === "PGRST116") return null;
     throw error;
@@ -291,7 +322,15 @@ export async function resetStaleRunningJobs(staleSeconds = 600): Promise<number>
 /** Updates the live progress counters a running job reports mid-run. */
 export async function updateJobProgress(
   id: string,
-  progress: { total?: number; processed: number; succeeded: number; failed: number; cursor?: Record<string, unknown> | null }
+  progress: {
+    total?: number;
+    processed: number;
+    succeeded: number;
+    created?: number;
+    updated?: number;
+    failed: number;
+    cursor?: Record<string, unknown> | null;
+  }
 ): Promise<void> {
   const update: Record<string, unknown> = {
     processed: progress.processed,
@@ -304,6 +343,12 @@ export async function updateJobProgress(
     started_at: new Date().toISOString(),
   };
   if (progress.total !== undefined) update.total = progress.total;
+  // Only write created/updated when the columns exist, so a DB that predates
+  // the migration keeps advancing progress instead of 42703-ing mid-run.
+  if (await hasCreatedUpdatedColumns()) {
+    if (progress.created !== undefined) update.created = progress.created;
+    if (progress.updated !== undefined) update.updated = progress.updated;
+  }
   if (progress.cursor !== undefined) update.cursor = progress.cursor;
 
   const { error } = await supabaseAdmin.from("push_jobs").update(update).eq("id", id);
@@ -316,30 +361,46 @@ export async function finishJob(
   id: string,
   result: {
     status: Exclude<PushJobStatus, "queued" | "running">;
+    /** Records selected. Persisted here because a small job that finishes in a
+     * single tick returns `done: true` before updateJobProgress (the only other
+     * writer of `total`) ever runs, which otherwise left `total` at its DB
+     * default of 0 → the panel's "Total selected: 0" bug (feedback item 2a). */
+    total?: number;
+    /** Records attempted. Set equal to `total` at completion by the worker. */
+    processed?: number;
     succeeded: number;
+    created?: number;
+    updated?: number;
     failed: number;
     failures?: PushJobFailure[];
     error?: string | null;
   }
 ): Promise<void> {
-  const { error } = await supabaseAdmin
-    .from("push_jobs")
-    .update({
-      status: result.status,
-      succeeded: result.succeeded,
-      failed: result.failed,
-      failures: result.failures ?? [],
-      error: result.error ?? null,
-      finished_at: new Date().toISOString(),
-    })
-    .eq("id", id);
+  const update: Record<string, unknown> = {
+    status: result.status,
+    succeeded: result.succeeded,
+    failed: result.failed,
+    failures: result.failures ?? [],
+    error: result.error ?? null,
+    finished_at: new Date().toISOString(),
+  };
+  if (result.total !== undefined) update.total = result.total;
+  if (result.processed !== undefined) update.processed = result.processed;
+  // See updateJobProgress: skip created/updated when the migration is unapplied.
+  if (await hasCreatedUpdatedColumns()) {
+    if (result.created !== undefined) update.created = result.created;
+    if (result.updated !== undefined) update.updated = result.updated;
+  }
+
+  const { error } = await supabaseAdmin.from("push_jobs").update(update).eq("id", id);
   if (error) throw error;
 }
 
 /** Paginated push jobs, newest first, joined to their client, for the Push
  * Activity panel (#122). */
 export async function listPushJobs(filters: PushJobFilters = {}, limit = 50, offset = 0): Promise<PushJobListResult> {
-  let query = supabaseAdmin.from("push_jobs").select(PUSH_JOB_LIST_COLUMNS, { count: "exact" });
+  const listColumns = `${await pushJobColumns()},client:clients(id,name)`;
+  let query = supabaseAdmin.from("push_jobs").select(listColumns, { count: "exact" });
 
   if (filters.clientId) query = query.eq("client_id", filters.clientId);
   if (filters.platform) query = query.eq("platform", filters.platform);

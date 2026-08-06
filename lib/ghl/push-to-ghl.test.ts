@@ -214,8 +214,9 @@ describe("runPeopleGhlPush", () => {
     expect(result.eligible).toBe(2);
     expect(result.skipped).toBe(1);
     expect(result.pushed).toBe(2);
+    // Fresh people with no prior platform_pushes row → both classified created.
     expect(result.created).toBe(2);
-    expect(result.tagAppended).toBe(0);
+    expect(result.updated).toBe(0);
     expect(result.errors).toBe(0);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
@@ -311,9 +312,11 @@ describe("runPeopleGhlPush", () => {
     expect(result.eligible).toBe(3);
     expect(result.pushed).toBe(2);
     expect(result.created).toBe(2);
-    expect(result.tagAppended).toBe(0);
+    expect(result.updated).toBe(0);
     expect(result.errors).toBe(1);
     expect(result.failed_people).toContain("Bad Contact");
+    // Per-record failure reason is threaded through (feedback item 2c).
+    expect(result.failed).toContainEqual({ name: "Bad Contact", reason: expect.stringContaining("invalid api key") });
   });
 
   it("returns an all-zero result for an empty filter match", async () => {
@@ -329,9 +332,10 @@ describe("runPeopleGhlPush", () => {
       skipped: 0,
       pushed: 0,
       created: 0,
-      tagAppended: 0,
+      updated: 0,
       errors: 0,
       failed_people: [],
+      failed: [],
       succeededPersonIds: [],
       failedPersonIds: [],
       nextOffset: 0,
@@ -349,38 +353,41 @@ describe("runPeopleGhlPush", () => {
     ).rejects.toThrow("GHL credentials");
   });
 
-  it("counts a deduped (tag-appended) push separately from a created one", async () => {
-    const niche = unique("dedupe");
+  it("classifies a record with a prior platform_pushes row as updated, a first-time one as created", async () => {
+    // Created vs updated uses the DB-side platform_pushes pre-existence
+    // heuristic (uniform across every push surface, feedback item 2b), not
+    // GHL's own new-vs-deduped signal: a record with a prior (person, client,
+    // "ghl") row before this run is "updated", the rest "created".
+    const niche = unique("created-updated");
     await seedPeople(niche, [
       { slug: "new", phoneType: "mobile" },
-      { slug: "dupe", phoneType: "mobile", fullName: "Dupe Contact" },
+      { slug: "existing", phoneType: "mobile" },
     ]);
     const client = await insertClient();
 
-    const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => {
-      const body = JSON.parse((init?.body as string) ?? "{}");
-      if (typeof url === "string" && url.includes("/tags")) {
-        return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
-      }
-      if (body.firstName === "Dupe Contact") {
-        return {
-          ok: false,
-          status: 400,
-          json: async () => ({ meta: { contactId: "existing_contact" } }),
-        } as unknown as Response;
-      }
-      return {
-        ok: true,
-        status: 201,
-        json: async () => ({ contact: { id: "contact_new" } }),
-      } as unknown as Response;
-    }) as unknown as typeof fetch;
+    // Seed a prior push for the "existing" person so the heuristic sees a
+    // pre-existing row and classifies it as updated.
+    const { data: existingPerson } = await supabaseAdmin
+      .from("people")
+      .select("id")
+      .eq("linkedin_url", testLinkedin(`${niche}-existing`))
+      .single();
+    const { error: seedError } = await supabaseAdmin.from("platform_pushes").insert({
+      person_id: existingPerson!.id as string,
+      client_id: client.id,
+      platform: "ghl",
+      platform_contact_id: "prior_contact",
+      pushed_at: new Date().toISOString(),
+      pushed_by_user_id: testActor.id,
+      pushed_by_email: testActor.email,
+    });
+    if (seedError) throw seedError;
 
-    const result = await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
+    const result = await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl: okFetch() });
 
     expect(result.pushed).toBe(2);
     expect(result.created).toBe(1);
-    expect(result.tagAppended).toBe(1);
+    expect(result.updated).toBe(1);
     expect(result.errors).toBe(0);
   });
 

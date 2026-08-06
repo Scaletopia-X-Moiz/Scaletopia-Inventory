@@ -34,6 +34,15 @@ async function cleanupAll() {
 beforeAll(cleanupAll);
 afterAll(cleanupAll);
 
+/** The created/updated split columns are added by a migration that must be
+ * applied by hand in the Supabase SQL editor (push-jobs.sql). Until it runs,
+ * the data layer degrades to created/updated of 0; these tests assert the real
+ * persisted values only when the columns are present. */
+async function createdUpdatedColumnsPresent(): Promise<boolean> {
+  const { error } = await supabaseAdmin.from("push_jobs").select("created,updated").limit(1);
+  return !error;
+}
+
 let counter = 0;
 function unique(label: string): string {
   counter++;
@@ -178,32 +187,51 @@ describe("push-jobs data access", () => {
     const clientId = await insertClient(unique("Client"));
     const job = await createPushJob({ clientId, platform: "ghl", entity: "people", filters: {} });
 
-    await updateJobProgress(job.id, { total: 100, processed: 40, succeeded: 38, failed: 2 });
+    await updateJobProgress(job.id, { total: 100, processed: 40, succeeded: 38, created: 30, updated: 8, failed: 2 });
 
     const updated = await getPushJob(job.id);
     expect(updated?.total).toBe(100);
     expect(updated?.processed).toBe(40);
     expect(updated?.succeeded).toBe(38);
     expect(updated?.failed).toBe(2);
+    // created/updated split persisted alongside succeeded (feedback item 2b) —
+    // only once the migration is applied; otherwise the layer defaults to 0.
+    if (await createdUpdatedColumnsPresent()) {
+      expect(updated?.created).toBe(30);
+      expect(updated?.updated).toBe(8);
+    }
   });
 
-  it("finishes a job with a terminal status and failure list", async () => {
+  it("finishes a job with a terminal status, persisting total/processed and the created/updated split", async () => {
     const clientId = await insertClient(unique("Client"));
     const job = await createPushJob({ clientId, platform: "ghl", entity: "people", filters: {} });
 
     await finishJob(job.id, {
       status: "partial",
+      total: 10,
+      processed: 10,
       succeeded: 8,
+      created: 5,
+      updated: 3,
       failed: 2,
       failures: [{ name: "Jane Doe", reason: "duplicate email" }],
     });
 
     const finished = await getPushJob(job.id);
     expect(finished?.status).toBe("partial");
+    // total/processed persist regardless (they predate the split) so the panel
+    // never shows "Total selected: 0" for a single-tick job (feedback item 2a).
+    expect(finished?.total).toBe(10);
+    expect(finished?.processed).toBe(10);
     expect(finished?.succeeded).toBe(8);
     expect(finished?.failed).toBe(2);
     expect(finished?.failures).toEqual([{ name: "Jane Doe", reason: "duplicate email" }]);
     expect(finished?.finishedAt).not.toBeNull();
+    // The created/updated split needs the migration applied (feedback item 2b).
+    if (await createdUpdatedColumnsPresent()) {
+      expect(finished?.created).toBe(5);
+      expect(finished?.updated).toBe(3);
+    }
   });
 
   it("lists jobs newest first, filterable by client/platform/status", async () => {

@@ -350,6 +350,9 @@ describe("runPeopleAddToEmailBison", () => {
 
     expect(result.total_matched).toBe(2);
     expect(result.pushed).toBe(2);
+    // Fresh people with no prior platform_pushes row → both classified created.
+    expect(result.created).toBe(2);
+    expect(result.updated).toBe(0);
     expect(result.errors).toBe(0);
     expect(result.failed_people).toEqual([]);
 
@@ -385,11 +388,17 @@ describe("runPeopleAddToEmailBison", () => {
       fetchImpl: okFetch(),
     });
     expect(first.pushed).toBe(1);
+    // First push: no prior row → created.
+    expect(first.created).toBe(1);
+    expect(first.updated).toBe(0);
 
     const second = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, {
       fetchImpl: okFetch(),
     });
     expect(second.pushed).toBe(1);
+    // Second push: the platform_pushes row now pre-exists → updated.
+    expect(second.created).toBe(0);
+    expect(second.updated).toBe(1);
 
     const { data: person } = await supabaseAdmin
       .from("people")
@@ -516,6 +525,8 @@ describe("runPeopleAddToEmailBison", () => {
     expect(result).toEqual({
       total_matched: 0,
       pushed: 0,
+      created: 0,
+      updated: 0,
       errors: 0,
       failed_people: [],
       failed: [],
@@ -584,6 +595,8 @@ describe("runCompaniesAddToEmailBison", () => {
     expect(result).toEqual({
       total_matched: 0,
       pushed: 0,
+      created: 0,
+      updated: 0,
       errors: 0,
       failed_people: [],
       failed: [],
@@ -820,6 +833,8 @@ describe("runPeopleAddToCampaign", () => {
     expect(result).toEqual({
       total_matched: 0,
       attached: 0,
+      created: 0,
+      updated: 0,
       errors: 0,
       failed_people: [],
       failed: [],

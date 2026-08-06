@@ -44,6 +44,13 @@ export interface EmailBisonPushFailure {
 export interface EmailBisonPushResult {
   total_matched: number;
   pushed: number;
+  /** Of the successful pushes, records with no prior platform_pushes row for
+   * (person_id, client_id, "emailbison") before this call wrote it. */
+  created: number;
+  /** Of the successful pushes, records that already had such a row. Together
+   * `created + updated === pushed`. See the classification comment in
+   * writePushRows for why this DB-side heuristic is used. */
+  updated: number;
   errors: number;
   /** Display names of people whose push failed, one per failed record. */
   failed_people: string[];
@@ -234,8 +241,26 @@ async function writePushRows(
   outcomes: PushOutcome[],
   client: ClientRow,
   actor: Pick<SessionUser, "id" | "email">
-): Promise<{ written: PushOutcome[]; failed: FailedRecord[] }> {
-  if (outcomes.length === 0) return { written: [], failed: [] };
+): Promise<{ written: PushOutcome[]; failed: FailedRecord[]; createdIds: string[]; updatedIds: string[] }> {
+  if (outcomes.length === 0) return { written: [], failed: [], createdIds: [], updatedIds: [] };
+
+  // Created vs updated (feedback item 2b): EmailBison's upsert response only
+  // returns {id, email} and can't tell us whether a lead was new or existing
+  // (api-research.md leaves the response shape unconfirmed), so we classify
+  // DB-side and uniformly across every push path — a record is "updated" if a
+  // platform_pushes row for (person_id, client_id, platform) already exists
+  // BEFORE this batch's upsert writes it, else "created". Snapshot that set now,
+  // ahead of the writes below.
+  const { data: existingRows } = await supabaseAdmin
+    .from("platform_pushes")
+    .select("person_id")
+    .eq("client_id", client.id)
+    .eq("platform", PLATFORM)
+    .in(
+      "person_id",
+      outcomes.map((o) => o.candidate.id)
+    );
+  const preExisting = new Set((existingRows ?? []).map((r) => r.person_id as string));
 
   const pushedAt = new Date().toISOString();
   const settled = await Promise.allSettled(
@@ -266,9 +291,16 @@ async function writePushRows(
 
   const written: PushOutcome[] = [];
   const failed: FailedRecord[] = [];
+  const createdIds: string[] = [];
+  const updatedIds: string[] = [];
   settled.forEach((result, i) => {
     if (result.status === "fulfilled") {
       written.push(result.value);
+      if (preExisting.has(result.value.candidate.id)) {
+        updatedIds.push(result.value.candidate.id);
+      } else {
+        createdIds.push(result.value.candidate.id);
+      }
     } else {
       const outcome = outcomes[i];
       failed.push({
@@ -278,7 +310,7 @@ async function writePushRows(
       });
     }
   });
-  return { written, failed };
+  return { written, failed, createdIds, updatedIds };
 }
 
 interface EmailBisonEntity<TFilters> {
@@ -292,6 +324,10 @@ interface WorkspaceUpsertOutcome {
   /** EmailBison lead id per successfully-upserted-and-written person. */
   leadIdByPersonId: Map<string, string>;
   pushed: number;
+  /** Of `pushed`, how many had no prior platform_pushes row (created) vs. one
+   * that already existed (updated) — see writePushRows. */
+  created: number;
+  updated: number;
   errors: number;
   failed_people: string[];
   failed: EmailBisonPushFailure[];
@@ -325,6 +361,8 @@ async function upsertCandidatesToWorkspace(
 ): Promise<WorkspaceUpsertOutcome> {
   const leadIdByPersonId = new Map<string, string>();
   let pushed = 0;
+  let created = 0;
+  let updated = 0;
   let errors = 0;
   let done = 0;
   const failed_people: string[] = [];
@@ -360,8 +398,14 @@ async function upsertCandidatesToWorkspace(
         continue;
       }
 
-      const { written, failed: writeFailed } = await writePushRows(outcome.value.pushed, client, actor);
+      const { written, failed: writeFailed, createdIds, updatedIds } = await writePushRows(
+        outcome.value.pushed,
+        client,
+        actor
+      );
       pushed += written.length;
+      created += createdIds.length;
+      updated += updatedIds.length;
       for (const w of written) {
         leadIdByPersonId.set(w.candidate.id, w.leadId);
         succeededPersonIds.push(w.candidate.id);
@@ -384,7 +428,7 @@ async function upsertCandidatesToWorkspace(
     }
   }
 
-  return { leadIdByPersonId, pushed, errors, failed_people, failed, succeededPersonIds, failedPersonIds, attempted: done };
+  return { leadIdByPersonId, pushed, created, updated, errors, failed_people, failed, succeededPersonIds, failedPersonIds, attempted: done };
 }
 
 /** Creates or updates every candidate in the current filtered view as an
@@ -426,6 +470,8 @@ async function runEmailBisonAddToWorkspace<TFilters>(
     return {
       total_matched: 0,
       pushed: 0,
+      created: 0,
+      updated: 0,
       errors: 0,
       failed_people: [],
       failed: [],
@@ -444,7 +490,7 @@ async function runEmailBisonAddToWorkspace<TFilters>(
 
   onProgress?.({ phase: "pushing", done: offset, total: candidates.length, pushed: 0, errors: 0 });
 
-  const { pushed, errors, failed_people, failed, succeededPersonIds, failedPersonIds, attempted } =
+  const { pushed, created, updated, errors, failed_people, failed, succeededPersonIds, failedPersonIds, attempted } =
     await upsertCandidatesToWorkspace(
       remaining,
       entity.label,
@@ -471,7 +517,7 @@ async function runEmailBisonAddToWorkspace<TFilters>(
 
   onProgress?.({ phase: "done", done: nextOffset, total: candidates.length, pushed, errors });
 
-  return { total_matched, pushed, errors, failed_people, failed, succeededPersonIds, failedPersonIds, nextOffset, done: isDone };
+  return { total_matched, pushed, created, updated, errors, failed_people, failed, succeededPersonIds, failedPersonIds, nextOffset, done: isDone };
 }
 
 /** Add to EmailBison, triggered from the People table. */
@@ -511,6 +557,13 @@ export function runCompaniesAddToEmailBison(
 export interface EmailBisonCampaignPushResult {
   total_matched: number;
   attached: number;
+  /** Of the attached records, those with no prior platform_pushes row before
+   * this campaign run — same DB-side heuristic as the workspace push, keyed on
+   * the pre-existing rows looked up at the top of the run. */
+  created: number;
+  /** Of the attached records, those that already had a platform_pushes row.
+   * `created + updated === attached`. */
+  updated: number;
   errors: number;
   /** Display names of people whose add-to-workspace step or campaign attach
    * failed, one per failed record. */
@@ -606,6 +659,8 @@ async function runEmailBisonAddToCampaign<TFilters>(
     return {
       total_matched: 0,
       attached: 0,
+      created: 0,
+      updated: 0,
       errors: 0,
       failed_people: [],
       failed: [],
@@ -632,6 +687,12 @@ async function runEmailBisonAddToCampaign<TFilters>(
   if (lookupError) throw lookupError;
 
   const leadIdByPersonId = new Map<string, string>();
+  // Created vs updated (feedback item 2b), same DB-side heuristic as the
+  // workspace push: a candidate that already had ANY platform_pushes row for
+  // this (client, platform) before this run is "updated", the rest "created".
+  // `existingRows` is exactly that pre-existing set, so snapshot its person_ids
+  // here — before the attach step writes/updates rows below.
+  const preExistingPersonIds = new Set((existingRows ?? []).map((r) => r.person_id as string));
   for (const row of existingRows ?? []) {
     if (row.platform_contact_id) {
       leadIdByPersonId.set(row.person_id as string, row.platform_contact_id as string);
@@ -677,6 +738,8 @@ async function runEmailBisonAddToCampaign<TFilters>(
     return {
       total_matched,
       attached: 0,
+      created: 0,
+      updated: 0,
       errors,
       failed_people,
       failed,
@@ -690,6 +753,8 @@ async function runEmailBisonAddToCampaign<TFilters>(
   onProgress?.({ phase: "attaching", done: 0, total: attachable.length, attached: 0, errors });
 
   let attached = 0;
+  let created = 0;
+  let updated = 0;
   const succeededPersonIds: string[] = [];
   try {
     const attachResult = await attachLeadsToCampaign(
@@ -724,6 +789,10 @@ async function runEmailBisonAddToCampaign<TFilters>(
     }
 
     attached = attachedCandidates.length;
+    for (const c of attachedCandidates) {
+      if (preExistingPersonIds.has(c.id)) updated++;
+      else created++;
+    }
     succeededPersonIds.push(...attachedCandidates.map((c) => c.id));
 
     if (unattachedCandidates.length > 0) {
@@ -752,7 +821,7 @@ async function runEmailBisonAddToCampaign<TFilters>(
 
   onProgress?.({ phase: "done", done: nextOffset, total: total_matched, attached, errors });
 
-  return { total_matched, attached, errors, failed_people, failed, succeededPersonIds, failedPersonIds, nextOffset, done: isDone };
+  return { total_matched, attached, created, updated, errors, failed_people, failed, succeededPersonIds, failedPersonIds, nextOffset, done: isDone };
 }
 
 /** Add to Campaign, triggered from the People table. */
