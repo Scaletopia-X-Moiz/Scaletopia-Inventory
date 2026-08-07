@@ -436,7 +436,7 @@ export function PushToEmailBisonButton({
             </div>
           </AlertDialog.Content>
         ) : step === "options" ? (
-          <AlertDialog.Content className="fixed top-[15%] left-1/2 z-50 w-full max-w-lg -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
+          <AlertDialog.Content className="fixed top-[10%] left-1/2 z-50 max-h-[80vh] w-full max-w-lg -translate-x-1/2 overflow-y-auto rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
             <AlertDialog.Title className="text-sm font-semibold text-ink">
               Lead behavior &amp; custom variables
             </AlertDialog.Title>
