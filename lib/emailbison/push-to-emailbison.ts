@@ -141,7 +141,7 @@ async function ensureCustomVariablesExist(
   if (missing.length === 0) return;
 
   const created = await Promise.all(missing.map((name) => createCustomVariable(credentials, name, { fetchImpl })));
-  await appendEmailBisonCustomVariablesCache(credentials.workspaceId, created);
+  await appendEmailBisonCustomVariablesCache(credentials.apiKey, created);
 }
 
 interface FailedRecord {

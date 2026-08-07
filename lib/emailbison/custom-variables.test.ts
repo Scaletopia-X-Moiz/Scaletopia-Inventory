@@ -64,6 +64,33 @@ describe("getEmailBisonCustomVariables", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
+  it("caches independently per API key even when the workspaceId (shared base URL) is the same", async () => {
+    // All 15 real clients share one emailbison_workspace_id (the shared
+    // send.scaletopia.io host) and are differentiated only by apiKey — the
+    // cache must key off apiKey or every client after the first would be
+    // served the first client's custom-variable list (the bug this guards).
+    const CLIENT_1 = { apiKey: "client-1-key", workspaceId: "https://send.scaletopia.io" };
+    const CLIENT_2 = { apiKey: "client-2-key", workspaceId: "https://send.scaletopia.io" };
+
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, { data: [{ id: "v1", name: "client_1_var" }] }))
+      .mockResolvedValueOnce(jsonResponse(200, { data: [{ id: "v2", name: "client_2_var" }] }));
+
+    const client1Vars = await getEmailBisonCustomVariables(CLIENT_1, { fetchImpl });
+    const client2Vars = await getEmailBisonCustomVariables(CLIENT_2, { fetchImpl });
+
+    expect(client1Vars).toEqual([{ id: "v1", name: "client_1_var" }]);
+    expect(client2Vars).toEqual([{ id: "v2", name: "client_2_var" }]);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+    // Same apiKey still de-dupes into a single fetch, even with that shared
+    // workspaceId — the existing caching behavior is preserved.
+    const client1VarsAgain = await getEmailBisonCustomVariables(CLIENT_1, { fetchImpl });
+    expect(client1VarsAgain).toEqual([{ id: "v1", name: "client_1_var" }]);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   it("throws EmailBisonApiError on a failed fetch and does not cache the failure", async () => {
     const fetchImpl = vi
       .fn()
@@ -82,7 +109,7 @@ describe("appendEmailBisonCustomVariablesCache", () => {
   it("seeds the cache when nothing has been fetched yet for the workspace", async () => {
     const fetchImpl = vi.fn();
 
-    await appendEmailBisonCustomVariablesCache(WORKSPACE_A.workspaceId, [{ id: "v1", name: "new_var" }]);
+    await appendEmailBisonCustomVariablesCache(WORKSPACE_A.apiKey, [{ id: "v1", name: "new_var" }]);
     const variables = await getEmailBisonCustomVariables(WORKSPACE_A, { fetchImpl });
 
     expect(variables).toEqual([{ id: "v1", name: "new_var" }]);
@@ -95,7 +122,7 @@ describe("appendEmailBisonCustomVariablesCache", () => {
     const first = await getEmailBisonCustomVariables(WORKSPACE_A, { fetchImpl });
     expect(first).toEqual([{ id: "v1", name: "existing" }]);
 
-    await appendEmailBisonCustomVariablesCache(WORKSPACE_A.workspaceId, [{ id: "v2", name: "brand_new" }]);
+    await appendEmailBisonCustomVariablesCache(WORKSPACE_A.apiKey, [{ id: "v2", name: "brand_new" }]);
     const second = await getEmailBisonCustomVariables(WORKSPACE_A, { fetchImpl });
 
     expect(second).toEqual([
@@ -108,7 +135,7 @@ describe("appendEmailBisonCustomVariablesCache", () => {
   it("is a no-op when given an empty list", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { data: [] }));
 
-    await appendEmailBisonCustomVariablesCache(WORKSPACE_A.workspaceId, []);
+    await appendEmailBisonCustomVariablesCache(WORKSPACE_A.apiKey, []);
     const variables = await getEmailBisonCustomVariables(WORKSPACE_A, { fetchImpl });
 
     expect(variables).toEqual([]);
@@ -122,7 +149,7 @@ describe("appendEmailBisonCustomVariablesCache", () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(401, { message: "invalid api key" }));
     await expect(getEmailBisonCustomVariables(WORKSPACE_A, { fetchImpl })).rejects.toThrow(EmailBisonApiError);
 
-    await appendEmailBisonCustomVariablesCache(WORKSPACE_A.workspaceId, [{ id: "v1", name: "new_var" }]);
+    await appendEmailBisonCustomVariablesCache(WORKSPACE_A.apiKey, [{ id: "v1", name: "new_var" }]);
     const variables = await getEmailBisonCustomVariables(WORKSPACE_A, { fetchImpl });
 
     expect(variables).toEqual([{ id: "v1", name: "new_var" }]);

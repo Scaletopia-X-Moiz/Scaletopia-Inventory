@@ -267,6 +267,69 @@ describe("listCustomVariables", () => {
     const [url] = fetchImpl.mock.calls[0];
     expect(url).toBe(`${CREDENTIALS.workspaceId}/api/custom-variables`);
   });
+
+  it("walks every page and concatenates results when the workspace has more than one page of custom variables (27 vars / 15 per page)", async () => {
+    const page1Items = Array.from({ length: 15 }, (_, i) => ({ id: i + 1, name: `var_${i + 1}` }));
+    const page2Items = Array.from({ length: 12 }, (_, i) => ({ id: i + 16, name: `var_${i + 16}` }));
+
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("page=2")) {
+        return jsonResponse(200, {
+          data: page2Items,
+          links: { first: "...", last: "...", prev: "...", next: null },
+          meta: { current_page: 2, last_page: 2, per_page: 15, total: 27 },
+        });
+      }
+      return jsonResponse(200, {
+        data: page1Items,
+        links: { first: "...", last: "...", prev: null, next: "...?page=2" },
+        meta: { current_page: 1, last_page: 2, per_page: 15, total: 27 },
+      });
+    });
+
+    const result = await listCustomVariables(CREDENTIALS, { fetchImpl });
+
+    expect(result).toHaveLength(27);
+    expect(result[0]).toEqual({ id: "1", name: "var_1" });
+    expect(result[26]).toEqual({ id: "27", name: "var_27" });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const [firstUrl] = fetchImpl.mock.calls[0];
+    const [secondUrl] = fetchImpl.mock.calls[1];
+    expect(firstUrl).toBe(`${CREDENTIALS.workspaceId}/api/custom-variables`);
+    expect(secondUrl).toBe(`${CREDENTIALS.workspaceId}/api/custom-variables?page=2`);
+  });
+
+  it("makes only one fetch call for a single-page workspace (last_page: 1)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ id: 5, name: "industry" }],
+        links: { first: "...", last: "...", prev: null, next: null },
+        meta: { current_page: 1, last_page: 1, per_page: 15, total: 1 },
+      })
+    );
+
+    const result = await listCustomVariables(CREDENTIALS, { fetchImpl });
+
+    expect(result).toEqual([{ id: "5", name: "industry" }]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("strips a trailing slash from workspaceId so the request URL has a single slash before the path", async () => {
+    // One real client ("Testing") has emailbison_workspace_id stored with a
+    // trailing slash — without normalization this would build
+    // "https://send.scaletopia.io//api/custom-variables" (double slash) and
+    // 404 live.
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { data: [] }));
+    const trailingSlashCredentials: EmailBisonCredentials = {
+      ...CREDENTIALS,
+      workspaceId: "https://send.scaletopia.io/",
+    };
+
+    await listCustomVariables(trailingSlashCredentials, { fetchImpl });
+
+    const [url] = fetchImpl.mock.calls[0];
+    expect(url).toBe("https://send.scaletopia.io/api/custom-variables");
+  });
 });
 
 describe("createCustomVariable", () => {

@@ -73,10 +73,13 @@ interface RawResponse {
 
 /** Shared retry/backoff loop for EmailBison requests, mirroring
  * lib/ghl/client.ts's requestWithMethodRetry. `credentials.workspaceId` holds
- * the workspace's base URL (e.g. "https://dedi.emailbison.com") rather than a
- * numeric id — the base-URL-per-workspace scheme is unconfirmed against a
- * live token (api-research.md), so this is a best-effort read of
- * `emailbison_workspace_id` until that's verified. */
+ * the base URL of the shared EmailBison instance (e.g.
+ * "https://send.scaletopia.io") rather than a numeric id — a workspace is
+ * actually scoped by the API token (`credentials.apiKey`), not this URL, but
+ * the URL is still needed to reach the instance. A trailing slash on
+ * `workspaceId` (e.g. from how it was entered in the client's settings)
+ * would otherwise double up with `path`'s leading slash and 404, so it's
+ * stripped before concatenating. */
 async function requestWithMethodRetry(
   fetchImpl: typeof fetch,
   credentials: EmailBisonCredentials,
@@ -88,7 +91,8 @@ async function requestWithMethodRetry(
   for (;;) {
     let resp: Response;
     try {
-      resp = await fetchImpl(`${credentials.workspaceId}${path}`, {
+      const baseUrl = credentials.workspaceId.replace(/\/$/, "");
+      resp = await fetchImpl(`${baseUrl}${path}`, {
         method,
         headers: emailBisonHeaders(credentials.apiKey),
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -360,19 +364,59 @@ function toCustomVariable(raw: unknown): EmailBisonCustomVariable | null {
   return { id: String(id), name };
 }
 
+/** Safety cap on pages walked by listCustomVariables — guards against an
+ * infinite loop if `meta.last_page` is ever malformed/misreported, while
+ * staying far above any real workspace's page count (27 vars / 15 per page
+ * = 2 pages for the workspace this was confirmed against). */
+const CUSTOM_VARIABLES_MAX_PAGES = 100;
+
 /** Lists the workspace's custom variables (`GET /api/custom-variables`) —
  * variable names must already exist before being referenced on a lead
- * upsert, so callers check this before createCustomVariable. */
+ * upsert, so callers check this before createCustomVariable.
+ *
+ * Confirmed live: this endpoint is paginated at 15 items/page and ignores
+ * `?per_page=`, so a workspace with more than 15 custom variables would be
+ * silently truncated to page 1 by a single GET (issue: truncation made
+ * ensureCustomVariablesExist in push-to-emailbison.ts think already-existing
+ * page-2+ variables were missing). Unlike listCampaigns/listSenderEmails,
+ * callers here don't want per-page pagination info — they want the full set
+ * — so this walks every page internally via `meta.last_page` and
+ * concatenates the results, falling back to just the first page if `meta` is
+ * missing/malformed rather than looping forever. */
 export async function listCustomVariables(
   credentials: EmailBisonCredentials,
   deps: EmailBisonClientDeps = {}
 ): Promise<EmailBisonCustomVariable[]> {
   const fetchImpl = deps.fetchImpl ?? fetch;
+
   const { status, json } = await requestGetWithRetry(fetchImpl, credentials, "/api/custom-variables");
   assertOk(status, json, "custom-variable list");
-  return extractArray(json)
+
+  const variables = extractArray(json)
     .map(toCustomVariable)
     .filter((variable): variable is EmailBisonCustomVariable => variable !== null);
+
+  const meta = json && typeof json === "object" ? (json as Record<string, unknown>).meta : null;
+  const lastPage = meta && typeof meta === "object" ? Number((meta as Record<string, unknown>).last_page) : NaN;
+
+  // No usable last_page (missing/malformed meta) — trust the single page we
+  // already have rather than guessing how many more to fetch.
+  if (Number.isNaN(lastPage) || lastPage <= 1) {
+    return variables;
+  }
+
+  const pagesToFetch = Math.min(lastPage, CUSTOM_VARIABLES_MAX_PAGES);
+  for (let page = 2; page <= pagesToFetch; page++) {
+    const pageResult = await requestGetWithRetry(fetchImpl, credentials, `/api/custom-variables?page=${page}`);
+    assertOk(pageResult.status, pageResult.json, "custom-variable list");
+    variables.push(
+      ...extractArray(pageResult.json)
+        .map(toCustomVariable)
+        .filter((variable): variable is EmailBisonCustomVariable => variable !== null)
+    );
+  }
+
+  return variables;
 }
 
 /** Creates a new custom variable by name (`POST /api/custom-variables`) —
