@@ -7,6 +7,7 @@ import {
   createCustomVariable,
   createCampaign,
   listSenderEmails,
+  listAllWarmupSenderEmails,
   attachSenderEmails,
   createCampaignSchedule,
   createSequenceSteps,
@@ -384,7 +385,18 @@ describe("listSenderEmails", () => {
   it("gets the paginated sender-email list", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse(200, {
-        data: [{ id: 1, name: "Sales", email: "sales@acme.com" }],
+        data: [
+          {
+            id: 1,
+            name: "Sales",
+            email: "sales@acme.com",
+            status: "Connected",
+            warmup_enabled: true,
+            daily_limit: 50,
+            type: "Inbox",
+            tags: [{ id: 3, name: "Cold", default: false }],
+          },
+        ],
         meta: { current_page: 1, last_page: 2 },
       })
     );
@@ -392,7 +404,18 @@ describe("listSenderEmails", () => {
     const result = await listSenderEmails(CREDENTIALS, 1, { fetchImpl });
 
     expect(result).toEqual({
-      senderEmails: [{ id: "1", name: "Sales", email: "sales@acme.com" }],
+      senderEmails: [
+        {
+          id: "1",
+          name: "Sales",
+          email: "sales@acme.com",
+          status: "Connected",
+          warmupEnabled: true,
+          dailyLimit: 50,
+          type: "Inbox",
+          tags: [{ id: "3", name: "Cold" }],
+        },
+      ],
       page: 1,
       hasMore: true,
     });
@@ -400,10 +423,124 @@ describe("listSenderEmails", () => {
     expect(url).toBe(`${CREDENTIALS.workspaceId}/api/sender-emails?page=1`);
   });
 
+  it("defaults optional fields to null/[] when the workspace omits them", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ id: 2, name: "Bare", email: "bare@acme.com" }],
+        meta: { current_page: 1, last_page: 1 },
+      })
+    );
+
+    const result = await listSenderEmails(CREDENTIALS, 1, { fetchImpl });
+
+    expect(result.senderEmails).toEqual([
+      {
+        id: "2",
+        name: "Bare",
+        email: "bare@acme.com",
+        status: null,
+        warmupEnabled: null,
+        dailyLimit: null,
+        type: null,
+        tags: [],
+      },
+    ]);
+  });
+
   it("throws a typed error on a non-transient failure", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(401, { message: "invalid token" }));
 
     await expect(listSenderEmails(CREDENTIALS, 1, { fetchImpl })).rejects.toThrow(EmailBisonApiError);
+  });
+});
+
+describe("listAllWarmupSenderEmails", () => {
+  it("gets the workspace's warmup stats", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            id: 1,
+            email: "sales@acme.com",
+            warmup_score: 92,
+            warmup_bounces_received_count: 0,
+            warmup_bounces_caused_count: 1,
+            warmup_disabled_for_bouncing_count: 0,
+          },
+        ],
+        meta: { current_page: 1, last_page: 1 },
+      })
+    );
+
+    const result = await listAllWarmupSenderEmails(CREDENTIALS, { fetchImpl });
+
+    expect(result).toEqual([
+      { id: "1", warmupScore: 92, warmupEnabled: null, bouncesReceived: 0, bouncesCaused: 1, disabledForBouncing: 0 },
+    ]);
+    const [url] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${CREDENTIALS.workspaceId}/api/warmup/sender-emails`);
+  });
+
+  it("walks every page and concatenates results when the workspace has more than one page of warmup stats (27 mailboxes / 15 per page)", async () => {
+    const page1Items = Array.from({ length: 15 }, (_, i) => ({ id: i + 1, warmup_score: 80 }));
+    const page2Items = Array.from({ length: 12 }, (_, i) => ({ id: i + 16, warmup_score: 10 }));
+
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("page=2")) {
+        return jsonResponse(200, {
+          data: page2Items,
+          meta: { current_page: 2, last_page: 2, per_page: 15, total: 27 },
+        });
+      }
+      return jsonResponse(200, {
+        data: page1Items,
+        meta: { current_page: 1, last_page: 2, per_page: 15, total: 27 },
+      });
+    });
+
+    const result = await listAllWarmupSenderEmails(CREDENTIALS, { fetchImpl });
+
+    expect(result).toHaveLength(27);
+    expect(result[0]).toEqual({
+      id: "1",
+      warmupScore: 80,
+      warmupEnabled: null,
+      bouncesReceived: null,
+      bouncesCaused: null,
+      disabledForBouncing: null,
+    });
+    expect(result[26]).toEqual({
+      id: "27",
+      warmupScore: 10,
+      warmupEnabled: null,
+      bouncesReceived: null,
+      bouncesCaused: null,
+      disabledForBouncing: null,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const [firstUrl] = fetchImpl.mock.calls[0];
+    const [secondUrl] = fetchImpl.mock.calls[1];
+    expect(firstUrl).toBe(`${CREDENTIALS.workspaceId}/api/warmup/sender-emails`);
+    expect(secondUrl).toBe(`${CREDENTIALS.workspaceId}/api/warmup/sender-emails?page=2`);
+  });
+
+  it("makes only one fetch call for a single-page workspace (last_page: 1)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ id: 1, warmup_score: 92 }],
+        meta: { current_page: 1, last_page: 1, per_page: 15, total: 1 },
+      })
+    );
+
+    await listAllWarmupSenderEmails(CREDENTIALS, { fetchImpl });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws a typed error on a non-transient failure", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(401, { message: "invalid token" }));
+
+    await expect(listAllWarmupSenderEmails(CREDENTIALS, { fetchImpl })).rejects.toThrow(EmailBisonApiError);
   });
 });
 

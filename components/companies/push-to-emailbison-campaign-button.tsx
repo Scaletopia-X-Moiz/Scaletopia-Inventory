@@ -7,7 +7,8 @@ import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
 import { fetchActiveClients } from "@/lib/data/active-clients-client";
 import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
-import type { EmailBisonCampaign, EmailBisonSenderEmail } from "@/lib/emailbison/client";
+import { SenderEmailPicker } from "@/components/emailbison/sender-email-picker";
+import type { EmailBisonCampaign } from "@/lib/emailbison/client";
 
 type DayKey = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
 
@@ -150,8 +151,6 @@ export function PushToEmailBisonCampaignButton({
   // alongside the existing campaign <select> in the `campaign` step.
   const [creatingCampaign, setCreatingCampaign] = useState(false);
   const [createForm, setCreateForm] = useState<CreateCampaignForm>(newCreateCampaignForm);
-  const [senderEmails, setSenderEmails] = useState<EmailBisonSenderEmail[] | null>(null);
-  const [senderEmailsError, setSenderEmailsError] = useState<string | null>(null);
   const [createCampaignError, setCreateCampaignError] = useState<string | null>(null);
   const [createCampaignBusy, setCreateCampaignBusy] = useState<"draft" | "launch" | null>(null);
 
@@ -183,8 +182,6 @@ export function PushToEmailBisonCampaignButton({
     setParallel(false);
     setCreatingCampaign(false);
     setCreateForm(newCreateCampaignForm());
-    setSenderEmails(null);
-    setSenderEmailsError(null);
     setCreateCampaignError(null);
     setCreateCampaignBusy(null);
   }
@@ -237,39 +234,17 @@ export function PushToEmailBisonCampaignButton({
     setStep("confirm");
   }
 
-  async function handleShowCreateCampaign() {
+  function handleShowCreateCampaign() {
     if (!selectedClient) return;
     setCreatingCampaign(true);
     setCreateForm(newCreateCampaignForm());
     setCreateCampaignError(null);
-    setSenderEmails(null);
-    setSenderEmailsError(null);
-
-    try {
-      const res = await fetch(`/api/clients/${selectedClient.id}/emailbison-sender-emails`);
-      if (!res.ok) throw new Error("Failed to load sender emails");
-      const data = (await res.json()) as { senderEmails: EmailBisonSenderEmail[] };
-      setSenderEmails(data.senderEmails);
-    } catch (error) {
-      setSenderEmailsError((error as Error).message || "Failed to load sender emails.");
-    }
   }
 
   function handleCancelCreateCampaign() {
     setCreatingCampaign(false);
     setCreateForm(newCreateCampaignForm());
     setCreateCampaignError(null);
-    setSenderEmails(null);
-    setSenderEmailsError(null);
-  }
-
-  function toggleSenderEmail(id: string) {
-    setCreateForm((form) => ({
-      ...form,
-      senderEmailIds: form.senderEmailIds.includes(id)
-        ? form.senderEmailIds.filter((existing) => existing !== id)
-        : [...form.senderEmailIds, id],
-    }));
   }
 
   function toggleDay(day: DayKey) {
@@ -335,8 +310,6 @@ export function PushToEmailBisonCampaignButton({
       setCampaigns((prev) => (prev ? [created, ...prev] : [created]));
       setCreatingCampaign(false);
       setCreateForm(newCreateCampaignForm());
-      setSenderEmails(null);
-      setSenderEmailsError(null);
     } catch (error) {
       setCreateCampaignError((error as Error).message || "Failed to create campaign.");
     } finally {
@@ -506,34 +479,14 @@ export function PushToEmailBisonCampaignButton({
                         Which of {selectedClient?.name}&apos;s connected mailboxes send from this
                         campaign.
                       </p>
-                      <div className="mt-2 flex max-h-32 flex-col gap-1 overflow-y-auto rounded-md border border-rule p-2">
-                        {senderEmailsError ? (
-                          <p className="text-xs text-danger">{senderEmailsError}</p>
-                        ) : senderEmails === null ? (
-                          <p className="flex items-center gap-2 text-xs text-ink-soft">
-                            <Loader2 size={12} className="animate-spin" />
-                            Loading sender emails…
-                          </p>
-                        ) : senderEmails.length === 0 ? (
-                          <p className="text-xs text-ink-mute">
-                            No sender emails connected in this workspace.
-                          </p>
-                        ) : (
-                          senderEmails.map((senderEmail) => (
-                            <label
-                              key={senderEmail.id}
-                              className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-xs hover:bg-hover"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={createForm.senderEmailIds.includes(senderEmail.id)}
-                                onChange={() => toggleSenderEmail(senderEmail.id)}
-                              />
-                              <span className="text-ink">{senderEmail.name}</span>
-                              <span className="text-ink-mute">{senderEmail.email}</span>
-                            </label>
-                          ))
-                        )}
+                      <div className="mt-2">
+                        {selectedClient ? (
+                          <SenderEmailPicker
+                            clientId={selectedClient.id}
+                            selectedIds={createForm.senderEmailIds}
+                            onChange={(senderEmailIds) => setCreateForm((form) => ({ ...form, senderEmailIds }))}
+                          />
+                        ) : null}
                       </div>
                     </div>
 

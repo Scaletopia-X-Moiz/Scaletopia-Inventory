@@ -459,16 +459,40 @@ export async function createCampaign(
   return campaign;
 }
 
+export interface EmailBisonSenderEmailTag {
+  id: string;
+  name: string;
+}
+
 export interface EmailBisonSenderEmail {
   id: string;
   name: string;
   email: string;
+  /** Connection status as reported by EmailBison (e.g. "Connected") — the
+   * `/api/sender-emails` query enum is connected | not_connected |
+   * pending_move | pending_deletion, but the list endpoint itself returns a
+   * free-form string, so this is read defensively rather than narrowed to a
+   * union. `null` when absent. */
+  status: string | null;
+  warmupEnabled: boolean | null;
+  dailyLimit: number | null;
+  type: string | null;
+  tags: EmailBisonSenderEmailTag[];
 }
 
 export interface ListSenderEmailsResult {
   senderEmails: EmailBisonSenderEmail[];
   page: number;
   hasMore: boolean;
+}
+
+function toSenderEmailTag(raw: unknown): EmailBisonSenderEmailTag | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const id = record.id;
+  const name = record.name;
+  if (id === undefined || id === null || typeof name !== "string") return null;
+  return { id: String(id), name };
 }
 
 function toSenderEmail(raw: unknown): EmailBisonSenderEmail | null {
@@ -478,12 +502,22 @@ function toSenderEmail(raw: unknown): EmailBisonSenderEmail | null {
   const name = record.name;
   const email = record.email;
   if (id === undefined || id === null || typeof name !== "string" || typeof email !== "string") return null;
-  return { id: String(id), name, email };
+
+  const status = typeof record.status === "string" ? record.status : null;
+  const warmupEnabled = typeof record.warmup_enabled === "boolean" ? record.warmup_enabled : null;
+  const dailyLimit = typeof record.daily_limit === "number" ? record.daily_limit : null;
+  const type = typeof record.type === "string" ? record.type : null;
+  const tags = Array.isArray(record.tags)
+    ? record.tags.map(toSenderEmailTag).filter((tag): tag is EmailBisonSenderEmailTag => tag !== null)
+    : [];
+
+  return { id: String(id), name, email, status, warmupEnabled, dailyLimit, type, tags };
 }
 
 /** Lists the workspace's sender emails (`GET /api/sender-emails`), same
  * paginated envelope as listCampaigns — confirmed live: `200` with
- * `{ data: [{ id, name, email, ... }] }`. */
+ * `{ data: [{ id, name, email, ... }] }`. Single page; callers that need
+ * the full set should use listAllSenderEmails. */
 export async function listSenderEmails(
   credentials: EmailBisonCredentials,
   page = 1,
@@ -503,6 +537,132 @@ export async function listSenderEmails(
   const hasMore = !Number.isNaN(currentPage) && !Number.isNaN(lastPage) ? currentPage < lastPage : false;
 
   return { senderEmails, page, hasMore };
+}
+
+/** Safety cap on pages walked by listAllSenderEmails — same rationale as
+ * CUSTOM_VARIABLES_MAX_PAGES: guards against an infinite loop on malformed
+ * `meta.last_page` while staying far above any real workspace. The
+ * sender-emails endpoint paginates at 15/page like custom-variables, so a
+ * workspace with >15 mailboxes was silently truncated to page 1 by the
+ * single-GET route (the create-campaign picker only ever showed the first
+ * ~15 senders). */
+const SENDER_EMAILS_MAX_PAGES = 200;
+
+/** Lists ALL of the workspace's sender emails, walking every page via
+ * `meta.last_page` and concatenating — the create-campaign picker needs the
+ * full set, not one page. Falls back to just the first page if `meta` is
+ * missing/malformed rather than looping forever. */
+export async function listAllSenderEmails(
+  credentials: EmailBisonCredentials,
+  deps: EmailBisonClientDeps = {}
+): Promise<EmailBisonSenderEmail[]> {
+  const first = await listSenderEmails(credentials, 1, deps);
+  const senderEmails = [...first.senderEmails];
+  if (!first.hasMore) return senderEmails;
+
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  for (let page = 2; page <= SENDER_EMAILS_MAX_PAGES; page++) {
+    const { status, json } = await requestGetWithRetry(fetchImpl, credentials, `/api/sender-emails?page=${page}`);
+    assertOk(status, json, "sender-email list");
+
+    senderEmails.push(
+      ...extractArray(json)
+        .map(toSenderEmail)
+        .filter((senderEmail): senderEmail is EmailBisonSenderEmail => senderEmail !== null)
+    );
+
+    const meta = json && typeof json === "object" ? (json as Record<string, unknown>).meta : null;
+    const currentPage = meta && typeof meta === "object" ? Number((meta as Record<string, unknown>).current_page) : NaN;
+    const lastPage = meta && typeof meta === "object" ? Number((meta as Record<string, unknown>).last_page) : NaN;
+    if (Number.isNaN(currentPage) || Number.isNaN(lastPage) || currentPage >= lastPage) break;
+  }
+
+  return senderEmails;
+}
+
+export interface EmailBisonWarmupStat {
+  id: string;
+  warmupScore: number | null;
+  /** The warmup-stats endpoint (`/api/warmup/sender-emails`) doesn't return
+   * a warmup_enabled field of its own — that lives on the base sender-email
+   * record (see EmailBisonSenderEmail.warmupEnabled) — so this is always
+   * `null` here; kept on the type for symmetry/future-proofing rather than
+   * omitted. */
+  warmupEnabled: boolean | null;
+  bouncesReceived: number | null;
+  bouncesCaused: number | null;
+  disabledForBouncing: number | null;
+}
+
+function toWarmupStat(raw: unknown): EmailBisonWarmupStat | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const id = record.id;
+  if (id === undefined || id === null) return null;
+
+  const warmupScore = typeof record.warmup_score === "number" ? record.warmup_score : null;
+  const bouncesReceived =
+    typeof record.warmup_bounces_received_count === "number" ? record.warmup_bounces_received_count : null;
+  const bouncesCaused =
+    typeof record.warmup_bounces_caused_count === "number" ? record.warmup_bounces_caused_count : null;
+  const disabledForBouncing =
+    typeof record.warmup_disabled_for_bouncing_count === "number"
+      ? record.warmup_disabled_for_bouncing_count
+      : null;
+
+  return { id: String(id), warmupScore, warmupEnabled: null, bouncesReceived, bouncesCaused, disabledForBouncing };
+}
+
+/** Safety cap on pages walked by listAllWarmupSenderEmails — same rationale
+ * as SENDER_EMAILS_MAX_PAGES; this endpoint paginates at 15/page too. */
+const WARMUP_SENDER_EMAILS_MAX_PAGES = 200;
+
+/** Lists ALL of the workspace's warmup stats (`GET
+ * /api/warmup/sender-emails`), walking every page via `meta.last_page` and
+ * concatenating — mirrors listAllSenderEmails exactly, just against the
+ * warmup-stats endpoint. Callers join these back to the base sender-email
+ * list by `id` to get a per-mailbox warmup score (the "burnt" signal the
+ * base `/api/sender-emails` list doesn't carry). Falls back to just the
+ * first page if `meta` is missing/malformed rather than looping forever. */
+export async function listAllWarmupSenderEmails(
+  credentials: EmailBisonCredentials,
+  deps: EmailBisonClientDeps = {}
+): Promise<EmailBisonWarmupStat[]> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+
+  const { status, json } = await requestGetWithRetry(fetchImpl, credentials, "/api/warmup/sender-emails");
+  assertOk(status, json, "warmup sender-email list");
+
+  const warmupStats = extractArray(json)
+    .map(toWarmupStat)
+    .filter((stat): stat is EmailBisonWarmupStat => stat !== null);
+
+  const firstMeta = json && typeof json === "object" ? (json as Record<string, unknown>).meta : null;
+  const firstCurrentPage =
+    firstMeta && typeof firstMeta === "object" ? Number((firstMeta as Record<string, unknown>).current_page) : NaN;
+  const firstLastPage =
+    firstMeta && typeof firstMeta === "object" ? Number((firstMeta as Record<string, unknown>).last_page) : NaN;
+  if (Number.isNaN(firstCurrentPage) || Number.isNaN(firstLastPage) || firstCurrentPage >= firstLastPage) {
+    return warmupStats;
+  }
+
+  for (let page = 2; page <= WARMUP_SENDER_EMAILS_MAX_PAGES; page++) {
+    const pageResult = await requestGetWithRetry(fetchImpl, credentials, `/api/warmup/sender-emails?page=${page}`);
+    assertOk(pageResult.status, pageResult.json, "warmup sender-email list");
+
+    warmupStats.push(
+      ...extractArray(pageResult.json)
+        .map(toWarmupStat)
+        .filter((stat): stat is EmailBisonWarmupStat => stat !== null)
+    );
+
+    const meta = pageResult.json && typeof pageResult.json === "object" ? (pageResult.json as Record<string, unknown>).meta : null;
+    const currentPage = meta && typeof meta === "object" ? Number((meta as Record<string, unknown>).current_page) : NaN;
+    const lastPage = meta && typeof meta === "object" ? Number((meta as Record<string, unknown>).last_page) : NaN;
+    if (Number.isNaN(currentPage) || Number.isNaN(lastPage) || currentPage >= lastPage) break;
+  }
+
+  return warmupStats;
 }
 
 /** Attaches sender emails to a campaign (`POST

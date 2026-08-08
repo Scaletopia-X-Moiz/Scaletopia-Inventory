@@ -1,15 +1,16 @@
 import type { NextRequest } from "next/server";
 import { getClientById } from "@/lib/data/clients";
-import { EmailBisonApiError, listAllSenderEmails } from "@/lib/emailbison/client";
+import { EmailBisonApiError, listAllWarmupSenderEmails } from "@/lib/emailbison/client";
 import { getUser } from "@/lib/auth/dal";
 
 export const dynamic = "force-dynamic";
 
-/** A client's live EmailBison sender-email list, for the create-campaign
- * form's sender-emails multi-select (issue #94/#98) — listSenderEmails
- * itself is server-only, so this route is the seam that lets the
- * browser-side form read it. Mirrors the emailbison-campaigns route
- * (issue #63). */
+/** A client's live EmailBison warmup stats, lazy-loaded by the sender-email
+ * picker (components/emailbison/sender-email-picker.tsx) after the base
+ * sender-email list has already rendered — the warmup-stats endpoint is a
+ * separate, slower call, so the picker shows connection/warmup-on status
+ * immediately and fills in warmup scores once this resolves. Mirrors the
+ * emailbison-sender-emails route. */
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -26,11 +27,11 @@ export async function GET(
   }
 
   try {
-    const senderEmails = await listAllSenderEmails({
+    const warmupStats = await listAllWarmupSenderEmails({
       apiKey: client.emailbisonApiKey,
       workspaceId: client.emailbisonWorkspaceId,
     });
-    return Response.json({ senderEmails });
+    return Response.json({ warmupStats });
   } catch (err) {
     const message = err instanceof EmailBisonApiError || err instanceof Error ? err.message : String(err);
     return Response.json({ error: message }, { status: 502 });

@@ -8,13 +8,13 @@ vi.mock("@/lib/auth/dal", () => ({ getUser }));
 const { getClientById } = vi.hoisted(() => ({ getClientById: vi.fn() }));
 vi.mock("@/lib/data/clients", () => ({ getClientById }));
 
-const { listAllSenderEmails } = vi.hoisted(() => ({ listAllSenderEmails: vi.fn() }));
+const { listAllWarmupSenderEmails } = vi.hoisted(() => ({ listAllWarmupSenderEmails: vi.fn() }));
 vi.mock("@/lib/emailbison/client", async () => {
   const actual = await vi.importActual<typeof import("@/lib/emailbison/client")>("@/lib/emailbison/client");
-  return { ...actual, listAllSenderEmails };
+  return { ...actual, listAllWarmupSenderEmails };
 });
 
-const { GET } = await import("@/app/api/clients/[id]/emailbison-sender-emails/route");
+const { GET } = await import("@/app/api/clients/[id]/emailbison-warmup-scores/route");
 
 const testUser = { id: "user-1", email: "operator@example.com" };
 const testClient: ClientRow = {
@@ -30,7 +30,7 @@ const testClient: ClientRow = {
 };
 
 function makeRequest(): NextRequest {
-  return new NextRequest("http://localhost/api/clients/client-1/emailbison-sender-emails");
+  return new NextRequest("http://localhost/api/clients/client-1/emailbison-warmup-scores");
 }
 
 function makeParams(id = "client-1") {
@@ -43,7 +43,7 @@ beforeEach(() => {
   getClientById.mockResolvedValue(testClient);
 });
 
-describe("GET /api/clients/[id]/emailbison-sender-emails", () => {
+describe("GET /api/clients/[id]/emailbison-warmup-scores", () => {
   it("returns 401 when there is no session", async () => {
     getUser.mockResolvedValue(null);
     const res = await GET(makeRequest(), makeParams());
@@ -62,17 +62,37 @@ describe("GET /api/clients/[id]/emailbison-sender-emails", () => {
     expect(res.status).toBe(404);
   });
 
-  it("returns the workspace's sender emails", async () => {
-    listAllSenderEmails.mockResolvedValue([{ id: "1", name: "Jane Doe", email: "jane@example.com" }]);
+  it("returns the workspace's warmup stats", async () => {
+    listAllWarmupSenderEmails.mockResolvedValue([
+      {
+        id: "1",
+        warmupScore: 92,
+        warmupEnabled: null,
+        bouncesReceived: 0,
+        bouncesCaused: 0,
+        disabledForBouncing: 0,
+      },
+    ]);
     const res = await GET(makeRequest(), makeParams());
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ senderEmails: [{ id: "1", name: "Jane Doe", email: "jane@example.com" }] });
-    expect(listAllSenderEmails).toHaveBeenCalledWith({ apiKey: "key", workspaceId: "ws" });
+    expect(body).toEqual({
+      warmupStats: [
+        {
+          id: "1",
+          warmupScore: 92,
+          warmupEnabled: null,
+          bouncesReceived: 0,
+          bouncesCaused: 0,
+          disabledForBouncing: 0,
+        },
+      ],
+    });
+    expect(listAllWarmupSenderEmails).toHaveBeenCalledWith({ apiKey: "key", workspaceId: "ws" });
   });
 
   it("returns 502 when the EmailBison API call fails", async () => {
-    listAllSenderEmails.mockRejectedValue(new Error("boom"));
+    listAllWarmupSenderEmails.mockRejectedValue(new Error("boom"));
     const res = await GET(makeRequest(), makeParams());
     expect(res.status).toBe(502);
   });
