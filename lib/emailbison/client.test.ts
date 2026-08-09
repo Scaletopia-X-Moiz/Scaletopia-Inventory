@@ -11,6 +11,7 @@ import {
   attachSenderEmails,
   createCampaignSchedule,
   createSequenceSteps,
+  updateSequenceStep,
   resumeCampaign,
   requestWithRetry,
   EmailBisonApiError,
@@ -669,6 +670,39 @@ describe("createSequenceSteps", () => {
 
     await expect(
       createSequenceSteps(CREDENTIALS, "camp_1", "Initial outreach", STEPS, { fetchImpl })
+    ).rejects.toThrow(EmailBisonApiError);
+  });
+});
+
+describe("updateSequenceStep", () => {
+  it("PUTs the variant fields in snake_case", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { data: { success: true, message: "ok" } }));
+
+    await updateSequenceStep(CREDENTIALS, "step_9", { variant: "B", variantFromStep: "step_1" }, { fetchImpl });
+
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${CREDENTIALS.workspaceId}/api/campaigns/sequence-steps/step_9`);
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body)).toEqual({ variant: "B", variant_from_step: "step_1" });
+  });
+
+  it("throws a typed error on a non-transient HTTP failure", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(422, { message: "invalid variant" }));
+
+    await expect(
+      updateSequenceStep(CREDENTIALS, "step_9", { variant: "B", variantFromStep: "step_1" }, { fetchImpl })
+    ).rejects.toThrow(EmailBisonApiError);
+  });
+
+  it("throws a typed error on a 200 with a { data: { success: false } } body", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { data: { success: false, message: "step not found" } }));
+
+    await expect(
+      updateSequenceStep(CREDENTIALS, "step_9", { variant: "B", variantFromStep: "step_1" }, { fetchImpl })
     ).rejects.toThrow(EmailBisonApiError);
   });
 });

@@ -6,11 +6,11 @@ import {
   attachSenderEmails,
   createCampaignSchedule,
   createSequenceSteps,
+  updateSequenceStep,
   resumeCampaign,
   type EmailBisonCampaign,
   type EmailBisonClientDeps,
   type EmailBisonCampaignScheduleInput,
-  type EmailBisonSequenceStepInput,
 } from "@/lib/emailbison/client";
 import type { EmailBisonCredentials } from "@/lib/emailbison/types";
 
@@ -99,6 +99,31 @@ function stepFailureMessage(step: string, err: unknown): string {
   return `Campaign created but ${step} failed: ${message}`;
 }
 
+/** One extra ("B", "C", …) split-test variant of a sequence step —
+ * subject/body only. It inherits its base step's waitInDays/threadReply (a
+ * variant fires on the same schedule as the step it's a variant of), and gets
+ * its letter assigned by its index within `extraVariants` (0 -> "B", 1 ->
+ * "C", …) in createEmailBisonCampaign. */
+export interface CreateEmailBisonSequenceStepVariantInput {
+  emailSubject: string;
+  emailBody: string;
+}
+
+/** One sequence step for createEmailBisonCampaign — the base ("A") content
+ * plus any extra split-test variants. Mirrors client.ts's
+ * EmailBisonSequenceStepInput for the base fields; `extraVariants` is new and
+ * has no client.ts equivalent, since each extra variant is wired up as its
+ * own separate sequence-step + updateSequenceStep call rather than being part
+ * of the base createSequenceSteps body (see the EmailBison API flow comment
+ * on createEmailBisonCampaign below). */
+export interface CreateEmailBisonSequenceStepInput {
+  emailSubject: string;
+  emailBody: string;
+  waitInDays: number;
+  threadReply: boolean;
+  extraVariants?: CreateEmailBisonSequenceStepVariantInput[];
+}
+
 /** Input for createEmailBisonCampaign — everything needed to run the
  * multi-call EmailBison campaign-creation sequence in one shot. `sequenceTitle`
  * defaults to `name` when omitted, matching how Clay's UI doesn't ask for a
@@ -107,17 +132,33 @@ export interface CreateEmailBisonCampaignInput {
   name: string;
   senderEmailIds: string[];
   schedule: EmailBisonCampaignScheduleInput;
-  steps: EmailBisonSequenceStepInput[];
+  steps: CreateEmailBisonSequenceStepInput[];
   sequenceTitle?: string;
   launch: boolean;
 }
 
+/** Split-test variant letters, in assignment order — the base step is
+ * implicitly "A" (never set on the wire) and is not in this list; extra
+ * variants get "B", "C", "D", … by their index within a step's
+ * `extraVariants`. Comfortably above any real form's variant count per step. */
+const VARIANT_LETTERS = "BCDEFGHIJKLMNOPQRSTUVWXYZ";
+
 /** Orchestrates EmailBison's multi-call campaign-creation flow (issue #94's
  * "Seam" decision): createCampaign -> attachSenderEmails ->
- * createCampaignSchedule -> createSequenceSteps -> (resumeCampaign, only when
- * `input.launch` is true). This is the single place that knows this
- * sequence — route handlers and UI stay thin and never call the individual
- * client.ts functions directly.
+ * createCampaignSchedule -> createSequenceSteps -> (one create + link per
+ * extra split-test variant) -> (resumeCampaign, only when `input.launch` is
+ * true). This is the single place that knows this sequence — route handlers
+ * and UI stay thin and never call the individual client.ts functions
+ * directly.
+ *
+ * Split-test variants (confirmed EmailBison API flow): createSequenceSteps
+ * creates every step's base ("A") content in one call, in order, giving each
+ * base step an id. For each extra variant on a step, this then (1) creates it
+ * as its own single-step sequence-step (same POST, same title) to get its id,
+ * and (2) PUTs it via updateSequenceStep with `variant` set to its assigned
+ * letter ("B", "C", …) and `variantFromStep` set to the base step's id. A
+ * step's variants are processed in order after all base steps exist, so a
+ * base step's id is always available before its variants are created.
  *
  * Stops at the first failing step and throws an error naming which step
  * failed (e.g. "Campaign created but attaching senders failed: ..."). No
@@ -152,10 +193,71 @@ export async function createEmailBisonCampaign(
     throw new EmailBisonApiError(stepFailureMessage("creating the schedule", err));
   }
 
+  const sequenceTitle = input.sequenceTitle ?? input.name;
+  let baseStepIds: string[];
   try {
-    await createSequenceSteps(client, campaign.id, input.sequenceTitle ?? input.name, input.steps, deps);
+    const sequence = await createSequenceSteps(
+      client,
+      campaign.id,
+      sequenceTitle,
+      input.steps.map((step) => ({
+        emailSubject: step.emailSubject,
+        emailBody: step.emailBody,
+        waitInDays: step.waitInDays,
+        threadReply: step.threadReply,
+      })),
+      deps
+    );
+    baseStepIds = sequence.steps.map((step) => step.id);
   } catch (err) {
     throw new EmailBisonApiError(stepFailureMessage("creating sequence steps", err));
+  }
+
+  for (let i = 0; i < input.steps.length; i++) {
+    const step = input.steps[i];
+    const extraVariants = step.extraVariants ?? [];
+    if (extraVariants.length === 0) continue;
+
+    const baseStepId = baseStepIds[i];
+    for (let v = 0; v < extraVariants.length; v++) {
+      const variant = extraVariants[v];
+      const letter = VARIANT_LETTERS[v] ?? String(v);
+
+      let variantStepId: string;
+      try {
+        const variantSequence = await createSequenceSteps(
+          client,
+          campaign.id,
+          sequenceTitle,
+          [
+            {
+              emailSubject: variant.emailSubject,
+              emailBody: variant.emailBody,
+              waitInDays: step.waitInDays,
+              threadReply: step.threadReply,
+            },
+          ],
+          deps
+        );
+        const created = variantSequence.steps[0];
+        if (!created) {
+          throw new EmailBisonApiError("EmailBison sequence-steps create succeeded but returned no variant step id");
+        }
+        variantStepId = created.id;
+      } catch (err) {
+        throw new EmailBisonApiError(
+          stepFailureMessage(`creating split test variant ${letter} for step ${i + 1}`, err)
+        );
+      }
+
+      try {
+        await updateSequenceStep(client, variantStepId, { variant: letter, variantFromStep: baseStepId }, deps);
+      } catch (err) {
+        throw new EmailBisonApiError(
+          stepFailureMessage(`linking split test variant ${letter} for step ${i + 1}`, err)
+        );
+      }
+    }
   }
 
   if (input.launch) {

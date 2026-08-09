@@ -83,7 +83,7 @@ interface RawResponse {
 async function requestWithMethodRetry(
   fetchImpl: typeof fetch,
   credentials: EmailBisonCredentials,
-  method: "GET" | "POST" | "PATCH",
+  method: "GET" | "POST" | "PATCH" | "PUT",
   path: string,
   body?: Record<string, unknown>
 ): Promise<RawResponse> {
@@ -156,6 +156,17 @@ export async function requestPatchWithRetry(
   body?: Record<string, unknown>
 ): Promise<RawResponse> {
   return requestWithMethodRetry(fetchImpl, credentials, "PATCH", path, body);
+}
+
+/** PUTs `body` to `path` with the same retry/backoff behavior as
+ * requestWithRetry. */
+export async function requestPutWithRetry(
+  fetchImpl: typeof fetch,
+  credentials: EmailBisonCredentials,
+  path: string,
+  body: Record<string, unknown>
+): Promise<RawResponse> {
+  return requestWithMethodRetry(fetchImpl, credentials, "PUT", path, body);
 }
 
 function assertOk(status: number, json: unknown, action: string): void {
@@ -754,8 +765,13 @@ export async function createCampaignSchedule(
 }
 
 /** One sequence step for createSequenceSteps — camelCase mirror of the wire
- * body's email_subject/email_body/wait_in_days/thread_reply.
- * `variant`/`variant_from_step` are out of scope per issue #96. */
+ * body's email_subject/email_body/wait_in_days/thread_reply. `variant`/
+ * `variant_from_step` are NOT part of this shape — createSequenceSteps only
+ * ever creates base ("A") steps. An extra split-test variant is its own
+ * separate sequence-step record: create it via a second createSequenceSteps
+ * call (a single-element array, same title), then link it to its base step
+ * with updateSequenceStep below. See lib/emailbison/campaigns.ts's
+ * createEmailBisonCampaign for the orchestration. */
 export interface EmailBisonSequenceStepInput {
   emailSubject: string;
   emailBody: string;
@@ -818,6 +834,46 @@ export async function createSequenceSteps(
     .filter((step): step is EmailBisonSequenceStepResult => step !== null);
 
   return { id: String(id), steps: resultSteps };
+}
+
+/** Input for updateSequenceStep — camelCase mirror of the wire body's
+ * `variant`/`variant_from_step`. `variant` is the split-test letter for this
+ * step ("B", "C", "D", …; the base step is implicitly "A" and is never
+ * updated this way). `variantFromStep` is the base step's id this variant is
+ * linked to. */
+export interface EmailBisonUpdateSequenceStepInput {
+  variant: string;
+  variantFromStep: string;
+}
+
+function toWireUpdateSequenceStep(input: EmailBisonUpdateSequenceStepInput): Record<string, unknown> {
+  return {
+    variant: input.variant,
+    variant_from_step: input.variantFromStep,
+  };
+}
+
+/** Links a sequence step as a split-test variant of another (`PUT
+ * /api/campaigns/sequence-steps/{sequenceId}`) — the second half of creating
+ * an extra ("B", "C", …) variant: the step itself is created first via
+ * createSequenceSteps (a single-element array), then this call attaches it to
+ * its base step. Subject to the same `{ data: { success: false } }`-on-2xx
+ * failure shape as attachSenderEmails. */
+export async function updateSequenceStep(
+  credentials: EmailBisonCredentials,
+  sequenceId: string,
+  input: EmailBisonUpdateSequenceStepInput,
+  deps: EmailBisonClientDeps = {}
+): Promise<void> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const { status, json } = await requestPutWithRetry(
+    fetchImpl,
+    credentials,
+    `/api/campaigns/sequence-steps/${sequenceId}`,
+    toWireUpdateSequenceStep(input)
+  );
+  assertOk(status, json, "sequence-step update");
+  assertSuccessBody(json, "sequence-step update");
 }
 
 /** Resumes a paused/draft campaign, starting real sending (`PATCH

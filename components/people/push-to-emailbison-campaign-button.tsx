@@ -32,22 +32,36 @@ const DEFAULT_DAYS: Record<DayKey, boolean> = {
   sunday: false,
 };
 
-/** One sequence-step row in the create-campaign form (issue #94/#101),
- * camelCase mirror of lib/emailbison/client.ts's EmailBisonSequenceStepInput
- * plus a local `key` for React list identity independent of array index. */
-interface SequenceStepForm {
+/** One split-test variant card within a sequence step (EmailBison-style "A/B
+ * split test variants") — `variants[0]` on a SequenceStepForm is the base
+ * ("A") content, any further entries are extra variants ("B", "C", …). Just
+ * subject/body: a variant shares its step's wait/thread-reply settings. */
+interface StepVariantForm {
   key: string;
   emailSubject: string;
   emailBody: string;
+}
+
+function newStepVariant(): StepVariantForm {
+  return { key: Math.random().toString(36).slice(2), emailSubject: "", emailBody: "" };
+}
+
+/** One sequence-step row in the create-campaign form (issue #94/#101),
+ * camelCase mirror of lib/emailbison/client.ts's EmailBisonSequenceStepInput
+ * plus a local `key` for React list identity independent of array index.
+ * `variants` always has at least one entry — index 0 is the base ("A")
+ * content, the rest are extra split test variants. */
+interface SequenceStepForm {
+  key: string;
   waitInDays: string;
+  variants: StepVariantForm[];
 }
 
 function newSequenceStep(): SequenceStepForm {
   return {
     key: Math.random().toString(36).slice(2),
-    emailSubject: "",
-    emailBody: "",
     waitInDays: "0",
+    variants: [newStepVariant()],
   };
 }
 
@@ -124,6 +138,16 @@ export function PushToEmailBisonCampaignButton({
   const busy = status === "pushing";
   const selectedClient = clients?.find((c) => c.id === selectedClientId) ?? null;
   const selectedCampaign = campaigns?.find((c) => c.id === selectedCampaignId) ?? null;
+
+  const createFormValid =
+    createForm.name.trim().length > 0 &&
+    createForm.senderEmailIds.length > 0 &&
+    createForm.steps.length > 0 &&
+    createForm.steps.every(
+      (s) =>
+        s.variants.length > 0 &&
+        s.variants.every((v) => v.emailSubject.trim().length > 0 && v.emailBody.trim().length > 0)
+    );
 
   // Registers this dialog with the shared dialog stack so other prompts — e.g.
   // the post-push "remove temporary columns?" prompt — defer until it closes
@@ -212,7 +236,7 @@ export function PushToEmailBisonCampaignButton({
     setCreateForm((form) => ({ ...form, days: { ...form.days, [day]: !form.days[day] } }));
   }
 
-  function updateStep(key: string, patch: Partial<SequenceStepForm>) {
+  function updateStep(key: string, patch: Partial<Omit<SequenceStepForm, "variants">>) {
     setCreateForm((form) => ({
       ...form,
       steps: form.steps.map((step) => (step.key === key ? { ...step, ...patch } : step)),
@@ -230,8 +254,44 @@ export function PushToEmailBisonCampaignButton({
     }));
   }
 
+  function updateVariant(stepKey: string, variantKey: string, patch: Partial<StepVariantForm>) {
+    setCreateForm((form) => ({
+      ...form,
+      steps: form.steps.map((step) =>
+        step.key === stepKey
+          ? {
+              ...step,
+              variants: step.variants.map((variant) =>
+                variant.key === variantKey ? { ...variant, ...patch } : variant
+              ),
+            }
+          : step
+      ),
+    }));
+  }
+
+  function addVariant(stepKey: string) {
+    setCreateForm((form) => ({
+      ...form,
+      steps: form.steps.map((step) =>
+        step.key === stepKey ? { ...step, variants: [...step.variants, newStepVariant()] } : step
+      ),
+    }));
+  }
+
+  function removeVariant(stepKey: string, variantKey: string) {
+    setCreateForm((form) => ({
+      ...form,
+      steps: form.steps.map((step) =>
+        step.key === stepKey && step.variants.length > 1
+          ? { ...step, variants: step.variants.filter((variant) => variant.key !== variantKey) }
+          : step
+      ),
+    }));
+  }
+
   async function handleSubmitCreateCampaign(launch: boolean) {
-    if (!selectedClient) return;
+    if (!selectedClient || !createFormValid || createCampaignBusy) return;
     setCreateCampaignError(null);
     setCreateCampaignBusy(launch ? "launch" : "draft");
 
@@ -249,14 +309,18 @@ export function PushToEmailBisonCampaignButton({
             timezone: createForm.timezone,
           },
           sequenceSteps: createForm.steps.map((step, index) => ({
-            emailSubject: step.emailSubject,
-            emailBody: step.emailBody,
+            emailSubject: step.variants[0].emailSubject,
+            emailBody: step.variants[0].emailBody,
             // EmailBison rejects wait_in_days < 1 for every step, including
             // step 1 — which has no wait-days UI (conceptually meaningless
             // for the first step). Force it to 1 regardless of form state
             // (issue #104).
             waitInDays: index === 0 ? 1 : Number(step.waitInDays) || 0,
             threadReply: false,
+            extraVariants: step.variants.slice(1).map((variant) => ({
+              emailSubject: variant.emailSubject,
+              emailBody: variant.emailBody,
+            })),
           })),
           launch,
         }),
@@ -412,85 +476,65 @@ export function PushToEmailBisonCampaignButton({
             </div>
           </AlertDialog.Content>
         ) : step === "campaign" ? (
-          <AlertDialog.Content className="fixed top-[10%] left-1/2 z-50 w-full max-w-lg -translate-x-1/2 max-h-[80vh] overflow-y-auto rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
+          <AlertDialog.Content className="fixed top-[10%] left-1/2 z-50 max-h-[80vh] w-full max-w-3xl -translate-x-1/2 overflow-y-auto rounded-xl border border-rule bg-popover p-6 shadow-2xl outline-none">
             <AlertDialog.Title className="text-sm font-semibold text-ink">
-              Campaign &amp; run settings
+              {creatingCampaign ? "Create a campaign" : "Campaign & run settings"}
             </AlertDialog.Title>
             <AlertDialog.Description asChild>
-              <div className="mt-4 flex flex-col gap-5 text-sm text-ink-soft">
+              <div className="mt-4 flex flex-col gap-6 text-sm text-ink-soft">
                 {creatingCampaign ? (
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <p className="text-xs font-medium text-ink">Create a campaign</p>
-                      <button
-                        type="button"
-                        onClick={handleCancelCreateCampaign}
-                        className="text-xs text-ink-mute hover:text-ink"
-                      >
-                        ← Back to picker
-                      </button>
-                    </div>
-
-                    <div className="mt-3 flex flex-col gap-4">
+                  <>
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                       <div>
-                        <label className="block text-xs font-medium text-ink">Name</label>
+                        <p className="text-xs font-semibold text-ink">Name</p>
                         <input
                           type="text"
                           value={createForm.name}
                           onChange={(e) => setCreateForm((f) => ({ ...f, name: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
+                          className="mt-1.5 w-full rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
                           placeholder="Campaign name"
                         />
                       </div>
 
                       <div>
-                        <label className="block text-xs font-medium text-ink">Sender emails</label>
-                        <div className="mt-1">
-                          {selectedClient ? (
-                            <SenderEmailPicker
-                              clientId={selectedClient.id}
-                              selectedIds={createForm.senderEmailIds}
-                              onChange={(senderEmailIds) => setCreateForm((f) => ({ ...f, senderEmailIds }))}
-                            />
-                          ) : null}
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block text-xs font-medium text-ink">Schedule</label>
-                        <div className="mt-1 flex flex-wrap gap-2">
+                        <p className="text-xs font-semibold text-ink">Schedule</p>
+                        <div className="mt-1.5 flex flex-wrap gap-1.5">
                           {WEEKDAYS.map((day) => (
                             <label
                               key={day.key}
-                              className="flex items-center gap-1 rounded-md border border-rule px-2 py-1 text-xs"
+                              className={cn(
+                                "flex cursor-pointer items-center gap-1 rounded-md border border-rule px-2 py-1 text-xs",
+                                createForm.days[day.key] ? "bg-stamp/10 text-ink" : "text-ink-mute"
+                              )}
                             >
                               <input
                                 type="checkbox"
+                                className="sr-only"
                                 checked={createForm.days[day.key]}
                                 onChange={() => toggleDay(day.key)}
                               />
-                              <span className="text-ink">{day.label}</span>
+                              {day.label}
                             </label>
                           ))}
                         </div>
-                        <div className="mt-2 flex items-center gap-2">
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
                           <input
                             type="time"
                             value={createForm.startTime}
                             onChange={(e) => setCreateForm((f) => ({ ...f, startTime: e.target.value }))}
-                            className="rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                            className="rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
                           />
                           <span className="text-xs text-ink-mute">to</span>
                           <input
                             type="time"
                             value={createForm.endTime}
                             onChange={(e) => setCreateForm((f) => ({ ...f, endTime: e.target.value }))}
-                            className="rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                            className="rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
                           />
                           <select
                             value={createForm.timezone}
                             onChange={(e) => setCreateForm((f) => ({ ...f, timezone: e.target.value }))}
-                            className="rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                            className="min-w-0 flex-1 rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
                           >
                             <option value="America/New_York">America/New_York</option>
                             <option value="America/Chicago">America/Chicago</option>
@@ -500,14 +544,45 @@ export function PushToEmailBisonCampaignButton({
                           </select>
                         </div>
                       </div>
+                    </div>
 
-                      <div>
-                        <label className="block text-xs font-medium text-ink">Sequence steps</label>
-                        <div className="mt-1 flex flex-col gap-3">
-                          {createForm.steps.map((step, index) => (
-                            <div key={step.key} className="rounded-md border border-rule p-2">
-                              <div className="flex items-center justify-between">
-                                <span className="text-xs font-medium text-ink">Step {index + 1}</span>
+                    <div>
+                      <p className="text-xs font-semibold text-ink">Sender emails</p>
+                      <div className="mt-2">
+                        {selectedClient ? (
+                          <SenderEmailPicker
+                            clientId={selectedClient.id}
+                            selectedIds={createForm.senderEmailIds}
+                            onChange={(senderEmailIds) => setCreateForm((f) => ({ ...f, senderEmailIds }))}
+                          />
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div>
+                      <p className="text-xs font-semibold text-ink">Sequence steps</p>
+                      <div className="mt-2 flex flex-col gap-3">
+                        {createForm.steps.map((step, index) => (
+                          <div
+                            key={step.key}
+                            className="rounded-lg border border-rule bg-hover/40 p-3"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="text-xs font-semibold text-ink">Step {index + 1}</span>
+                              <div className="flex items-center gap-3">
+                                {index > 0 ? (
+                                  <label className="flex items-center gap-1.5 text-xs text-ink-mute">
+                                    Wait
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      value={step.waitInDays}
+                                      onChange={(e) => updateStep(step.key, { waitInDays: e.target.value })}
+                                      className="w-14 rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                                    />
+                                    days
+                                  </label>
+                                ) : null}
                                 {createForm.steps.length > 1 ? (
                                   <button
                                     type="button"
@@ -518,81 +593,72 @@ export function PushToEmailBisonCampaignButton({
                                   </button>
                                 ) : null}
                               </div>
-                              <input
-                                type="text"
-                                value={step.emailSubject}
-                                onChange={(e) => updateStep(step.key, { emailSubject: e.target.value })}
-                                placeholder="Subject"
-                                className="mt-2 w-full rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
-                              />
-                              <textarea
-                                value={step.emailBody}
-                                onChange={(e) => updateStep(step.key, { emailBody: e.target.value })}
-                                placeholder="Body"
-                                rows={3}
-                                className="mt-2 w-full rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
-                              />
-                              <div className="mt-2 flex items-center gap-2">
-                                <span className="text-xs text-ink-mute">Wait</span>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={step.waitInDays}
-                                  onChange={(e) => updateStep(step.key, { waitInDays: e.target.value })}
-                                  className="w-16 rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
-                                />
-                                <span className="text-xs text-ink-mute">days</span>
-                              </div>
                             </div>
-                          ))}
-                          <button
-                            type="button"
-                            onClick={addStep}
-                            className="self-start text-xs text-stamp hover:underline"
-                          >
-                            + Add another step
-                          </button>
-                        </div>
-                      </div>
 
-                      {createCampaignError ? (
-                        <p className="text-xs text-danger">{createCampaignError}</p>
-                      ) : null}
-
-                      <div className="flex justify-end gap-2">
-                        <button
-                          type="button"
-                          onClick={() => handleSubmitCreateCampaign(false)}
-                          disabled={createCampaignBusy !== null}
-                          className={cn(
-                            "inline-flex items-center gap-1.5 rounded-md border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-smooth hover:bg-hover focus-visible:ring-2 focus-visible:ring-stamp/50",
-                            createCampaignBusy !== null && "opacity-50 cursor-not-allowed"
-                          )}
-                        >
-                          {createCampaignBusy === "draft" ? (
-                            <Loader2 size={12} className="animate-spin" />
-                          ) : null}
-                          Save as Draft
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleSubmitCreateCampaign(true)}
-                          disabled={createCampaignBusy !== null}
-                          className={cn(
-                            "inline-flex items-center gap-1.5 rounded-md bg-danger px-3 py-1.5 text-xs font-medium text-white transition-smooth hover:opacity-90 focus-visible:ring-2 focus-visible:ring-danger/50",
-                            createCampaignBusy !== null && "opacity-50 cursor-not-allowed"
-                          )}
-                        >
-                          {createCampaignBusy === "launch" ? (
-                            <Loader2 size={12} className="animate-spin" />
-                          ) : (
-                            <TriangleAlert size={12} />
-                          )}
-                          Launch Campaign
-                        </button>
+                            <div className="mt-2.5 flex flex-col gap-2">
+                              {step.variants.map((variant, vi) => (
+                                <div
+                                  key={variant.key}
+                                  className="rounded-md border border-rule bg-popover p-2.5"
+                                >
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-xs font-semibold text-ink">
+                                      Variant {String.fromCharCode(65 + vi)}
+                                    </span>
+                                    {step.variants.length > 1 ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => removeVariant(step.key, variant.key)}
+                                        className="text-xs text-ink-mute hover:text-danger"
+                                      >
+                                        Remove
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                  <input
+                                    type="text"
+                                    value={variant.emailSubject}
+                                    onChange={(e) =>
+                                      updateVariant(step.key, variant.key, { emailSubject: e.target.value })
+                                    }
+                                    placeholder="Subject"
+                                    className="mt-2 w-full rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
+                                  />
+                                  <textarea
+                                    value={variant.emailBody}
+                                    onChange={(e) =>
+                                      updateVariant(step.key, variant.key, { emailBody: e.target.value })
+                                    }
+                                    placeholder="Body"
+                                    rows={3}
+                                    className="mt-2 w-full rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink"
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => addVariant(step.key)}
+                              className="mt-2.5 text-xs font-medium text-stamp hover:underline"
+                            >
+                              + Add split test variant
+                            </button>
+                          </div>
+                        ))}
                       </div>
+                      <button
+                        type="button"
+                        onClick={addStep}
+                        className="mt-2 text-xs font-medium text-stamp hover:underline"
+                      >
+                        + Add another step
+                      </button>
                     </div>
-                  </div>
+
+                    {createCampaignError ? (
+                      <p className="text-xs text-danger">{createCampaignError}</p>
+                    ) : null}
+                  </>
                 ) : (
                   <>
                     <div>
@@ -660,29 +726,72 @@ export function PushToEmailBisonCampaignButton({
               </div>
             </AlertDialog.Description>
 
-            {!creatingCampaign ? (
-              <div className="mt-5 flex justify-end gap-2">
-                <AlertDialog.Cancel asChild>
+            <div className="mt-5 flex justify-end gap-2">
+              {creatingCampaign ? (
+                <>
                   <button
                     type="button"
-                    className="rounded-md border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-smooth hover:bg-hover focus-visible:ring-2 focus-visible:ring-stamp/50"
+                    onClick={handleCancelCreateCampaign}
+                    disabled={createCampaignBusy !== null}
+                    className="rounded-md border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-smooth hover:bg-hover focus-visible:ring-2 focus-visible:ring-stamp/50 disabled:opacity-50"
                   >
-                    Cancel
+                    ← Back
                   </button>
-                </AlertDialog.Cancel>
-                <button
-                  type="button"
-                  onClick={handleConfirmCampaign}
-                  disabled={!selectedCampaign}
-                  className={cn(
-                    "rounded-md px-3 py-1.5 text-xs font-medium text-white transition-smooth focus-visible:ring-2 focus-visible:ring-stamp/50",
-                    selectedCampaign ? "bg-stamp hover:opacity-90" : "bg-stamp/40 cursor-not-allowed"
-                  )}
-                >
-                  Continue →
-                </button>
-              </div>
-            ) : null}
+                  <button
+                    type="button"
+                    onClick={() => handleSubmitCreateCampaign(false)}
+                    disabled={!createFormValid || createCampaignBusy !== null}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-md border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-smooth hover:bg-hover focus-visible:ring-2 focus-visible:ring-stamp/50",
+                      (!createFormValid || createCampaignBusy !== null) && "opacity-50 cursor-not-allowed"
+                    )}
+                  >
+                    {createCampaignBusy === "draft" ? (
+                      <Loader2 size={12} className="animate-spin" />
+                    ) : null}
+                    Save as Draft
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSubmitCreateCampaign(true)}
+                    disabled={!createFormValid || createCampaignBusy !== null}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-md bg-danger px-3 py-1.5 text-xs font-medium text-white transition-smooth hover:opacity-90 focus-visible:ring-2 focus-visible:ring-danger/50",
+                      (!createFormValid || createCampaignBusy !== null) && "opacity-50 cursor-not-allowed"
+                    )}
+                  >
+                    {createCampaignBusy === "launch" ? (
+                      <Loader2 size={12} className="animate-spin" />
+                    ) : (
+                      <TriangleAlert size={12} />
+                    )}
+                    Launch Campaign
+                  </button>
+                </>
+              ) : (
+                <>
+                  <AlertDialog.Cancel asChild>
+                    <button
+                      type="button"
+                      className="rounded-md border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-smooth hover:bg-hover focus-visible:ring-2 focus-visible:ring-stamp/50"
+                    >
+                      Cancel
+                    </button>
+                  </AlertDialog.Cancel>
+                  <button
+                    type="button"
+                    onClick={handleConfirmCampaign}
+                    disabled={!selectedCampaign}
+                    className={cn(
+                      "rounded-md px-3 py-1.5 text-xs font-medium text-white transition-smooth focus-visible:ring-2 focus-visible:ring-stamp/50",
+                      selectedCampaign ? "bg-stamp hover:opacity-90" : "bg-stamp/40 cursor-not-allowed"
+                    )}
+                  >
+                    Continue →
+                  </button>
+                </>
+              )}
+            </div>
           </AlertDialog.Content>
         ) : (
           <AlertDialog.Content className="fixed top-[26%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">

@@ -329,3 +329,174 @@ describe("createEmailBisonCampaign", () => {
     expect(afterCreateFetch).not.toHaveBeenCalled();
   });
 });
+
+describe("createEmailBisonCampaign — split test variants", () => {
+  /** A fetchImpl covering the whole chain plus two extra variants on a
+   * single base step: base step gets id 201, variant B gets id 202, variant
+   * C gets id 203. Every `sequence-steps` POST returns the next id in that
+   * list, in call order (base first, then each variant in the order
+   * requested), mirroring EmailBison's confirmed flow of one create-per-step
+   * followed by a PUT to link it. */
+  function variantsFetch(callLog: string[]): typeof fetch {
+    const sequenceStepIds = [201, 202, 203];
+    let sequenceStepsCallCount = 0;
+
+    return vi.fn().mockImplementation(async (url: unknown, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? "GET";
+      callLog.push(`${method} ${u}${init?.body ? ` ${init.body}` : ""}`);
+
+      if (u.endsWith("/api/campaigns") && method === "POST") {
+        return jsonResponse(201, { data: { id: 100, name: "New Campaign", status: "draft" } });
+      }
+      if (u.endsWith(`/api/campaigns/${NEW_CAMPAIGN_ID}/attach-sender-emails`)) {
+        return jsonResponse(200, { data: { success: true, message: "ok" } });
+      }
+      if (u.endsWith(`/api/campaigns/${NEW_CAMPAIGN_ID}/schedule`)) {
+        return jsonResponse(201, { data: { id: 5 } });
+      }
+      if (u.endsWith(`/api/campaigns/${NEW_CAMPAIGN_ID}/sequence-steps`) && method === "POST") {
+        const id = sequenceStepIds[sequenceStepsCallCount];
+        sequenceStepsCallCount++;
+        return jsonResponse(201, { data: { id: 9, sequence_steps: [{ id }] } });
+      }
+      if (u.includes("/api/campaigns/sequence-steps/") && method === "PUT") {
+        return jsonResponse(200, { data: { success: true, message: "ok" } });
+      }
+      throw new Error(`unexpected fetch to ${method} ${u}`);
+    }) as unknown as typeof fetch;
+  }
+
+  function buildVariantInput(): CreateEmailBisonCampaignInput {
+    return buildCreateInput({
+      steps: [
+        {
+          emailSubject: "Base subject",
+          emailBody: "Base body",
+          waitInDays: 0,
+          threadReply: false,
+          extraVariants: [
+            { emailSubject: "Variant B subject", emailBody: "Variant B body" },
+            { emailSubject: "Variant C subject", emailBody: "Variant C body" },
+          ],
+        },
+      ],
+    });
+  }
+
+  it("creates each extra variant as its own sequence-step and PUTs it linked to the base step, in letter order", async () => {
+    const callLog: string[] = [];
+    const fetchImpl = variantsFetch(callLog);
+
+    const campaign = await createEmailBisonCampaign(CLIENT_A, buildVariantInput(), { fetchImpl });
+
+    expect(campaign).toEqual({ id: "100", name: "New Campaign" });
+    expect(callLog).toEqual([
+      `POST ${CLIENT_A.workspaceId}/api/campaigns ${JSON.stringify({ name: "New Campaign" })}`,
+      `POST ${CLIENT_A.workspaceId}/api/campaigns/100/attach-sender-emails ${JSON.stringify({ sender_email_ids: ["1", "2"] })}`,
+      `POST ${CLIENT_A.workspaceId}/api/campaigns/100/schedule ${JSON.stringify({
+        monday: true,
+        tuesday: true,
+        wednesday: true,
+        thursday: true,
+        friday: true,
+        saturday: false,
+        sunday: false,
+        start_time: "09:00",
+        end_time: "17:00",
+        timezone: "UTC",
+        save_as_template: false,
+      })}`,
+      `POST ${CLIENT_A.workspaceId}/api/campaigns/100/sequence-steps ${JSON.stringify({
+        title: "New Campaign",
+        sequence_steps: [{ email_subject: "Base subject", email_body: "Base body", wait_in_days: 0, thread_reply: false }],
+      })}`,
+      `POST ${CLIENT_A.workspaceId}/api/campaigns/100/sequence-steps ${JSON.stringify({
+        title: "New Campaign",
+        sequence_steps: [
+          { email_subject: "Variant B subject", email_body: "Variant B body", wait_in_days: 0, thread_reply: false },
+        ],
+      })}`,
+      `PUT ${CLIENT_A.workspaceId}/api/campaigns/sequence-steps/202 ${JSON.stringify({
+        variant: "B",
+        variant_from_step: "201",
+      })}`,
+      `POST ${CLIENT_A.workspaceId}/api/campaigns/100/sequence-steps ${JSON.stringify({
+        title: "New Campaign",
+        sequence_steps: [
+          { email_subject: "Variant C subject", email_body: "Variant C body", wait_in_days: 0, thread_reply: false },
+        ],
+      })}`,
+      `PUT ${CLIENT_A.workspaceId}/api/campaigns/sequence-steps/203 ${JSON.stringify({
+        variant: "C",
+        variant_from_step: "201",
+      })}`,
+    ]);
+  });
+
+  it("stops the chain and names the variant when creating an extra variant's sequence-step fails", async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: unknown, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? "GET";
+      if (u.endsWith("/api/campaigns") && method === "POST") {
+        return jsonResponse(201, { data: { id: 100, name: "New Campaign", status: "draft" } });
+      }
+      if (u.endsWith(`/api/campaigns/${NEW_CAMPAIGN_ID}/attach-sender-emails`)) {
+        return jsonResponse(200, { data: { success: true, message: "ok" } });
+      }
+      if (u.endsWith(`/api/campaigns/${NEW_CAMPAIGN_ID}/schedule`)) {
+        return jsonResponse(201, { data: { id: 5 } });
+      }
+      if (u.endsWith(`/api/campaigns/${NEW_CAMPAIGN_ID}/sequence-steps`) && method === "POST") {
+        const body = JSON.parse(String(init?.body));
+        if (body.sequence_steps[0].email_subject === "Base subject") {
+          return jsonResponse(201, { data: { id: 9, sequence_steps: [{ id: 201 }] } });
+        }
+        return jsonResponse(401, { message: "boom" });
+      }
+      throw new Error(`unexpected fetch to ${method} ${u}`);
+    }) as unknown as typeof fetch;
+
+    await expect(createEmailBisonCampaign(CLIENT_A, buildVariantInput(), { fetchImpl })).rejects.toThrow(
+      "Campaign created but creating split test variant B for step 1 failed"
+    );
+  });
+
+  it("stops the chain and names the variant when linking (PUT) an extra variant fails", async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: unknown, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? "GET";
+      if (u.endsWith("/api/campaigns") && method === "POST") {
+        return jsonResponse(201, { data: { id: 100, name: "New Campaign", status: "draft" } });
+      }
+      if (u.endsWith(`/api/campaigns/${NEW_CAMPAIGN_ID}/attach-sender-emails`)) {
+        return jsonResponse(200, { data: { success: true, message: "ok" } });
+      }
+      if (u.endsWith(`/api/campaigns/${NEW_CAMPAIGN_ID}/schedule`)) {
+        return jsonResponse(201, { data: { id: 5 } });
+      }
+      if (u.endsWith(`/api/campaigns/${NEW_CAMPAIGN_ID}/sequence-steps`) && method === "POST") {
+        const body = JSON.parse(String(init?.body));
+        const id = body.sequence_steps[0].email_subject === "Base subject" ? 201 : 202;
+        return jsonResponse(201, { data: { id: 9, sequence_steps: [{ id }] } });
+      }
+      if (u.includes("/api/campaigns/sequence-steps/") && method === "PUT") {
+        return jsonResponse(401, { message: "boom" });
+      }
+      throw new Error(`unexpected fetch to ${method} ${u}`);
+    }) as unknown as typeof fetch;
+
+    await expect(createEmailBisonCampaign(CLIENT_A, buildVariantInput(), { fetchImpl })).rejects.toThrow(
+      "Campaign created but linking split test variant B for step 1 failed"
+    );
+  });
+
+  it("does not call updateSequenceStep at all when no step has extra variants", async () => {
+    const callLog: string[] = [];
+    const fetchImpl = fullSuccessFetch(callLog);
+
+    await createEmailBisonCampaign(CLIENT_A, buildCreateInput({ launch: false }), { fetchImpl });
+
+    expect(callLog.some((call) => call.startsWith("PUT"))).toBe(false);
+  });
+});
