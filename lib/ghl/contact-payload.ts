@@ -6,7 +6,7 @@ import type {
 } from "@/lib/ghl/types";
 
 /** Shapes a person record into a GHL contact-creation payload. Tags are
- * supplied by the caller (built via buildGhlTag) rather than derived here,
+ * supplied by the caller rather than derived here,
  * since a single push can attach more than one tag to a contact. `customFields`
  * is likewise pre-built by the caller (via buildGhlCustomFields) — this
  * function just carries it through, defaulting to empty when the push has no

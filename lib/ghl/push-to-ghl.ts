@@ -3,7 +3,6 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 import { getPeopleForGhl, type GhlPushCandidate } from "@/lib/data/people";
 import type { PersonListFilters } from "@/lib/data/people";
 import { pushContactToGhl, GhlApiError, type GhlCredentials } from "@/lib/ghl/client";
-import { buildGhlTag } from "@/lib/ghl/tag";
 import { buildGhlContactPayload, buildGhlCustomFields } from "@/lib/ghl/contact-payload";
 import type { ClientRow } from "@/lib/data/clients";
 import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
@@ -81,10 +80,8 @@ export interface RunGhlPushDeps {
    * brand_name. Omitted means no mapping was offered — today's always-include,
    * prefer-brand-name behavior is preserved. */
   standardFieldMapping?: GhlStandardFieldMapping;
-  /** Optional extra identifier (e.g. "leadership", "marketing", a segment
-   * name) appended as one more pipe-delimited segment on every tag built for
-   * this run — see buildGhlTag. Left undefined/blank, the tag format is
-   * unchanged. */
+  /** The tag applied to every contact pushed in this run. Left
+   * undefined/blank, contacts are pushed with no tag at all. */
   customTagSuffix?: string | null;
   /** Index into the resolved eligible-candidate list to resume from — the
    * background worker (issue #120) re-resolves getPeopleForGhl(filters)
@@ -148,9 +145,10 @@ async function pushOne(
   standardFieldMapping: GhlStandardFieldMapping | undefined,
   customTagSuffix?: string | null
 ): Promise<PushOneResult> {
-  const tag = buildGhlTag(client.name, candidate.record, customTagSuffix);
+  const userTag = customTagSuffix?.trim();
+  const tags = userTag ? [userTag] : [];
   const customFields = buildGhlCustomFields(candidate.customData, fieldMapping);
-  const payload = buildGhlContactPayload(candidate.record, [tag], customFields, standardFieldMapping);
+  const payload = buildGhlContactPayload(candidate.record, tags, customFields, standardFieldMapping);
 
   try {
     const { contactId } = await pushContactToGhl(
@@ -177,7 +175,7 @@ async function pushOne(
         client_id: client.id,
         platform: PLATFORM,
         platform_contact_id: contactId,
-        campaign_tag: tag,
+        campaign_tag: userTag ?? null,
         pushed_at: pushedAt,
         pushed_by_user_id: actor.id,
         pushed_by_email: actor.email,

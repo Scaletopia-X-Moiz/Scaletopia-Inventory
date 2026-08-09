@@ -244,10 +244,75 @@ describe("runPeopleGhlPush", () => {
     expect(pushRows).toHaveLength(1);
     expect(pushRows![0].platform).toBe("ghl");
     expect(pushRows![0].client_id).toBe(client.id);
-    expect(pushRows![0].campaign_tag).toContain(client.name);
+    expect(pushRows![0].campaign_tag).toBeNull();
     expect(pushRows![0].platform_contact_id).toBeTruthy();
     expect(pushRows![0].pushed_by_user_id).toBe(testActor.id);
     expect(pushRows![0].pushed_by_email).toBe(testActor.email);
+  });
+
+  it("sends only the user-typed tag — no structured client/niche/source tag", async () => {
+    const niche = unique("tag-user");
+    await seedPeople(niche, [{ slug: "a", phoneType: "mobile" }]);
+    const client = await insertClient();
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse((init?.body as string) ?? "{}"));
+      contactCounter++;
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ contact: { id: `contact_${contactCounter}` } }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, {
+      fetchImpl,
+      customTagSuffix: "leadership",
+    });
+
+    expect(bodies[0].tags).toEqual(["leadership"]);
+
+    const { data: person } = await supabaseAdmin
+      .from("people")
+      .select("id")
+      .eq("linkedin_url", testLinkedin(`${niche}-a`))
+      .single();
+    const { data: pushRows } = await supabaseAdmin
+      .from("platform_pushes")
+      .select("campaign_tag")
+      .eq("person_id", person!.id as string);
+    expect(pushRows![0].campaign_tag).toBe("leadership");
+  });
+
+  it("sends no tags and a null campaign_tag when the tag field is left blank", async () => {
+    const niche = unique("tag-blank");
+    await seedPeople(niche, [{ slug: "a", phoneType: "mobile" }]);
+    const client = await insertClient();
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse((init?.body as string) ?? "{}"));
+      contactCounter++;
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ contact: { id: `contact_${contactCounter}` } }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
+
+    expect(bodies[0].tags).toEqual([]);
+
+    const { data: person } = await supabaseAdmin
+      .from("people")
+      .select("id")
+      .eq("linkedin_url", testLinkedin(`${niche}-a`))
+      .single();
+    const { data: pushRows } = await supabaseAdmin
+      .from("platform_pushes")
+      .select("campaign_tag")
+      .eq("person_id", person!.id as string);
+    expect(pushRows![0].campaign_tag).toBeNull();
   });
 
   it("re-pushes on a second run and overwrites the platform_pushes row (no dedupe)", async () => {

@@ -514,7 +514,7 @@ export function PushToGhlButton({
 
             <div className="mt-4 flex flex-col gap-1.5">
               <label htmlFor="ghl-tag-suffix" className="text-xs font-medium text-ink">
-                Additional tag identifier (optional)
+                Tag (optional)
               </label>
               <input
                 id="ghl-tag-suffix"
@@ -525,16 +525,7 @@ export function PushToGhlButton({
                 className="rounded-md border border-rule bg-transparent px-2 py-1.5 text-xs text-ink outline-none focus:border-stamp"
               />
               <p className="text-xs text-ink-mute">
-                Tag format: {selectedClient?.name ?? "Client"} - Niche | Employee Range | Country
-                | Source
-                {customTagSuffix.trim() ? (
-                  <>
-                    {" | "}
-                    <span className="text-ink">{customTagSuffix.trim()}</span>
-                  </>
-                ) : (
-                  <> — your addition goes here as one more segment</>
-                )}
+                Applied to every contact in this push. Leave blank to push with no tag.
               </p>
             </div>
 
