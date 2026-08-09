@@ -4,6 +4,7 @@ import type {
   EmailBisonPushRecord,
   EmailBisonStandardFieldMapping,
 } from "@/lib/emailbison/types";
+import { resolveMappedValue } from "@/lib/push/resolve-mapped-value";
 
 /** Maps a bindable "People-table column" name (as offered in the Add-to-
  * EmailBison row-adder, issue #52/#61) to the matching EmailBisonPushRecord
@@ -38,6 +39,21 @@ function stringifyCustomValue(value: unknown): string | null {
   }
 }
 
+/** Resolves a column-bound entry's raw value against one candidate's
+ * EmailBisonPushRecord + custom_data. companyName gets the same clean-name
+ * preference as buildEmailBisonLeadPayload, so a custom variable bound to
+ * "Company name" isn't left sending the raw value — mirrors GHL's
+ * resolveGhlColumnValue (lib/ghl/contact-payload.ts) special case. */
+function resolveEmailBisonColumnValue(
+  columnKey: string,
+  record: EmailBisonPushRecord,
+  customData: Record<string, unknown> | null
+): unknown {
+  if (columnKey === "companyName") return record.brandName || record.companyName;
+  const recordField = KNOWN_RECORD_FIELDS[columnKey];
+  return recordField ? record[recordField] : (customData?.[columnKey] ?? null);
+}
+
 /** Resolves each custom-variable entry against one candidate's data: a
  * literal entry (no `columnKey`) passes through untouched; a column-bound
  * entry reads the matching EmailBisonPushRecord field or, failing that, the
@@ -47,7 +63,10 @@ function stringifyCustomValue(value: unknown): string | null {
  * particular record) is dropped rather than sent as an empty string, so one
  * record's missing field doesn't send a misleading blank value to EmailBison.
  * Called once per candidate, not once per push, since the resolved value
- * differs per record. */
+ * differs per record. Shares its resolve/stringify algorithm with GHL's
+ * buildGhlCustomFields via lib/push/resolve-mapped-value.ts — this function
+ * keeps stringifyCustomValue's JSON-encode-arrays behavior as its stringify
+ * strategy, distinct from GHL's join-with-", ". */
 export function resolveCustomVariables(
   entries: EmailBisonCustomVariableEntry[],
   record: EmailBisonPushRecord,
@@ -60,16 +79,11 @@ export function resolveCustomVariables(
       continue;
     }
 
-    const recordField = KNOWN_RECORD_FIELDS[entry.columnKey];
-    // companyName gets the same clean-name preference as buildEmailBisonLeadPayload,
-    // so a custom variable bound to "Company name" isn't left sending the raw value.
-    const raw =
-      entry.columnKey === "companyName"
-        ? record.brandName || record.companyName
-        : recordField
-          ? record[recordField]
-          : (customData?.[entry.columnKey] ?? null);
-    const value = stringifyCustomValue(raw);
+    const value = resolveMappedValue(
+      entry,
+      (columnKey) => resolveEmailBisonColumnValue(columnKey, record, customData),
+      stringifyCustomValue
+    );
     if (value === null) continue;
     resolved.push({ name: entry.name, value });
   }

@@ -9,18 +9,65 @@ import { fetchActiveClients } from "@/lib/data/active-clients-client";
 import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
 import type { GhlCustomField } from "@/lib/ghl/custom-fields";
 import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
+import {
+  normalizeSavedGhlCustomFieldMapping,
+  type SavedGhlCustomFieldMappingEntry,
+} from "@/lib/ghl/field-mapping";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
+import type { EnrichmentField } from "@/lib/data/enrichment-fields";
 import {
   fetchSavedPushFieldMapping,
   savePushFieldMapping,
 } from "@/lib/data/push-field-mappings-client";
 
-/** Stored shape for platform "ghl" in push_field_mappings (ticket #114) —
- * the two pieces of mapping state this button collects, read back verbatim
- * as the next push's starting point for the same (clientId, "ghl") pair. */
+/** Stored shape for platform "ghl" in push_field_mappings (ticket #114,
+ * extended by #142 for literal-value support). `customFieldMapping` is
+ * normalized on read (normalizeSavedGhlCustomFieldMapping) so a legacy row
+ * saved before #142 (a plain virtualColumnKey string per ghlFieldId) still
+ * loads correctly. */
 interface SavedGhlFieldMapping {
   standardFields: GhlStandardFieldMapping;
-  customFieldMapping: Record<string, string>;
+  customFieldMapping: Record<string, SavedGhlCustomFieldMappingEntry>;
+}
+
+/** A GHL custom field's mapping-table row state — "ignore" leaves the field
+ * out of the push entirely (renamed from the old "No data" option to match
+ * the CSV-import MappingTable's "— ignore —" convention), "literal" sends
+ * `value` verbatim to every contact, "column" resolves `columnKey` per
+ * candidate (a bound standard field or virtual/enrichment column). */
+interface CustomFieldRowState {
+  source: "column" | "literal" | "ignore";
+  columnKey: string;
+  value: string;
+}
+
+/** Standard People-table fields bindable by a custom-field row — mirrors
+ * EmailBison's BINDABLE_RECORD_COLUMNS (components/people/push-to-emailbison-button.tsx)
+ * over GHL's own field set (lib/ghl/contact-payload.ts's GHL_KNOWN_RECORD_FIELDS).
+ * Must stay a superset of GHL_KNOWN_RECORD_FIELDS's keys — resolveDefaultFieldMapping
+ * (lib/push/resolve-default-field-mapping.ts) auto-maps against that same field
+ * set, and an auto-matched columnKey with no corresponding <option> here would
+ * render as a blank/unselected row. brandName is included for that reason even
+ * though "Company name" (bound to companyName) already prefers it. */
+const BINDABLE_RECORD_COLUMNS: { key: string; label: string }[] = [
+  { key: "firstName", label: "First name" },
+  { key: "lastName", label: "Last name" },
+  { key: "email", label: "Email" },
+  { key: "phone", label: "Phone" },
+  { key: "companyName", label: "Company name" },
+  { key: "brandName", label: "Cleaned brand name" },
+  { key: "city", label: "City" },
+  { key: "country", label: "Country" },
+  { key: "niche", label: "Niche" },
+  { key: "employeeCount", label: "Employee count" },
+  { key: "source", label: "Source" },
+];
+
+function ScoreIndicator({ score }: { score: number }) {
+  if (score >= 0.8) return <span className="inline-block h-2 w-2 rounded-full bg-green-500" title="High confidence" />;
+  if (score >= 0.5) return <span className="inline-block h-2 w-2 rounded-full bg-yellow-500" title="Medium confidence" />;
+  if (score > 0) return <span className="inline-block h-2 w-2 rounded-full bg-orange-400" title="Low confidence" />;
+  return <span className="inline-block h-2 w-2 rounded-full bg-rule" title="No match" />;
 }
 
 /** Reset baseline for standardFields between pushes — matches
@@ -89,9 +136,18 @@ export function PushToGhlButton({
 
   const [customFields, setCustomFields] = useState<GhlCustomField[] | null>(null);
   const [customFieldsError, setCustomFieldsError] = useState<string | null>(null);
-  // ghlFieldId -> chosen virtualColumnKey ("" means "no data source / leave empty").
-  const [mapping, setMapping] = useState<Record<string, string>>({});
+  // ghlFieldId -> row state (source/columnKey/value).
+  const [mapping, setMapping] = useState<Record<string, CustomFieldRowState>>({});
+  // ghlFieldId -> fuzzyMatchColumn score from the auto-mapping default, for
+  // the mapping table's confidence dot (ScoreIndicator).
+  const [matchScores, setMatchScores] = useState<Record<string, number>>({});
   const [standardFields, setStandardFields] = useState<GhlStandardFieldMapping>(FALLBACK_STANDARD_FIELDS);
+
+  // Custom_data enrichment fields present in the currently filtered/selected
+  // people, offered as extra bind targets alongside BINDABLE_RECORD_COLUMNS
+  // and virtualColumns — same discovery endpoint the EmailBison button uses
+  // (app/api/people/enrichment-fields), already scoped server-side.
+  const [enrichmentFields, setEnrichmentFields] = useState<EnrichmentField[]>([]);
 
   const [preview, setPreview] = useState<PreviewCounts | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -116,6 +172,8 @@ export function PushToGhlButton({
     setCustomFields(null);
     setCustomFieldsError(null);
     setMapping({});
+    setMatchScores({});
+    setEnrichmentFields([]);
     setStandardFields(FALLBACK_STANDARD_FIELDS);
     setPreview(null);
     setPreviewError(null);
@@ -169,7 +227,23 @@ export function PushToGhlButton({
     setCustomFields(null);
     setCustomFieldsError(null);
     setMapping({});
+    setMatchScores({});
+    setEnrichmentFields([]);
     setStandardFields(FALLBACK_STANDARD_FIELDS);
+
+    // Best-effort, mirrors the EmailBison button's enrichment-fields fetch —
+    // the column dropdown just falls back to standard + active virtual
+    // columns if this fails.
+    (async () => {
+      try {
+        const res = await fetch(`/api/people/enrichment-fields?${paramsStr}`);
+        if (!res.ok) throw new Error(res.status.toString());
+        const data = (await res.json()) as { fields: EnrichmentField[] };
+        setEnrichmentFields(data.fields);
+      } catch {
+        setEnrichmentFields([]);
+      }
+    })();
 
     try {
       const res = await fetch(`/api/people/push-to-ghl/default-mapping?${paramsStr}`, {
@@ -182,22 +256,39 @@ export function PushToGhlButton({
         customFields: GhlCustomField[];
         standardFields: GhlStandardFieldMapping;
         customFieldMapping: GhlFieldMapping[];
+        customFieldScores: Record<string, number>;
       };
       setCustomFields(data.customFields);
       setStandardFields(data.standardFields);
-      setMapping(
-        Object.fromEntries(data.customFieldMapping.map((m) => [m.ghlFieldId, m.virtualColumnKey]))
-      );
+      setMatchScores(data.customFieldScores);
+      const defaultMapping: Record<string, CustomFieldRowState> = {};
+      for (const field of data.customFields) defaultMapping[field.id] = { source: "ignore", columnKey: "", value: "" };
+      for (const m of data.customFieldMapping) {
+        defaultMapping[m.ghlFieldId] = { source: "column", columnKey: m.columnKey ?? "", value: "" };
+      }
+      setMapping(defaultMapping);
 
       // Ticket #114: a saved mapping for this (client, "ghl") pair — if one
       // exists — overrides the pure auto-mapping default just applied above.
-      // Best-effort: a fetch failure just leaves the auto-mapping default in
-      // place, same as having no saved mapping at all.
+      // normalizeSavedGhlCustomFieldMapping (ticket #142) upgrades a legacy
+      // row (plain virtualColumnKey string per ghlFieldId) to the current
+      // shape. Best-effort: a fetch failure just leaves the auto-mapping
+      // default in place, same as having no saved mapping at all.
       try {
         const saved = await fetchSavedPushFieldMapping<SavedGhlFieldMapping>(selectedClient.id, "ghl");
         if (saved) {
           setStandardFields(saved.standardFields);
-          setMapping(saved.customFieldMapping);
+          const normalized = normalizeSavedGhlCustomFieldMapping(saved.customFieldMapping);
+          setMapping((prev) => {
+            const next = { ...prev };
+            for (const field of data.customFields) {
+              const entry = normalized[field.id];
+              next[field.id] = entry
+                ? { source: entry.source, columnKey: entry.columnKey ?? "", value: entry.value ?? "" }
+                : { source: "ignore", columnKey: "", value: "" };
+            }
+            return next;
+          });
         }
       } catch {
         // keep auto-mapping default
@@ -207,8 +298,11 @@ export function PushToGhlButton({
     }
   }
 
-  function handleMappingChange(ghlFieldId: string, virtualColumnKey: string) {
-    setMapping((prev) => ({ ...prev, [ghlFieldId]: virtualColumnKey }));
+  function updateCustomFieldMapping(ghlFieldId: string, patch: Partial<CustomFieldRowState>) {
+    setMapping((prev) => ({
+      ...prev,
+      [ghlFieldId]: { ...(prev[ghlFieldId] ?? { source: "ignore", columnKey: "", value: "" }), ...patch },
+    }));
   }
 
   function handleStandardFieldChange<K extends keyof GhlStandardFieldMapping>(
@@ -224,16 +318,34 @@ export function PushToGhlButton({
     setStatus("pushing");
     setPushLabel("Queuing…");
 
-    const fieldMapping: GhlFieldMapping[] = Object.entries(mapping)
-      .filter(([, virtualColumnKey]) => virtualColumnKey !== "")
-      .map(([ghlFieldId, virtualColumnKey]) => ({ virtualColumnKey, ghlFieldId }));
+    // A row is sent only when it has something to send: "ignore", an unset
+    // "column" row (no columnKey chosen), and a blank "literal" row are all
+    // left out — matching the old "" == "no data source" convention and
+    // preventing a blank literal from silently overwriting the field with
+    // an empty string on every contact in the push.
+    const activeEntries = Object.entries(mapping).filter(
+      ([, m]) =>
+        m.source !== "ignore" &&
+        !(m.source === "column" && m.columnKey === "") &&
+        !(m.source === "literal" && m.value === "")
+    );
+    const fieldMapping: GhlFieldMapping[] = activeEntries.map(([ghlFieldId, m]) =>
+      m.source === "literal"
+        ? { ghlFieldId, source: "literal", value: m.value }
+        : { ghlFieldId, source: "column", columnKey: m.columnKey }
+    );
+    const customFieldMappingToSave: Record<string, SavedGhlCustomFieldMappingEntry> = {};
+    for (const [ghlFieldId, m] of activeEntries) {
+      customFieldMappingToSave[ghlFieldId] =
+        m.source === "literal" ? { source: "literal", value: m.value } : { source: "column", columnKey: m.columnKey };
+    }
 
     // Ticket #114: save the mapping actually being used as the new starting
     // point for the next push to this (client, "ghl") pair. Fire-and-forget —
     // never blocks or fails the push itself; only ever affects future pushes.
     savePushFieldMapping(selectedClient.id, "ghl", {
       standardFields,
-      customFieldMapping: mapping,
+      customFieldMapping: customFieldMappingToSave,
     } satisfies SavedGhlFieldMapping).catch(() => {});
 
     // Pushes now run as durable background jobs (issue #120): POST enqueues a
@@ -268,6 +380,22 @@ export function PushToGhlButton({
   }
 
   const label = status === "pushing" && pushLabel ? pushLabel : "Push to GHL";
+
+  // Standard fields, then active virtual columns, then every other
+  // enrichment (custom_data) key discovered on the current view — deduped by
+  // key, mirrors the EmailBison button's bindableColumns.
+  const bindableColumnKeys = new Set(BINDABLE_RECORD_COLUMNS.map((c) => c.key));
+  const bindableColumns = [...BINDABLE_RECORD_COLUMNS];
+  for (const c of virtualColumns) {
+    if (bindableColumnKeys.has(c.key)) continue;
+    bindableColumnKeys.add(c.key);
+    bindableColumns.push({ key: c.key, label: c.key });
+  }
+  for (const f of enrichmentFields) {
+    if (bindableColumnKeys.has(f.key)) continue;
+    bindableColumnKeys.add(f.key);
+    bindableColumns.push({ key: f.key, label: f.key });
+  }
 
   return (
     <AlertDialog.Root open={status !== "idle"} onOpenChange={(open) => !open && handleCancel()}>
@@ -363,16 +491,16 @@ export function PushToGhlButton({
             </div>
           </AlertDialog.Content>
         ) : step === "mapping" ? (
-          <AlertDialog.Content className="fixed top-[20%] left-1/2 z-50 w-full max-w-lg -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
+          <AlertDialog.Content className="fixed top-[10%] left-1/2 z-50 max-h-[80vh] w-full max-w-lg -translate-x-1/2 overflow-y-auto rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
             <AlertDialog.Title className="text-sm font-semibold text-ink">
               Map fields for GHL
             </AlertDialog.Title>
             <AlertDialog.Description className="mt-2 text-sm text-ink-soft">
               Review where each field is sourced from before pushing — defaults are pre-selected,
-              override any row or skip a field to leave it out of this push.
+              override any row or ignore a field to leave it out of this push.
             </AlertDialog.Description>
 
-            <div className="mt-4 max-h-80 overflow-y-auto rounded-lg border border-rule">
+            <div className="mt-4 overflow-hidden rounded-lg border border-rule">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-rule bg-hover">
@@ -409,7 +537,7 @@ export function PushToGhlButton({
                                 e.target.value as GhlStandardFieldMapping["companyName"]
                               )
                             }
-                            className="w-full rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                            className="w-full rounded border border-rule bg-paper px-2 py-1 text-xs text-ink outline-none focus:border-stamp"
                           >
                             <option value="brand_name">Cleaned brand name</option>
                             <option value="company_name">Raw company name</option>
@@ -429,7 +557,7 @@ export function PushToGhlButton({
                                   e.target.value as "include" | "skip"
                                 )
                               }
-                              className="w-full rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                              className="w-full rounded border border-rule bg-paper px-2 py-1 text-xs text-ink outline-none focus:border-stamp"
                             >
                               <option value="include">Include</option>
                               <option value="skip">Skip</option>
@@ -437,25 +565,59 @@ export function PushToGhlButton({
                           </td>
                         </tr>
                       ))}
-                      {customFields.map((field) => (
-                        <tr key={field.id} className="bg-paper">
-                          <td className="px-4 py-2.5 text-xs font-medium text-ink">{field.name}</td>
-                          <td className="px-4 py-2.5">
-                            <select
-                              value={mapping[field.id] ?? ""}
-                              onChange={(e) => handleMappingChange(field.id, e.target.value)}
-                              className="w-full rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
-                            >
-                              <option value="">No data</option>
-                              {virtualColumns.map((col) => (
-                                <option key={col.key} value={col.key}>
-                                  {col.key}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                        </tr>
-                      ))}
+                      {customFields.map((field) => {
+                        const row = mapping[field.id] ?? { source: "ignore" as const, columnKey: "", value: "" };
+                        const score = matchScores[field.id] ?? 0;
+                        return (
+                          <tr key={field.id} className="bg-paper">
+                            <td className="px-4 py-2.5">
+                              <div className="flex items-center gap-2">
+                                <ScoreIndicator score={row.source === "ignore" ? 0 : score} />
+                                <span className="text-xs font-medium text-ink">{field.name}</span>
+                              </div>
+                            </td>
+                            <td className="px-4 py-2.5">
+                              <div className="flex items-center gap-1.5">
+                                <select
+                                  value={row.source}
+                                  onChange={(e) =>
+                                    updateCustomFieldMapping(field.id, {
+                                      source: e.target.value as CustomFieldRowState["source"],
+                                    })
+                                  }
+                                  className="rounded border border-rule bg-paper px-2 py-1 text-xs text-ink outline-none focus:border-stamp"
+                                >
+                                  <option value="ignore">— ignore —</option>
+                                  <option value="column">Column</option>
+                                  <option value="literal">Literal</option>
+                                </select>
+                                {row.source === "column" ? (
+                                  <select
+                                    value={row.columnKey}
+                                    onChange={(e) => updateCustomFieldMapping(field.id, { columnKey: e.target.value })}
+                                    className="w-full rounded border border-rule bg-paper px-2 py-1 text-xs text-ink outline-none focus:border-stamp"
+                                  >
+                                    <option value="">Choose a column…</option>
+                                    {bindableColumns.map((col) => (
+                                      <option key={col.key} value={col.key}>
+                                        {col.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : row.source === "literal" ? (
+                                  <input
+                                    type="text"
+                                    placeholder="Value"
+                                    value={row.value}
+                                    onChange={(e) => updateCustomFieldMapping(field.id, { value: e.target.value })}
+                                    className="w-full rounded border border-rule bg-paper px-2 py-1 text-xs text-ink outline-none focus:border-stamp"
+                                  />
+                                ) : null}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </>
                   )}
                 </tbody>

@@ -1,6 +1,7 @@
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
 import type { GhlCustomField } from "@/lib/ghl/custom-fields";
 import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
+import { GHL_KNOWN_RECORD_FIELDS } from "@/lib/ghl/contact-payload";
 import type { EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
 import { fuzzyMatchColumn } from "@/lib/import/normalize";
 
@@ -28,6 +29,11 @@ export interface ResolveDefaultGhlFieldMappingResult {
   platform: "ghl";
   standardFields: GhlStandardFieldMapping;
   customFieldMapping: GhlFieldMapping[];
+  /** fuzzyMatchColumn's match score (0-1) per mapped ghlFieldId — lets the
+   * mapping table (ticket #142) render an import-style confidence dot.
+   * Absent entries (no match above fuzzyMatchColumn's 0.4 threshold) render
+   * as "no match". */
+  customFieldScores: Record<string, number>;
 }
 
 export interface ResolveDefaultEmailBisonFieldMappingResult {
@@ -80,16 +86,23 @@ export function resolveDefaultFieldMapping(
   }
 
   // GHL custom fields default to the best fuzzy-name match against the
-  // active virtual columns (candidates = virtual column keys, since
-  // ActiveVirtualColumn has no separate display label). Below
-  // fuzzyMatchColumn's own 0.4 threshold it returns null, which we carry
-  // through as "no entry" — the preview screen renders that as "No data".
-  const candidateKeys = args.virtualColumns.map((column) => column.key);
+  // active virtual columns plus the standard GHL record field names
+  // (ticket #142 — previously only virtual columns were candidates, so a
+  // custom field like "First Name" could never auto-map to the person's own
+  // firstName). Below fuzzyMatchColumn's own 0.4 threshold it returns null,
+  // which we carry through as "no entry" — the mapping table renders that as
+  // "— ignore —". Deduped so a virtual column that happens to share a name
+  // with a standard field isn't offered twice.
+  const candidateKeys = [
+    ...new Set([...args.virtualColumns.map((column) => column.key), ...Object.keys(GHL_KNOWN_RECORD_FIELDS)]),
+  ];
   const customFieldMapping: GhlFieldMapping[] = [];
+  const customFieldScores: Record<string, number> = {};
   for (const field of args.customFields) {
     const match = fuzzyMatchColumn(field.name, candidateKeys);
     if (match) {
-      customFieldMapping.push({ virtualColumnKey: match.field, ghlFieldId: field.id });
+      customFieldMapping.push({ ghlFieldId: field.id, source: "column", columnKey: match.field });
+      customFieldScores[field.id] = match.score;
     }
   }
 
@@ -105,5 +118,6 @@ export function resolveDefaultFieldMapping(
       country: "include",
     },
     customFieldMapping,
+    customFieldScores,
   };
 }

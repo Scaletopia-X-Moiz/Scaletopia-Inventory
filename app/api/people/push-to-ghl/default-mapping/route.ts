@@ -64,6 +64,7 @@ export async function POST(request: NextRequest) {
       customFields,
       standardFields: defaults.standardFields,
       customFieldMapping: defaults.customFieldMapping,
+      customFieldScores: defaults.customFieldScores,
     });
   } catch (err) {
     const message = err instanceof GhlApiError || err instanceof Error ? err.message : String(err);

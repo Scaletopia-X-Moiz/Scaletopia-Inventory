@@ -476,7 +476,7 @@ describe("runPeopleGhlPush", () => {
 
     await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, {
       fetchImpl,
-      fieldMapping: [{ virtualColumnKey: "lead_score", ghlFieldId: "f1" }],
+      fieldMapping: [{ ghlFieldId: "f1", source: "column", columnKey: "lead_score" }],
     });
 
     const customFields = bodies.map((b) => b.customFields);

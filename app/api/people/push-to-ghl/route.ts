@@ -2,7 +2,8 @@ import { after, type NextRequest } from "next/server";
 import { parsePersonFilters } from "@/lib/data/people-search-params";
 import { getClientById } from "@/lib/data/clients";
 import { createPushJob } from "@/lib/data/push-jobs";
-import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
+import type { GhlStandardFieldMapping } from "@/lib/ghl/types";
+import { normalizeGhlFieldMapping } from "@/lib/ghl/field-mapping";
 import { getUser } from "@/lib/auth/dal";
 
 export const dynamic = "force-dynamic";
@@ -12,21 +13,6 @@ export const dynamic = "force-dynamic";
 function workerKickHeaders(): Record<string, string> {
   const workerSecret = process.env.PUSH_WORKER_SECRET;
   return workerSecret ? { "x-worker-secret": workerSecret } : {};
-}
-
-function isFieldMapping(value: unknown): value is GhlFieldMapping {
-  if (typeof value !== "object" || value === null) return false;
-  const m = value as Record<string, unknown>;
-  return typeof m.virtualColumnKey === "string" && typeof m.ghlFieldId === "string";
-}
-
-/** Parses the mapping step's chosen virtual-column → GHL-field pairs
- * (ticket #51) off the request body. Malformed entries are dropped rather
- * than rejected, matching how virtual-column filters degrade elsewhere in
- * this app rather than erroring the whole push over one bad entry. */
-function parseFieldMapping(value: unknown): GhlFieldMapping[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter(isFieldMapping);
 }
 
 function isStandardFieldMapping(value: unknown): value is GhlStandardFieldMapping {
@@ -82,7 +68,11 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "A clientId is required" }, { status: 400 });
   }
 
-  const fieldMapping = parseFieldMapping(fieldMappingRaw);
+  // normalizeGhlFieldMapping (ticket #142) upgrades a pre-migration legacy
+  // entry ({virtualColumnKey, ghlFieldId}) to the current discriminated
+  // union instead of silently dropping it — a dropped legacy entry would
+  // look like a successful push that sends zero custom fields.
+  const fieldMapping = normalizeGhlFieldMapping(fieldMappingRaw);
   const standardFieldMapping = parseStandardFieldMapping(standardFieldMappingRaw);
   const customTagSuffix = typeof customTagSuffixRaw === "string" ? customTagSuffixRaw : undefined;
 

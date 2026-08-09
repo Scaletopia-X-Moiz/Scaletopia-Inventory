@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildGhlContactPayload, buildGhlCustomFields } from "@/lib/ghl/contact-payload";
+import type { GhlFieldMapping } from "@/lib/ghl/types";
 
 const fullRecord = {
   firstName: "Jane",
@@ -168,9 +169,9 @@ describe("buildGhlContactPayload", () => {
 });
 
 describe("buildGhlCustomFields", () => {
-  const mapping = [
-    { virtualColumnKey: "lead_score", ghlFieldId: "f1" },
-    { virtualColumnKey: "plan", ghlFieldId: "f2" },
+  const mapping: GhlFieldMapping[] = [
+    { ghlFieldId: "f1", source: "column", columnKey: "lead_score" },
+    { ghlFieldId: "f2", source: "column", columnKey: "plan" },
   ];
 
   it("maps each mapped virtual-column key to its GHL field id/value", () => {
@@ -188,12 +189,12 @@ describe("buildGhlCustomFields", () => {
 
   it("skips a mapping whose key isn't present in custom_data at all", () => {
     const result = buildGhlCustomFields({ plan: "pro" }, [
-      { virtualColumnKey: "missing_key", ghlFieldId: "f9" },
+      { ghlFieldId: "f9", source: "column", columnKey: "missing_key" },
     ]);
     expect(result).toEqual([]);
   });
 
-  it("returns an empty array when custom_data is null", () => {
+  it("returns an empty array when custom_data is null but the mapping is column-sourced", () => {
     expect(buildGhlCustomFields(null, mapping)).toEqual([]);
   });
 
@@ -201,16 +202,16 @@ describe("buildGhlCustomFields", () => {
     expect(buildGhlCustomFields({ lead_score: 87 }, [])).toEqual([]);
   });
 
-  it("joins a list-type value with a comma-space delimiter", () => {
+  it("joins a list-type value with a comma-space delimiter (not JSON-encoded, unlike EmailBison)", () => {
     const result = buildGhlCustomFields({ specialties: ["seo", "ppc", "email"] }, [
-      { virtualColumnKey: "specialties", ghlFieldId: "f3" },
+      { ghlFieldId: "f3", source: "column", columnKey: "specialties" },
     ]);
     expect(result).toEqual([{ id: "f3", value: "seo, ppc, email" }]);
   });
 
   it("skips a mapping whose list-type value is an empty array", () => {
     const result = buildGhlCustomFields({ specialties: [] }, [
-      { virtualColumnKey: "specialties", ghlFieldId: "f3" },
+      { ghlFieldId: "f3", source: "column", columnKey: "specialties" },
     ]);
     expect(result).toEqual([]);
   });
@@ -219,13 +220,64 @@ describe("buildGhlCustomFields", () => {
     const result = buildGhlCustomFields(
       { lead_score: 87, plan: true },
       [
-        { virtualColumnKey: "lead_score", ghlFieldId: "f1" },
-        { virtualColumnKey: "plan", ghlFieldId: "f2" },
+        { ghlFieldId: "f1", source: "column", columnKey: "lead_score" },
+        { ghlFieldId: "f2", source: "column", columnKey: "plan" },
       ]
     );
     expect(result).toEqual([
       { id: "f1", value: "87" },
       { id: "f2", value: "true" },
     ]);
+  });
+
+  it("sends a literal entry's value verbatim, ignoring custom_data entirely", () => {
+    const result = buildGhlCustomFields(null, [{ ghlFieldId: "f4", source: "literal", value: "static-value" }]);
+    expect(result).toEqual([{ id: "f4", value: "static-value" }]);
+  });
+
+  it("resolves a column entry bound to a standard record field", () => {
+    const record = {
+      firstName: "Jane",
+      lastName: "Doe",
+      email: "jane@example.com",
+      phone: "+15551234567",
+      companyName: "Acme Inc",
+      brandName: null,
+      city: "Austin",
+      country: "US",
+      niche: "dtc-beauty",
+      employeeCount: 42,
+      source: "apollo",
+    };
+    const result = buildGhlCustomFields(
+      null,
+      [
+        { ghlFieldId: "f5", source: "column", columnKey: "niche" },
+        { ghlFieldId: "f6", source: "column", columnKey: "employeeCount" },
+      ],
+      record
+    );
+    expect(result).toEqual([
+      { id: "f5", value: "dtc-beauty" },
+      { id: "f6", value: "42" },
+    ]);
+  });
+
+  it("prefers brandName over companyName for a column entry bound to companyName", () => {
+    const record = {
+      firstName: "Jane",
+      lastName: "Doe",
+      email: "jane@example.com",
+      phone: "+15551234567",
+      companyName: "ACME INC dba",
+      brandName: "Acme",
+      city: "Austin",
+      country: "US",
+      niche: null,
+      employeeCount: null,
+      source: null,
+    };
+    const result = buildGhlCustomFields(null, [{ ghlFieldId: "f7", source: "column", columnKey: "companyName" }], record);
+    expect(result).toEqual([{ id: "f7", value: "Acme" }]);
   });
 });

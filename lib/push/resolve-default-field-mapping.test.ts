@@ -67,11 +67,25 @@ describe("resolveDefaultFieldMapping (ghl)", () => {
     });
 
     expect(result.customFieldMapping).toEqual([
-      { virtualColumnKey: "linkedin_headline", ghlFieldId: "cf-1" },
+      { ghlFieldId: "cf-1", source: "column", columnKey: "linkedin_headline" },
+    ]);
+    expect(result.customFieldScores["cf-1"]).toBeGreaterThan(0);
+  });
+
+  it("auto-selects a standard GHL record field whose name closely matches a custom field's name", () => {
+    const result = resolveDefaultFieldMapping({
+      platform: "ghl",
+      records: [{ companyName: "Acme Inc", brandName: null }],
+      virtualColumns: [],
+      customFields: [customField({ id: "cf-3", name: "First Name" })],
+    });
+
+    expect(result.customFieldMapping).toEqual([
+      { ghlFieldId: "cf-3", source: "column", columnKey: "firstName" },
     ]);
   });
 
-  it("defaults a custom field with no matching source to No data (omitted from the mapping)", () => {
+  it("defaults a custom field with no matching source to ignored (omitted from the mapping)", () => {
     const result = resolveDefaultFieldMapping({
       platform: "ghl",
       records: [{ companyName: "Acme Inc", brandName: null }],

@@ -247,7 +247,8 @@ empty). Created 8 matching GHL custom fields on the Internal location for this s
    `FDWruKYujwnxyK0OOCTY`, `-2` → `rZwfmolKh6T7U6K42853`, `-3` → `11GqjyvDeKj1cjDWFkuG`).
 2. **Field-by-field GHL cross-verification** — fetched all 3 contacts directly via
    `GET /contacts/{id}` and diffed every field against the seeded data: firstName, lastName, email,
-   phone, companyName, city, country, tag (exact `buildGhlTag` shape), and every `customFields`
+   phone, companyName, city, country, tag (the user-typed tag, applied as-is — `buildGhlTag` was
+   removed, see commit `a43bcb5`), and every `customFields`
    entry. All correct, including: list values joined with `", "`; boolean/number values stringified
    correctly; unicode/emoji text (`qa_notes` on person 1) round-tripped byte-for-byte; the 500+ char
    long value came through intact; and `qa_empty_field`, `qa_null_field`, `qa_empty_list`, and the

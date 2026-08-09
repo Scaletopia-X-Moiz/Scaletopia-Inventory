@@ -22,7 +22,8 @@ import { runPeopleGhlPush } from "@/lib/ghl/push-to-ghl";
 import type { PersonListFilters } from "@/lib/data/people";
 import type { CompanyListFilters } from "@/lib/data/companies";
 import type { EmailBisonCustomVariableEntry, EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
-import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
+import type { GhlStandardFieldMapping } from "@/lib/ghl/types";
+import { normalizeGhlFieldMapping } from "@/lib/ghl/field-mapping";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -118,7 +119,10 @@ async function runTick(
     const result = await runPeopleGhlPush(job.filters as unknown as PersonListFilters, client, actor, {
       offset,
       deadline,
-      fieldMapping: options.fieldMapping as GhlFieldMapping[] | undefined,
+      // normalizeGhlFieldMapping (ticket #142) upgrades a job queued before
+      // the #142 deploy (legacy {virtualColumnKey, ghlFieldId} entries)
+      // instead of the blind cast silently misreading it.
+      fieldMapping: normalizeGhlFieldMapping(options.fieldMapping),
       standardFieldMapping: options.standardFieldMapping as GhlStandardFieldMapping | undefined,
       customTagSuffix: options.customTagSuffix as string | null | undefined,
     });

@@ -89,4 +89,30 @@ describe("POST /api/people/push-to-ghl (enqueue-only)", () => {
     expect(arg.options.customTagSuffix).toBe("leadership");
     expect(arg.filters).toMatchObject({ niche: { include: ["widgets", "gadgets"] } });
   });
+
+  it("upgrades a legacy-shaped fieldMapping entry instead of dropping it (ticket #142)", async () => {
+    const response = await POST(
+      makeRequest({
+        clientId: "client-1",
+        fieldMapping: [{ virtualColumnKey: "lead_score", ghlFieldId: "f1" }],
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const arg = createPushJob.mock.calls[0][0];
+    expect(arg.options.fieldMapping).toEqual([{ ghlFieldId: "f1", source: "column", columnKey: "lead_score" }]);
+  });
+
+  it("accepts a current-shaped literal fieldMapping entry", async () => {
+    const response = await POST(
+      makeRequest({
+        clientId: "client-1",
+        fieldMapping: [{ ghlFieldId: "f2", source: "literal", value: "static" }],
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const arg = createPushJob.mock.calls[0][0];
+    expect(arg.options.fieldMapping).toEqual([{ ghlFieldId: "f2", source: "literal", value: "static" }]);
+  });
 });

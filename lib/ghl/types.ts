@@ -41,14 +41,26 @@ export interface GhlContactPayloadShape {
   customFields: { id: string; value: string }[];
 }
 
-/** One user-chosen mapping from an active virtual column (People table
- * enrichment column) to a GHL custom field, collected by the push button's
- * mapping step (ticket #51) and sent to the push route alongside `clientId`. */
+/** One user-chosen mapping for a GHL custom field, collected by the push
+ * button's mapping step (ticket #51, extended by #142 for EmailBison parity)
+ * and sent to the push route alongside `clientId`. A "column" entry binds to
+ * a standard record field or a virtual/enrichment column (`columnKey`,
+ * resolved by buildGhlCustomFields against GhlPushRecord first, falling back
+ * to custom_data); a "literal" entry sends `value` verbatim to every pushed
+ * contact. Mirrors EmailBisonCustomVariableEntry's literal/column duality
+ * (lib/emailbison/types.ts), but kept explicit (`source`) rather than
+ * inferring literal-from-absent-columnKey since GHL's entry is keyed by
+ * ghlFieldId, not a user-typed name. */
 export interface GhlFieldMapping {
-  /** The custom_data key the virtual column reads (ActiveVirtualColumn.key). */
-  virtualColumnKey: string;
   /** The target GHL custom field's id (GhlCustomField.id from ticket #49). */
   ghlFieldId: string;
+  source: "column" | "literal";
+  /** Required when source === "column": a GhlPushRecord field name (see
+   * buildGhlCustomFields's GHL_KNOWN_RECORD_FIELDS) or a virtual/enrichment
+   * column key, resolved against the pushed candidate's custom_data. */
+  columnKey?: string;
+  /** Required when source === "literal": sent verbatim to every contact. */
+  value?: string;
 }
 
 /** The user-chosen (or auto-mapped, ticket #108) source for each standard

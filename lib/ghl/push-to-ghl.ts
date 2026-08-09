@@ -147,7 +147,7 @@ async function pushOne(
 ): Promise<PushOneResult> {
   const userTag = customTagSuffix?.trim();
   const tags = userTag ? [userTag] : [];
-  const customFields = buildGhlCustomFields(candidate.customData, fieldMapping);
+  const customFields = buildGhlCustomFields(candidate.customData, fieldMapping, candidate.record);
   const payload = buildGhlContactPayload(candidate.record, tags, customFields, standardFieldMapping);
 
   try {
