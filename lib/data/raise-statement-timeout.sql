@@ -1,0 +1,33 @@
+-- Run once BY HAND in the Supabase SQL editor (this file is not auto-deployed
+-- — see lib/data/*.sql convention).
+--
+-- STOPGAP for the /companies "Failed to load companies. Please refresh." bug:
+-- text-type virtual-column filters route through `text_filter_matches`
+-- (defined in lib/data/virtual-columns.sql, called via the
+-- `companies_matching_virtual_filters` RPC). That function is NOT inlined by
+-- the production Postgres planner, so it executes as an opaque per-row call
+-- over ~110k companies. Empirically, on a nonexistent key (zero real data
+-- work) text filters take ~8.2s, while number/boolean/date/list filters
+-- (which the planner does inline) take ~1.2s. The ~8.2s just clears the old
+-- ~8s statement_timeout, so the query is killed with Postgres error 57014
+-- and the app/api/companies/results/route.ts handler surfaces it as a 500.
+--
+-- The RPC is invoked via `supabaseAdmin`, which authenticates as the
+-- `service_role` database role — so the statement_timeout that matters here
+-- is service_role's. This migration raises it (and, for safety, the
+-- `authenticated` role's) to 30s, giving the ~8.2s text-filter query
+-- comfortable headroom.
+--
+-- This is a STOPGAP, not a fix: it does not address why
+-- text_filter_matches fails to inline. The real fix is to rewrite that
+-- function so the planner can inline it (tracked separately). Once that
+-- lands, text filters should drop back to ~1.2s like the other types, and
+-- this widened timeout becomes a harmless safety margin rather than
+-- something load-bearing.
+--
+-- NOTE: ALTER ROLE ... SET takes effect on the role's NEXT connection.
+-- If requests are pooled (PgBouncer/Supabase pooler), already-open
+-- connections may keep using the old 8s limit briefly until they cycle.
+
+ALTER ROLE service_role SET statement_timeout = '30s';
+ALTER ROLE authenticated SET statement_timeout = '30s';
