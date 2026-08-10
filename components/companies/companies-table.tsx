@@ -8,6 +8,7 @@ import { PeopleDrawerTrigger } from "@/components/companies/people-drawer-trigge
 import { EmailStatusBadge } from "@/components/people/email-status-badge";
 import { PhoneStatusBadge } from "@/components/people/phone-status-badge";
 import { formatValue } from "@/components/companies/enrichment-list";
+import { ScrollableTable } from "@/components/shared/scrollable-table";
 
 function formatLastUpdated(value: string | null): string {
   if (!value) return "—";
@@ -53,7 +54,7 @@ export function CompaniesTable({
   }
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-rule">
+    <ScrollableTable>
       <Tooltip.Provider delayDuration={200}>
       <table className="w-full min-w-[1340px] border-collapse text-sm">
         <thead>
@@ -187,7 +188,7 @@ export function CompaniesTable({
         </tbody>
       </table>
       </Tooltip.Provider>
-    </div>
+    </ScrollableTable>
   );
 }
 

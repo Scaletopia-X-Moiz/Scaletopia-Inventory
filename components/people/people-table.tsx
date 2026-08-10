@@ -5,6 +5,7 @@ import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
 import { EmailStatusBadge } from "@/components/people/email-status-badge";
 import { PhoneStatusBadge } from "@/components/people/phone-status-badge";
 import { formatValue } from "@/components/companies/enrichment-list";
+import { ScrollableTable } from "@/components/shared/scrollable-table";
 
 function formatLastUpdated(value: string | null): string {
   if (!value) return "—";
@@ -43,7 +44,7 @@ export function PeopleTable({
   }
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-rule">
+    <ScrollableTable>
       <table className="w-full min-w-[1080px] border-collapse text-sm">
         <thead>
           <tr className="border-b border-rule bg-card">
@@ -135,7 +136,7 @@ export function PeopleTable({
           ))}
         </tbody>
       </table>
-    </div>
+    </ScrollableTable>
   );
 }
 
