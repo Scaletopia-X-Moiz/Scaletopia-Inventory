@@ -137,6 +137,36 @@ $$;
 --    expression with no function-call overhead left, exactly like the
 --    smaller test cases. Semantics (types/operators/branches) are
 --    unchanged, only decomposed into smaller pieces.
+--
+-- LIVE PRODUCTION FINDING (later, verified empirically against the ~110k-row
+-- production companies table): even after tickets #34 and #116, the six-arm
+-- `text_filter_matches` STILL did not inline on production Postgres, and every
+-- TEXT-type virtual filter kept full-scanning ~110k rows into statement_timeout
+-- (57014, ~8s) — the "Failed to load companies" failure. The deployed function
+-- bodies matched this file exactly (checked via pg_get_functiondef), so this
+-- was NOT a stale deploy; text_filter_matches simply sat over the planner's
+-- function-inlining size/complexity threshold on this server and stayed an
+-- opaque per-row call. A decisive isolation test (a NONEXISTENT custom_data
+-- key, so per-row data work is ~zero and identical across every type, over the
+-- full table): text `is`/`is_not_empty` took ~8.2s, while number `is`, boolean
+-- `is_true`, date `on`, and list `is_not_empty` each took ~1.2s — so only the
+-- text helper was failing to inline. Crucially, `list_filter_matches` DID
+-- inline (~1.2s) even though it transitively calls `list_contains_matches`,
+-- whose OWN body contains a SubLink (`ARRAY(SELECT jsonb_array_elements_text
+-- (...))`): a transitive reference to a SubLink-containing helper does NOT
+-- block the caller's inlining. That rules out the SubLink chain
+-- (text_contains_matches/jsonb_ilike_patterns) as the cause and pins it on the
+-- one distinguishing factor — `text_filter_matches` was the LARGEST per-type
+-- helper (6 operator arms; by far the most references to its `f`/`data` params)
+-- and thus over the inliner's body-size threshold while the others stayed under
+-- it. The fix (this file): decompose ONE step further, exactly mirroring the
+-- `contains` -> text_contains_matches pattern — pull the `is`/`is_not` equality
+-- out into the flat `text_equals_matches` helper so EVERY arm of
+-- text_filter_matches is a single flat function call and its own body is small
+-- enough to inline. Semantics are byte-identical (a pure planner-inlining fix;
+-- see text_equals_matches' comment for the @>-containment equivalence). NOTE
+-- this must be APPLIED BY HAND in the Supabase SQL editor (re-run this whole
+-- file); the orchestrator verifies inlining via timing probes afterward.
 -- Chip-input dispatch helper for Text contains/not_contains (ticket #116):
 -- true iff `text_value` ILIKE-matches the scalar `value`, or (when `value` is
 -- a jsonb array — the chip input's stacked keywords) ILIKE-matches *any* of
@@ -195,19 +225,35 @@ LANGUAGE sql IMMUTABLE AS $$
   END
 $$;
 
+-- Flat 'is'/'is_not' equality helper for Text, extracted for the same
+-- inlinability reason as text_contains_matches (see the LIVE PRODUCTION FINDING
+-- above): body is a single flat expression, no CASE, no SubLink, so it inlines,
+-- and text_filter_matches' 'is'/'is_not' arms become one flat function call
+-- each instead of an inline `@>`/`to_jsonb` expression tree. Semantics are
+-- byte-identical to the pre-decomposition `(f->'value') @> to_jsonb(row_text)`:
+-- jsonb containment `@>` unifies both value shapes — an array `@>` the scalar
+-- row value matches iff the value is any member (ticket #38's multi-select),
+-- and — by Postgres's scalar-contains-equal-scalar rule — a scalar `@>` the row
+-- value is plain equality, so the single-value case keeps its exact prior
+-- semantics. `value` is the filter's `f->'value'`; `row_text` is the row's
+-- coalesced scalar text (the caller supplies the missing-key COALESCE-to-'').
+CREATE OR REPLACE FUNCTION text_equals_matches(row_text text, value jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT value @> to_jsonb(row_text)
+$$;
+
 CREATE OR REPLACE FUNCTION text_filter_matches(data jsonb, f jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
   SELECT CASE f->>'operator'
     -- 'is'/'is_not' accept either a scalar value or a JSON array of values
     -- (ticket #38's multi-select over a low-cardinality field's real distinct
-    -- values). jsonb containment `@>` unifies both shapes: an array contains
-    -- the row's value iff it matches any member, and — by Postgres's
-    -- scalar-contains-equal-scalar rule — a scalar `@>` the row value is plain
-    -- equality, so the single-value case keeps its exact prior semantics. The
-    -- row value is coalesced to '' (missing key) so 'is_not' still includes a
-    -- row that lacks the key, matching the pre-#38 `<>` behavior.
-    WHEN 'is' THEN (f->'value') @> to_jsonb(COALESCE((data -> (f->>'key')) #>> '{}', ''))
-    WHEN 'is_not' THEN NOT ((f->'value') @> to_jsonb(COALESCE((data -> (f->>'key')) #>> '{}', '')))
+    -- values), delegated to text_equals_matches above (kept flat — see the
+    -- LIVE PRODUCTION FINDING note). The row value is coalesced to '' (missing
+    -- key) so 'is_not' still includes a row that lacks the key, matching the
+    -- pre-#38 `<>` behavior — the COALESCE stays here (not in the helper) so
+    -- this arm reads byte-identically to the pre-decomposition expression.
+    WHEN 'is' THEN text_equals_matches(COALESCE((data -> (f->>'key')) #>> '{}', ''), f->'value')
+    WHEN 'is_not' THEN NOT text_equals_matches(COALESCE((data -> (f->>'key')) #>> '{}', ''), f->'value')
     -- 'contains'/'not_contains' additionally accept a JSON array of keywords
     -- (ticket #116's chip input): "matches any of" / "matches none of",
     -- delegated to text_contains_matches above (kept flat — see its comment).
