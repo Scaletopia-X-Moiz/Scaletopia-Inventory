@@ -71,16 +71,21 @@ export function resolveDefaultFieldMapping(
   const companyName = resolveDefaultCompanyNameSource(args.records);
 
   if (args.platform === "emailbison") {
+    // Free-source mapping (rework of issue #110/#108): each field defaults to
+    // its own record column, i.e. its own key — companyName is the one
+    // exception, defaulting to the cleaned "brandName" column when any record
+    // in the pushed set has one, else the raw "companyName" column, per
+    // resolveDefaultCompanyNameSource above.
     return {
       platform: "emailbison",
       standardFields: {
-        companyName,
-        firstName: "include",
-        lastName: "include",
-        email: "include",
-        phone: "include",
-        title: "include",
-        website: "include",
+        companyName: companyName === "brand_name" ? "brandName" : "companyName",
+        firstName: "firstName",
+        lastName: "lastName",
+        email: "email",
+        phone: "phone",
+        title: "title",
+        website: "website",
       },
     };
   }

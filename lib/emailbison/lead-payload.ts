@@ -7,16 +7,19 @@ import type {
 import { resolveMappedValue } from "@/lib/push/resolve-mapped-value";
 
 /** Maps a bindable "People-table column" name (as offered in the Add-to-
- * EmailBison row-adder, issue #52/#61) to the matching EmailBisonPushRecord
- * field — the standard-column half of a column-bound custom-variable entry.
- * A columnKey that isn't one of these falls through to custom_data (an
- * enrichment/virtual column) in resolveCustomVariables. */
+ * EmailBison row-adder, issue #52/#61, and in the standard-field mapping's
+ * free-source dropdowns) to the matching EmailBisonPushRecord field — the
+ * standard-column half of a column-bound custom-variable entry. `brandName`
+ * resolves to the cleaned company name (companies.brand_name) distinct from
+ * `companyName`'s raw one. A columnKey that isn't one of these falls through
+ * to custom_data (an enrichment/virtual column) in resolveCustomVariables. */
 const KNOWN_RECORD_FIELDS: Record<string, keyof EmailBisonPushRecord> = {
   firstName: "firstName",
   lastName: "lastName",
   email: "email",
   phone: "phone",
   companyName: "companyName",
+  brandName: "brandName",
   title: "title",
   website: "website",
 };
@@ -40,16 +43,18 @@ function stringifyCustomValue(value: unknown): string | null {
 }
 
 /** Resolves a column-bound entry's raw value against one candidate's
- * EmailBisonPushRecord + custom_data. companyName gets the same clean-name
- * preference as buildEmailBisonLeadPayload, so a custom variable bound to
- * "Company name" isn't left sending the raw value — mirrors GHL's
- * resolveGhlColumnValue (lib/ghl/contact-payload.ts) special case. */
+ * EmailBisonPushRecord + custom_data — a pure key lookup. Unlike GHL's
+ * resolveGhlColumnValue (lib/ghl/contact-payload.ts), this has no
+ * companyName-prefers-brandName special case: "companyName" means the raw
+ * value and "brandName" means the cleaned one, each addressable
+ * independently now that the standard-field mapping is free-source (a caller
+ * that wants the clean-name-preferred default gets it from
+ * buildEmailBisonLeadPayload's own defaultValue, not from here). */
 function resolveEmailBisonColumnValue(
   columnKey: string,
   record: EmailBisonPushRecord,
   customData: Record<string, unknown> | null
 ): unknown {
-  if (columnKey === "companyName") return record.brandName || record.companyName;
   const recordField = KNOWN_RECORD_FIELDS[columnKey];
   return recordField ? record[recordField] : (customData?.[columnKey] ?? null);
 }
@@ -90,25 +95,53 @@ export function resolveCustomVariables(
   return resolved;
 }
 
-/** Applies an "include"/"skip" standard-field choice to a value — undefined
- * (mapping omitted, or that field absent from an older-shaped mapping)
- * behaves like "include", preserving today's always-include default. */
-function applyIncludeSkip(value: string | null, choice: "include" | "skip" | undefined): string | null {
-  return choice === "skip" ? null : value;
+/** Maps a legacy saved standard-field value to this feature's current
+ * source-key shape, so old push_field_mappings rows and already-queued
+ * push_jobs keep resolving correctly after the include/skip → free-source
+ * rework: "include" meant "send this field from its own record column",
+ * which is exactly what sourcing the field from its own key now means, so it
+ * maps to `field` itself; "brand_name"/"company_name" were the old 3-way
+ * companyName enum's other two values. "skip" and any value that's already a
+ * source key pass through unchanged. */
+export function normalizeFieldSource(field: keyof EmailBisonStandardFieldMapping, value: string): string {
+  if (value === "include") return field;
+  if (value === "brand_name") return "brandName";
+  if (value === "company_name") return "companyName";
+  return value;
 }
 
-/** Resolves the companyName field per the mapping's 3-way choice:
- * "company_name" sends the raw denormalized name even when brand_name is
- * present, "skip" omits it, and "brand_name" (or an omitted mapping)
- * reproduces today's default — prefer the cleaned name, falling back to the
- * raw one for any company not yet cleaned. */
-function resolveCompanyName(
+/** Resolves one standard field's outbound value: an omitted mapping (or a
+ * field missing from an older-shaped mapping) falls back to `defaultValue`
+ * — the caller's today's-behavior default — so buildEmailBisonLeadPayload's
+ * unmapped path is byte-for-byte what it was before free-source mapping
+ * existed. Otherwise the (possibly legacy) value is normalized via
+ * normalizeFieldSource, "skip" sends null, and anything else is resolved
+ * against the record/custom_data and stringified — the same resolve+
+ * stringify pipeline resolveCustomVariables uses for custom-variable rows. */
+function resolveStandardField(
+  field: keyof EmailBisonStandardFieldMapping,
+  defaultValue: string | null,
+  mapping: EmailBisonStandardFieldMapping | undefined,
   record: EmailBisonPushRecord,
-  choice: EmailBisonStandardFieldMapping["companyName"] | undefined
+  customData: Record<string, unknown> | null
 ): string | null {
-  if (choice === "skip") return null;
-  if (choice === "company_name") return record.companyName;
-  return record.brandName || record.companyName;
+  const raw = mapping?.[field];
+  if (raw === undefined) return defaultValue;
+  const source = normalizeFieldSource(field, raw);
+  if (source === "skip") return null;
+  // companyName sourced from brandName keeps the old 3-way "brand_name"
+  // choice's brand-preferred-with-raw-fallback semantics: the default mapping
+  // (and any normalized-legacy "brand_name") sends companyName: "brandName"
+  // for the *whole* push whenever any record has a cleaned name, so a
+  // brand-less record in that set must still fall back to its raw
+  // companyName rather than send null — otherwise, with brand_name coverage
+  // ~0.2%, a mixed push would blank out company name for nearly every lead.
+  // brandName stays a strict lookup everywhere else (custom variables, other
+  // standard fields), where "no cleaned name" correctly resolves to null.
+  if (field === "companyName" && source === "brandName") {
+    return stringifyCustomValue(record.brandName || record.companyName);
+  }
+  return stringifyCustomValue(resolveEmailBisonColumnValue(source, record, customData));
 }
 
 /** Shapes a person record into an EmailBison lead upsert payload, mirroring
@@ -118,23 +151,38 @@ function resolveCompanyName(
  * — this function just carries them through onto `customVariables`,
  * defaulting to empty when the push has no entries selected.
  *
- * `standardFieldMapping` (issue #110) lets the caller override which
- * standard fields are sent — omitting it reproduces today's behavior
- * exactly: prefer brand_name for companyName, include every other field. */
+ * `customData` is the candidate's raw enrichment data (mirrors the same
+ * argument on resolveCustomVariables) — needed here too now that a standard
+ * field can be free-sourced from a virtual/enrichment column, not just a
+ * fixed record field. Required (no default) so every call site is forced to
+ * pass it explicitly rather than silently shifting the other positional args.
+ *
+ * `standardFieldMapping` (issue #110, reworked to free-source mapping) lets
+ * the caller override which column feeds each standard field — omitting it,
+ * or omitting an individual field within it, reproduces today's behavior
+ * exactly: prefer brand_name for companyName, include every other field from
+ * its own record column. */
 export function buildEmailBisonLeadPayload(
   record: EmailBisonPushRecord,
+  customData: Record<string, unknown> | null,
   customVariables: EmailBisonCustomVariableEntry[] = [],
   existingLeadBehavior: "patch" | "put" = "patch",
   standardFieldMapping?: EmailBisonStandardFieldMapping
 ): EmailBisonLeadPayload {
   return {
-    email: applyIncludeSkip(record.email, standardFieldMapping?.email),
-    firstName: applyIncludeSkip(record.firstName, standardFieldMapping?.firstName),
-    lastName: applyIncludeSkip(record.lastName, standardFieldMapping?.lastName),
-    companyName: resolveCompanyName(record, standardFieldMapping?.companyName),
-    title: applyIncludeSkip(record.title, standardFieldMapping?.title),
-    phone: applyIncludeSkip(record.phone, standardFieldMapping?.phone),
-    website: applyIncludeSkip(record.website, standardFieldMapping?.website),
+    email: resolveStandardField("email", record.email, standardFieldMapping, record, customData),
+    firstName: resolveStandardField("firstName", record.firstName, standardFieldMapping, record, customData),
+    lastName: resolveStandardField("lastName", record.lastName, standardFieldMapping, record, customData),
+    companyName: resolveStandardField(
+      "companyName",
+      record.brandName || record.companyName,
+      standardFieldMapping,
+      record,
+      customData
+    ),
+    title: resolveStandardField("title", record.title, standardFieldMapping, record, customData),
+    phone: resolveStandardField("phone", record.phone, standardFieldMapping, record, customData),
+    website: resolveStandardField("website", record.website, standardFieldMapping, record, customData),
     existingLeadBehavior,
     customVariables: customVariables.map(({ name, value }) => ({ name, value })),
   };

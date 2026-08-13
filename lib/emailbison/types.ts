@@ -59,17 +59,26 @@ export interface EmailBisonCustomVariableEntry {
 }
 
 /** The user-chosen (or auto-mapped, ticket #108) source for each standard
- * EmailBison lead field on a given push. Mirrors GhlStandardFieldMapping
- * (lib/ghl/types.ts) — same 3-way companyName, same include/skip toggles —
- * swapping GHL's city/country for EmailBison's title/website. Optional on
- * payload builders/orchestrators — omitting it keeps today's always-include,
- * prefer-brand-name behavior. */
+ * EmailBison lead field on a given push. EmailBison's 7 destination fields
+ * are fixed (mirrors GhlStandardFieldMapping's field set, swapping GHL's
+ * city/country for EmailBison's title/website) — the freedom is in WHICH of
+ * our columns feeds each one: every value here is either a source-column key
+ * (a PushRecord field name like "firstName", or "brandName" for the cleaned
+ * company name, or any custom_data/virtual-column key) or the sentinel
+ * "skip" meaning "don't send this field". Free-form source mapping, mirroring
+ * the CSV importer's "Map Columns" screen (app/import/page.tsx) — previously
+ * this was a fixed 3-way companyName enum plus include/skip toggles on the
+ * rest. Legacy saved values ("include", "brand_name", "company_name") are
+ * normalized to this shape by lib/emailbison/lead-payload.ts's
+ * normalizeFieldSource, so old saved mappings/queued jobs keep working.
+ * Optional on payload builders/orchestrators — omitting it keeps today's
+ * always-include, prefer-brand-name behavior. */
 export interface EmailBisonStandardFieldMapping {
-  companyName: "brand_name" | "company_name" | "skip";
-  firstName: "include" | "skip";
-  lastName: "include" | "skip";
-  email: "include" | "skip";
-  phone: "include" | "skip";
-  title: "include" | "skip";
-  website: "include" | "skip";
+  companyName: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  title: string;
+  website: string;
 }

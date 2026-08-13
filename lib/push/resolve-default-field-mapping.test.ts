@@ -98,37 +98,37 @@ describe("resolveDefaultFieldMapping (ghl)", () => {
 });
 
 describe("resolveDefaultFieldMapping (emailbison)", () => {
-  it("defaults companyName to brand_name when any record in the pushed set has one", () => {
+  it("defaults companyName to brandName when any record in the pushed set has one", () => {
     const result = resolveDefaultFieldMapping({
       platform: "emailbison",
       records: [{ companyName: "Acme Inc", brandName: "Acme" }],
     });
 
-    expect(result.standardFields.companyName).toBe("brand_name");
+    expect(result.standardFields.companyName).toBe("brandName");
   });
 
-  it("defaults companyName to company_name when no record in the pushed set has a brand_name", () => {
+  it("defaults companyName to companyName when no record in the pushed set has a brandName", () => {
     const result = resolveDefaultFieldMapping({
       platform: "emailbison",
       records: [{ companyName: "Acme Inc", brandName: null }],
     });
 
-    expect(result.standardFields.companyName).toBe("company_name");
+    expect(result.standardFields.companyName).toBe("companyName");
   });
 
-  it("defaults every other standard field to include", () => {
+  it("defaults every other standard field to its own source column", () => {
     const result = resolveDefaultFieldMapping({
       platform: "emailbison",
       records: [{ companyName: "Acme Inc", brandName: null }],
     });
 
     expect(result.standardFields).toMatchObject({
-      firstName: "include",
-      lastName: "include",
-      email: "include",
-      phone: "include",
-      title: "include",
-      website: "include",
+      firstName: "firstName",
+      lastName: "lastName",
+      email: "email",
+      phone: "phone",
+      title: "title",
+      website: "website",
     });
   });
 });

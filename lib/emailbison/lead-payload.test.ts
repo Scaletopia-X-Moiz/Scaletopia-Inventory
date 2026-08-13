@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildEmailBisonLeadPayload, resolveCustomVariables } from "@/lib/emailbison/lead-payload";
+import {
+  buildEmailBisonLeadPayload,
+  normalizeFieldSource,
+  resolveCustomVariables,
+} from "@/lib/emailbison/lead-payload";
+import type { EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
 
 const fullRecord = {
   firstName: "Jane",
@@ -14,7 +19,7 @@ const fullRecord = {
 
 describe("buildEmailBisonLeadPayload", () => {
   it("shapes a full record into an EmailBison lead payload", () => {
-    expect(buildEmailBisonLeadPayload(fullRecord)).toEqual({
+    expect(buildEmailBisonLeadPayload(fullRecord, null)).toEqual({
       email: "jane@example.com",
       firstName: "Jane",
       lastName: "Doe",
@@ -38,7 +43,7 @@ describe("buildEmailBisonLeadPayload", () => {
       title: null,
       website: null,
     };
-    expect(buildEmailBisonLeadPayload(record)).toEqual({
+    expect(buildEmailBisonLeadPayload(record, null)).toEqual({
       email: null,
       firstName: null,
       lastName: null,
@@ -52,12 +57,12 @@ describe("buildEmailBisonLeadPayload", () => {
   });
 
   it("defaults existingLeadBehavior to patch when omitted", () => {
-    const result = buildEmailBisonLeadPayload(fullRecord);
+    const result = buildEmailBisonLeadPayload(fullRecord, null);
     expect(result.existingLeadBehavior).toBe("patch");
   });
 
   it("applies an explicit existingLeadBehavior of put", () => {
-    const result = buildEmailBisonLeadPayload(fullRecord, [], "put");
+    const result = buildEmailBisonLeadPayload(fullRecord, null, [], "put");
     expect(result.existingLeadBehavior).toBe("put");
   });
 
@@ -66,67 +71,83 @@ describe("buildEmailBisonLeadPayload", () => {
       { name: "lead_score", value: "87" },
       { name: "plan", value: "pro" },
     ];
-    const result = buildEmailBisonLeadPayload(fullRecord, customVariables);
+    const result = buildEmailBisonLeadPayload(fullRecord, null, customVariables);
     expect(result.customVariables).toEqual(customVariables);
   });
 
   it("defaults customVariables to an empty array when omitted", () => {
-    const result = buildEmailBisonLeadPayload(fullRecord);
+    const result = buildEmailBisonLeadPayload(fullRecord, null);
     expect(result.customVariables).toEqual([]);
   });
 
   it("supports zero custom-variable entries", () => {
-    const result = buildEmailBisonLeadPayload(fullRecord, []);
+    const result = buildEmailBisonLeadPayload(fullRecord, null, []);
     expect(result.customVariables).toEqual([]);
   });
 
   it("prefers the cleaned brandName over the raw companyName", () => {
-    const result = buildEmailBisonLeadPayload({
-      ...fullRecord,
-      companyName: "ACME INC dba",
-      brandName: "Acme",
-    });
+    const result = buildEmailBisonLeadPayload(
+      { ...fullRecord, companyName: "ACME INC dba", brandName: "Acme" },
+      null
+    );
     expect(result.companyName).toBe("Acme");
   });
 
   it("falls back to the raw companyName when brandName is null", () => {
-    const result = buildEmailBisonLeadPayload({ ...fullRecord, brandName: null });
+    const result = buildEmailBisonLeadPayload({ ...fullRecord, brandName: null }, null);
     expect(result.companyName).toBe("Acme Inc");
   });
 
-  const fullMapping = {
-    companyName: "brand_name" as const,
-    firstName: "include" as const,
-    lastName: "include" as const,
-    email: "include" as const,
-    phone: "include" as const,
-    title: "include" as const,
-    website: "include" as const,
+  const fullMapping: EmailBisonStandardFieldMapping = {
+    companyName: "brandName",
+    firstName: "firstName",
+    lastName: "lastName",
+    email: "email",
+    phone: "phone",
+    title: "title",
+    website: "website",
   };
 
   it("reproduces today's default behavior when standardFieldMapping is omitted", () => {
     const withMapping = buildEmailBisonLeadPayload(
       { ...fullRecord, brandName: "Acme" },
+      null,
       [],
       "patch",
       fullMapping
     );
-    const withoutMapping = buildEmailBisonLeadPayload({ ...fullRecord, brandName: "Acme" });
+    const withoutMapping = buildEmailBisonLeadPayload({ ...fullRecord, brandName: "Acme" }, null);
     expect(withoutMapping).toEqual(withMapping);
   });
 
-  it("sends the raw companyName when the mapping chooses company_name", () => {
+  it("falls back to the raw companyName when a present mapping sources companyName from brandName but brandName is null", () => {
+    // The default mapping sends companyName: "brandName" for the whole push
+    // whenever *any* record has a cleaned name; a brand-less record in that
+    // set must still send its raw companyName, not null — reproducing the old
+    // 3-way "brand_name" choice's brand-preferred-with-raw-fallback behavior.
     const result = buildEmailBisonLeadPayload(
-      { ...fullRecord, companyName: "ACME INC dba", brandName: "Acme" },
+      { ...fullRecord, companyName: "Acme Inc", brandName: null },
+      null,
       [],
       "patch",
-      { ...fullMapping, companyName: "company_name" }
+      fullMapping // companyName: "brandName"
+    );
+    expect(result.companyName).toBe("Acme Inc");
+  });
+
+  it("sends the raw companyName when the mapping sources it from companyName", () => {
+    const result = buildEmailBisonLeadPayload(
+      { ...fullRecord, companyName: "ACME INC dba", brandName: "Acme" },
+      null,
+      [],
+      "patch",
+      { ...fullMapping, companyName: "companyName" }
     );
     expect(result.companyName).toBe("ACME INC dba");
   });
 
   it("omits companyName when the mapping skips it", () => {
-    const result = buildEmailBisonLeadPayload(fullRecord, [], "patch", {
+    const result = buildEmailBisonLeadPayload(fullRecord, null, [], "patch", {
       ...fullMapping,
       companyName: "skip",
     });
@@ -134,7 +155,7 @@ describe("buildEmailBisonLeadPayload", () => {
   });
 
   it("omits any standard field the mapping sets to skip", () => {
-    const result = buildEmailBisonLeadPayload(fullRecord, [], "patch", {
+    const result = buildEmailBisonLeadPayload(fullRecord, null, [], "patch", {
       ...fullMapping,
       firstName: "skip",
       phone: "skip",
@@ -144,6 +165,59 @@ describe("buildEmailBisonLeadPayload", () => {
     expect(result.phone).toBeNull();
     expect(result.website).toBeNull();
     expect(result.lastName).toBe("Doe");
+  });
+
+  it("resolves an EmailBison field from a source column different than its own", () => {
+    const result = buildEmailBisonLeadPayload(fullRecord, null, [], "patch", {
+      ...fullMapping,
+      companyName: "website",
+    });
+    expect(result.companyName).toBe("acme.com");
+  });
+
+  it("resolves a standard field from custom_data when the mapping sources it from an enrichment column", () => {
+    const result = buildEmailBisonLeadPayload(fullRecord, { seniority: "VP" }, [], "patch", {
+      ...fullMapping,
+      title: "seniority",
+    });
+    expect(result.title).toBe("VP");
+  });
+
+  it("tolerates a legacy 'include'/'brand_name' mapping saved before free-source mapping existed", () => {
+    const legacyMapping: EmailBisonStandardFieldMapping = {
+      companyName: "brand_name",
+      firstName: "include",
+      lastName: "include",
+      email: "include",
+      phone: "include",
+      title: "include",
+      website: "include",
+    };
+    const result = buildEmailBisonLeadPayload({ ...fullRecord, brandName: "Acme" }, null, [], "patch", legacyMapping);
+    expect(result).toEqual(
+      buildEmailBisonLeadPayload({ ...fullRecord, brandName: "Acme" }, null, [], "patch", fullMapping)
+    );
+  });
+});
+
+describe("normalizeFieldSource", () => {
+  it("maps legacy 'include' to the field's own key", () => {
+    expect(normalizeFieldSource("firstName", "include")).toBe("firstName");
+    expect(normalizeFieldSource("companyName", "include")).toBe("companyName");
+    expect(normalizeFieldSource("website", "include")).toBe("website");
+  });
+
+  it("maps legacy 'brand_name'/'company_name' to brandName/companyName", () => {
+    expect(normalizeFieldSource("companyName", "brand_name")).toBe("brandName");
+    expect(normalizeFieldSource("companyName", "company_name")).toBe("companyName");
+  });
+
+  it("keeps 'skip' as-is", () => {
+    expect(normalizeFieldSource("email", "skip")).toBe("skip");
+  });
+
+  it("passes an already-normalized source key through unchanged", () => {
+    expect(normalizeFieldSource("title", "some_enrichment_key")).toBe("some_enrichment_key");
   });
 });
 
@@ -162,10 +236,16 @@ describe("resolveCustomVariables", () => {
     ]);
   });
 
-  it("prefers the cleaned brandName for a companyName-bound entry", () => {
-    const entries = [{ name: "company", value: "", columnKey: "companyName" }];
+  it("resolves a brandName-bound entry to the cleaned company name", () => {
+    const entries = [{ name: "company", value: "", columnKey: "brandName" }];
     const record = { ...fullRecord, companyName: "ACME INC dba", brandName: "Acme" };
     expect(resolveCustomVariables(entries, record, null)).toEqual([{ name: "company", value: "Acme" }]);
+  });
+
+  it("resolves a companyName-bound entry to the raw name even when brandName is present", () => {
+    const entries = [{ name: "company", value: "", columnKey: "companyName" }];
+    const record = { ...fullRecord, companyName: "ACME INC dba", brandName: "Acme" };
+    expect(resolveCustomVariables(entries, record, null)).toEqual([{ name: "company", value: "ACME INC dba" }]);
   });
 
   it("resolves a column-bound entry from custom_data (virtual column)", () => {

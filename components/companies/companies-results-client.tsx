@@ -164,6 +164,7 @@ export function CompaniesResultsClient() {
           <PushToEmailBisonCampaignButton
             paramsStr={paramsStr}
             total={result.total}
+            virtualColumns={virtualColumns}
             onDone={handlePushDone}
           />
           <ExportButton href={exportHref} />

@@ -179,6 +179,7 @@ export function PeopleResultsClient() {
           <PushToEmailBisonCampaignButton
             paramsStr={paramsStr}
             total={result.total}
+            virtualColumns={virtualColumns}
             onDone={handlePushDone}
           />
           <ExportButton href={exportHref} />

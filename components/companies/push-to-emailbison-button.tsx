@@ -12,6 +12,7 @@ import type { EmailBisonCustomVariable } from "@/lib/emailbison/client";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
 import type { EnrichmentField } from "@/lib/data/enrichment-fields";
 import { StandardFieldMappingTable } from "@/components/emailbison/standard-field-mapping-table";
+import { normalizeFieldSource } from "@/lib/emailbison/lead-payload";
 import {
   fetchSavedPushFieldMapping,
   savePushFieldMapping,
@@ -46,10 +47,37 @@ const BINDABLE_RECORD_COLUMNS: { key: string; label: string }[] = [
   { key: "lastName", label: "Last name" },
   { key: "email", label: "Email" },
   { key: "phone", label: "Phone" },
-  { key: "companyName", label: "Company name" },
+  { key: "companyName", label: "Company name (raw)" },
+  { key: "brandName", label: "Cleaned brand name" },
   { key: "title", label: "Title" },
   { key: "website", label: "Website (domain)" },
 ];
+
+/** Standard-field keys, in the same order the mapping table renders them —
+ * used only to normalize a saved mapping field-by-field on load (below), not
+ * as a source of truth for the table itself (that's
+ * StandardFieldMappingTable's own STANDARD_FIELD_ROWS). */
+const STANDARD_FIELD_KEYS: (keyof EmailBisonStandardFieldMapping)[] = [
+  "companyName",
+  "firstName",
+  "lastName",
+  "email",
+  "phone",
+  "title",
+  "website",
+];
+
+/** A saved mapping (ticket #114) may still be shaped like the pre-free-source
+ * include/skip + 3-way companyName enum — normalize every field through
+ * normalizeFieldSource so an old saved mapping renders correctly in the new
+ * dropdown-per-field table instead of showing a stale/invalid option. */
+function normalizeSavedMapping(mapping: EmailBisonStandardFieldMapping): EmailBisonStandardFieldMapping {
+  const result = {} as EmailBisonStandardFieldMapping;
+  for (const key of STANDARD_FIELD_KEYS) {
+    result[key] = normalizeFieldSource(key, mapping[key]);
+  }
+  return result;
+}
 
 interface CustomVariableRow {
   id: number;
@@ -202,7 +230,7 @@ export function PushToEmailBisonButton({
         return;
       }
       const saved = await savedPromise;
-      setStandardFieldMapping(saved ? saved.standardFields : base);
+      setStandardFieldMapping(saved ? normalizeSavedMapping(saved.standardFields) : base);
     })();
 
     const referencePromise = (async () => {
@@ -247,6 +275,19 @@ export function PushToEmailBisonButton({
 
   function updateRow(id: number, patch: Partial<CustomVariableRow>) {
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  }
+
+  /** Adds a custom-variable row pre-filled with an existing workspace
+   * variable's name so the user only has to pick its source, rather than
+   * retyping the name. Sourced-from-column by default since that's the point
+   * of clicking a known variable; a no-op if a row with that name already
+   * exists, to avoid silent duplicates. */
+  function addVariableFromReference(name: string) {
+    setRows((prev) =>
+      prev.some((r) => r.name.trim() === name)
+        ? prev
+        : [...prev, { ...newRow(), name, source: "column" }]
+    );
   }
 
   function handleConfirmOptions() {
@@ -487,7 +528,11 @@ export function PushToEmailBisonButton({
                     Loading default field mapping…
                   </p>
                 ) : (
-                  <StandardFieldMappingTable value={standardFieldMapping} onChange={setStandardFieldMapping} />
+                  <StandardFieldMappingTable
+                    value={standardFieldMapping}
+                    columns={bindableColumns}
+                    onChange={setStandardFieldMapping}
+                  />
                 )}
 
                 <div>
@@ -602,12 +647,16 @@ export function PushToEmailBisonButton({
                     ) : (
                       <div className="flex flex-wrap gap-1.5">
                         {referenceVariables.map((v) => (
-                          <span
+                          <button
                             key={v.id}
-                            className="rounded-full border border-rule px-2 py-0.5 text-xs text-ink-soft"
+                            type="button"
+                            onClick={() => addVariableFromReference(v.name)}
+                            title={`Add "${v.name}" as a custom variable`}
+                            aria-label={`Add "${v.name}" as a custom variable`}
+                            className="cursor-pointer rounded-full border border-rule px-2 py-0.5 text-xs text-ink-soft transition-smooth hover:bg-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-stamp/50"
                           >
-                            {v.name}
-                          </span>
+                            + {v.name}
+                          </button>
                         ))}
                       </div>
                     )}

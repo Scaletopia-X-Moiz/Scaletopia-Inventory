@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import {
   runPeopleAddToEmailBison,
@@ -6,7 +6,6 @@ import {
   runPeopleAddToCampaign,
   runCompaniesAddToCampaign,
 } from "@/lib/emailbison/push-to-emailbison";
-import { clearEmailBisonCustomVariablesCache, getEmailBisonCustomVariables } from "@/lib/emailbison/custom-variables";
 import { includeOnly } from "@/lib/data/include-exclude";
 import { resolveDefaultFieldMapping } from "@/lib/push/resolve-default-field-mapping";
 import type { ClientRow } from "@/lib/data/clients";
@@ -67,14 +66,6 @@ afterAll(async () => {
   await cleanupAll();
   if (testActor) await supabaseAdmin.auth.admin.deleteUser(testActor.id);
   if (otherActor) await supabaseAdmin.auth.admin.deleteUser(otherActor.id);
-});
-
-// ensureCustomVariablesExist patches newly-created variables into
-// custom-variables.ts's module-level cache (keyed by workspace id, shared
-// across every test in this file via the WORKSPACE constant) — clear it
-// between tests so one test's mocked variables can't leak into another's.
-afterEach(() => {
-  clearEmailBisonCustomVariablesCache();
 });
 
 let counter = 0;
@@ -232,20 +223,20 @@ describe("standardFieldMapping (issue #110)", () => {
     expect(capturedLeads[0].first_name).toBeTruthy();
   });
 
-  it("sends the raw company_name when the mapping chooses company_name over brand_name", async () => {
+  it("sends the raw companyName when the mapping sources it from companyName over brandName", async () => {
     const niche = unique("mapping-company-name");
     const companyId = await insertCompany(niche, "brand-chosen", { brand_name: "Acme" });
     await seedPeople(niche, [{ slug: "a", companyId }]);
     const client = await insertClient();
     const capturedLeads: Record<string, unknown>[] = [];
     const mapping: EmailBisonStandardFieldMapping = {
-      companyName: "company_name",
-      firstName: "include",
-      lastName: "include",
-      email: "include",
-      phone: "include",
-      title: "include",
-      website: "include",
+      companyName: "companyName",
+      firstName: "firstName",
+      lastName: "lastName",
+      email: "email",
+      phone: "phone",
+      title: "title",
+      website: "website",
     };
 
     await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, {
@@ -264,9 +255,9 @@ describe("standardFieldMapping (issue #110)", () => {
     const capturedLeads: Record<string, unknown>[] = [];
     const mapping: EmailBisonStandardFieldMapping = {
       companyName: "skip",
-      firstName: "include",
-      lastName: "include",
-      email: "include",
+      firstName: "firstName",
+      lastName: "lastName",
+      email: "email",
       phone: "skip",
       title: "skip",
       website: "skip",
@@ -300,12 +291,12 @@ describe("standardFieldMapping (issue #110)", () => {
     }) as unknown as typeof fetch;
     const mapping: EmailBisonStandardFieldMapping = {
       companyName: "skip",
-      firstName: "include",
-      lastName: "include",
-      email: "include",
-      phone: "include",
-      title: "include",
-      website: "include",
+      firstName: "firstName",
+      lastName: "lastName",
+      email: "email",
+      phone: "phone",
+      title: "title",
+      website: "website",
     };
 
     await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, testActor, {
@@ -327,7 +318,7 @@ describe("standardFieldMapping (issue #110)", () => {
       platform: "emailbison",
       records: [{ companyName: "Acme Co", brandName: null }],
     });
-    expect(standardFields.companyName).toBe("company_name");
+    expect(standardFields.companyName).toBe("companyName");
 
     await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, {
       fetchImpl: okFetchCapturingLeads(capturedLeads),
@@ -504,15 +495,6 @@ describe("runPeopleAddToEmailBison", () => {
     expect(result.pushed).toBe(3);
     expect(listCalls).toHaveLength(1);
     expect(createCalls).toEqual(["new_var"]);
-
-    // The newly-created variable must be visible to the UI's "existing
-    // workspace variables" reference panel immediately, without a refetch —
-    // ensureCustomVariablesExist patches it into the shared cache in place.
-    const cached = await getEmailBisonCustomVariables(
-      { apiKey: client.emailbisonApiKey!, workspaceId: client.emailbisonWorkspaceId! },
-      { fetchImpl: vi.fn() }
-    );
-    expect(cached.map((v) => v.name)).toContain("new_var");
   });
 
   it("returns an all-zero result for an empty filter match", async () => {
@@ -718,6 +700,61 @@ describe("runPeopleAddToCampaign", () => {
       .single();
     expect(afterRow!.pushed_by_user_id).toBe(testActor.id);
     expect(afterRow!.pushed_by_email).toBe(testActor.email);
+  });
+
+  it("still runs the Add to EmailBison step for a candidate with an existing lead id when the push carries customVariables", async () => {
+    // Regression test: attachLeadsToCampaign only attaches an existing lead
+    // id to the campaign, it never sends customVariables/standardFieldMapping
+    // — so a candidate who already has a platform_pushes row from a prior
+    // push must still go through the upsert step whenever this push carries
+    // field data, otherwise that data silently never reaches EmailBison.
+    const niche = unique("campaign-field-sync");
+    await seedPeople(niche, [{ slug: "a" }]);
+    const client = await insertClient();
+
+    // Pre-seed: this person was already pushed to EmailBison before this
+    // campaign push, so it already has a platform_pushes row with a
+    // platform_contact_id.
+    const upsertResult = await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, otherActor, {
+      fetchImpl: okFetch(),
+    });
+    expect(upsertResult.pushed).toBe(1);
+
+    const capturedLeads: Record<string, unknown>[] = [];
+    const attachCalls: Array<{ leadIds: string[]; parallel: unknown }> = [];
+    const base = okFetchCapturingLeads(capturedLeads);
+    const fetchImpl = vi.fn().mockImplementation(async (url: unknown, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith(`/api/campaigns/${CAMPAIGN_ID}/leads/attach-leads`)) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        attachCalls.push({ leadIds: body.lead_ids, parallel: body.parallel });
+        return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+      }
+      if (u.endsWith("/api/custom-variables") && init?.method === "POST") {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        leadCounter++;
+        return {
+          ok: true,
+          status: 201,
+          json: async () => ({ data: { id: leadCounter, name: body.name } }),
+        } as unknown as Response;
+      }
+      return (base as unknown as (u: unknown, i?: RequestInit) => Promise<Response>)(url, init);
+    }) as unknown as typeof fetch;
+
+    const result = await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, testActor, {
+      fetchImpl,
+      customVariables: [{ name: "company_cleaned", value: "Acme" }],
+    });
+
+    expect(result.attached).toBe(1);
+    expect(result.errors).toBe(0);
+
+    // The upsert path must have been exercised (not skipped) for this
+    // already-pushed candidate, carrying the custom variable through.
+    expect(capturedLeads).toHaveLength(1);
+    expect(capturedLeads[0].custom_variables).toEqual([{ name: "company_cleaned", value: "Acme" }]);
+    expect(attachCalls).toHaveLength(1);
   });
 
   it("respects the parallel vs. sequential attach setting", async () => {

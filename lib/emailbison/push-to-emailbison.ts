@@ -14,7 +14,6 @@ import {
   attachLeadsToCampaign,
   type EmailBisonLeadResult,
 } from "@/lib/emailbison/client";
-import { appendEmailBisonCustomVariablesCache } from "@/lib/emailbison/custom-variables";
 import { buildEmailBisonLeadPayload, resolveCustomVariables } from "@/lib/emailbison/lead-payload";
 import type { ClientRow } from "@/lib/data/clients";
 import type {
@@ -121,12 +120,11 @@ function chunk<T>(arr: T[], size: number): T[][] {
  * batch upsert — not once per person, since the names are the same for every
  * lead in the push.
  *
- * Any newly-created variables are patched into custom-variables.ts's
- * in-memory cache in place (mirroring campaigns.ts's appendToCampaignCache),
- * so the "existing workspace variables" reference panel (and any other
- * getEmailBisonCustomVariables reader) reflects them on its next fetch
- * without waiting for the cache to naturally expire — it never does, since
- * the cache lives for the whole process lifetime. */
+ * The "existing workspace variables" reference panel
+ * (app/api/clients/[id]/emailbison-custom-variables/route.ts) always
+ * refetches from EmailBison directly rather than reading any cache here, so
+ * newly-created variables show up there on the panel's next open without
+ * this function needing to do anything more. */
 async function ensureCustomVariablesExist(
   credentials: EmailBisonCredentials,
   entries: EmailBisonCustomVariableEntry[],
@@ -140,8 +138,7 @@ async function ensureCustomVariablesExist(
   const missing = names.filter((name) => !existingNames.has(name));
   if (missing.length === 0) return;
 
-  const created = await Promise.all(missing.map((name) => createCustomVariable(credentials, name, { fetchImpl })));
-  await appendEmailBisonCustomVariablesCache(credentials.apiKey, created);
+  await Promise.all(missing.map((name) => createCustomVariable(credentials, name, { fetchImpl })));
 }
 
 interface FailedRecord {
@@ -195,6 +192,7 @@ async function pushChunk(
       withEmail.map((c) =>
         buildEmailBisonLeadPayload(
           c.record,
+          c.customData,
           resolveCustomVariables(customVariables, c.record, c.customData),
           existingLeadBehavior,
           standardFieldMapping
@@ -622,8 +620,14 @@ export interface RunEmailBisonCampaignPushDeps extends Omit<RunEmailBisonPushDep
  * add-to-workspace step runs first to obtain a lead id — same
  * ensure-custom-variables + chunked-upsert + write-back logic as
  * runEmailBisonAddToWorkspace, just scoped to the subset that needs it.
- * Every resolvable lead id (pre-existing or freshly obtained) is attached to
- * the campaign via a single attachLeadsToCampaign call, which reports
+ * attachLeadsToCampaign only attaches an existing lead id to the campaign —
+ * it never sends custom variables or standard-field-mapping data — so when
+ * this push carries either, EVERY candidate is routed through the
+ * add-to-workspace step instead, not just the ones missing a lead id;
+ * re-upserting an already-existing lead is safe since existingLeadBehavior
+ * defaults to "patch". Every resolvable lead id (pre-existing or freshly
+ * obtained) is attached to the campaign via a single attachLeadsToCampaign
+ * call, which reports
  * per-lead outcomes (issue #106 — EmailBison silently no-ops leads already
  * active in another campaign, so a bare 2xx for the batch can't be trusted).
  * Only the candidates whose lead id actually attached get their
@@ -717,7 +721,16 @@ async function runEmailBisonAddToCampaign<TFilters>(
     }
   }
 
-  const needsUpsert = candidates.filter((c) => !leadIdByPersonId.has(c.id));
+  // attachLeadsToCampaign never sends customVariables/standardFieldMapping —
+  // it only attaches an existing lead id — so a candidate that already has a
+  // lead id still needs to go through the upsert step when this push carries
+  // field data to sync, otherwise that data silently never reaches EmailBison
+  // (issue verified live: a re-pushed lead with new custom variables reported
+  // "succeeded" but the variables were never created/applied). Re-upserting
+  // an already-existing lead is safe (existingLeadBehavior defaults to
+  // "patch"). With no field data to sync, the original short-circuit stands.
+  const needsFieldSync = customVariables.length > 0 || standardFieldMapping !== undefined;
+  const needsUpsert = needsFieldSync ? candidates : candidates.filter((c) => !leadIdByPersonId.has(c.id));
 
   let errors = 0;
   const failed_people: string[] = [];

@@ -8,8 +8,11 @@ vi.mock("@/lib/auth/dal", () => ({ getUser }));
 const { getClientById } = vi.hoisted(() => ({ getClientById: vi.fn() }));
 vi.mock("@/lib/data/clients", () => ({ getClientById }));
 
-const { getEmailBisonCustomVariables } = vi.hoisted(() => ({ getEmailBisonCustomVariables: vi.fn() }));
-vi.mock("@/lib/emailbison/custom-variables", () => ({ getEmailBisonCustomVariables }));
+const { listCustomVariables } = vi.hoisted(() => ({ listCustomVariables: vi.fn() }));
+vi.mock("@/lib/emailbison/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/emailbison/client")>();
+  return { ...actual, listCustomVariables };
+});
 
 const { GET } = await import("@/app/api/clients/[id]/emailbison-custom-variables/route");
 
@@ -60,16 +63,16 @@ describe("GET /api/clients/[id]/emailbison-custom-variables", () => {
   });
 
   it("returns the workspace's custom variables", async () => {
-    getEmailBisonCustomVariables.mockResolvedValue([{ id: "1", name: "lead_score" }]);
+    listCustomVariables.mockResolvedValue([{ id: "1", name: "lead_score" }]);
     const res = await GET(makeRequest(), makeParams());
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ variables: [{ id: "1", name: "lead_score" }] });
-    expect(getEmailBisonCustomVariables).toHaveBeenCalledWith({ apiKey: "key", workspaceId: "ws" });
+    expect(listCustomVariables).toHaveBeenCalledWith({ apiKey: "key", workspaceId: "ws" });
   });
 
   it("returns 502 when the EmailBison API call fails", async () => {
-    getEmailBisonCustomVariables.mockRejectedValue(new Error("boom"));
+    listCustomVariables.mockRejectedValue(new Error("boom"));
     const res = await GET(makeRequest(), makeParams());
     expect(res.status).toBe(502);
   });

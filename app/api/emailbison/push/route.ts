@@ -45,32 +45,30 @@ function parseCustomVariables(value: unknown): EmailBisonCustomVariableEntry[] {
   return value.filter(isCustomVariableEntry);
 }
 
-function isIncludeSkip(value: unknown): value is "include" | "skip" {
-  return value === "include" || value === "skip";
-}
-
-function isCompanyNameChoice(value: unknown): value is EmailBisonStandardFieldMapping["companyName"] {
-  return value === "brand_name" || value === "company_name" || value === "skip";
-}
-
+/** Any string is a valid per-field source now (a record/virtual/custom_data
+ * column key, or the "skip" sentinel) — free-source mapping (rework of issue
+ * #110/#108) dropped the fixed include/skip and 3-way companyName enums, so
+ * this only needs to check shape, not enum membership. Legacy values
+ * ("include", "brand_name", "company_name") are tolerated downstream by
+ * buildEmailBisonLeadPayload's normalizeFieldSource, not rejected here. */
 function isStandardFieldMapping(value: unknown): value is EmailBisonStandardFieldMapping {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
   return (
-    isCompanyNameChoice(v.companyName) &&
-    isIncludeSkip(v.firstName) &&
-    isIncludeSkip(v.lastName) &&
-    isIncludeSkip(v.email) &&
-    isIncludeSkip(v.phone) &&
-    isIncludeSkip(v.title) &&
-    isIncludeSkip(v.website)
+    typeof v.companyName === "string" &&
+    typeof v.firstName === "string" &&
+    typeof v.lastName === "string" &&
+    typeof v.email === "string" &&
+    typeof v.phone === "string" &&
+    typeof v.title === "string" &&
+    typeof v.website === "string"
   );
 }
 
-/** Parses the standard-field mapping (issue #110, types from #108) off the
- * request body. An absent or malformed value is dropped to `undefined` so
- * buildEmailBisonLeadPayload falls back to today's default behavior, rather
- * than rejecting the request. */
+/** Parses the standard-field mapping off the request body. An absent or
+ * malformed value is dropped to `undefined` so buildEmailBisonLeadPayload
+ * falls back to today's default behavior, rather than rejecting the
+ * request. */
 function parseStandardFieldMapping(value: unknown): EmailBisonStandardFieldMapping | undefined {
   return isStandardFieldMapping(value) ? value : undefined;
 }
