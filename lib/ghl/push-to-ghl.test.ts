@@ -586,16 +586,17 @@ describe("runPeopleGhlPush", () => {
       } as unknown as Response;
     }) as unknown as typeof fetch;
 
-    // No brand_name anywhere in this pushed set, so #108's default resolves
-    // companyName to "company_name" — verify that default, threaded straight
-    // through to runPeopleGhlPush, produces the raw name on the wire.
+    // No brand_name anywhere in this pushed set, so #108's (free-source)
+    // default resolves companyName to the raw "companyName" column — verify
+    // that default, threaded straight through to runPeopleGhlPush, produces
+    // the raw name on the wire.
     const defaults = resolveDefaultFieldMapping({
       platform: "ghl",
       records: [{ companyName: "Acme Co", brandName: null }],
       virtualColumns: [],
       customFields: [],
     });
-    expect(defaults.standardFields.companyName).toBe("company_name");
+    expect(defaults.standardFields.companyName).toBe("companyName");
 
     await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, {
       fetchImpl,

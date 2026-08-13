@@ -12,7 +12,7 @@ function virtualColumn(key: string): ActiveVirtualColumn {
 }
 
 describe("resolveDefaultFieldMapping (ghl)", () => {
-  it("defaults companyName to brand_name when any record in the pushed set has one", () => {
+  it("defaults companyName to brandName when any record in the pushed set has a brand_name", () => {
     const result = resolveDefaultFieldMapping({
       platform: "ghl",
       records: [
@@ -23,10 +23,10 @@ describe("resolveDefaultFieldMapping (ghl)", () => {
       customFields: [],
     });
 
-    expect(result.standardFields.companyName).toBe("brand_name");
+    expect(result.standardFields.companyName).toBe("brandName");
   });
 
-  it("defaults companyName to company_name when no record in the pushed set has a brand_name", () => {
+  it("defaults companyName to companyName when no record in the pushed set has a brand_name", () => {
     const result = resolveDefaultFieldMapping({
       platform: "ghl",
       records: [
@@ -37,10 +37,10 @@ describe("resolveDefaultFieldMapping (ghl)", () => {
       customFields: [],
     });
 
-    expect(result.standardFields.companyName).toBe("company_name");
+    expect(result.standardFields.companyName).toBe("companyName");
   });
 
-  it("defaults every other standard field to include", () => {
+  it("defaults every other standard field to its own source column", () => {
     const result = resolveDefaultFieldMapping({
       platform: "ghl",
       records: [{ companyName: "Acme Inc", brandName: null }],
@@ -49,12 +49,12 @@ describe("resolveDefaultFieldMapping (ghl)", () => {
     });
 
     expect(result.standardFields).toMatchObject({
-      firstName: "include",
-      lastName: "include",
-      email: "include",
-      phone: "include",
-      city: "include",
-      country: "include",
+      firstName: "firstName",
+      lastName: "lastName",
+      email: "email",
+      phone: "phone",
+      city: "city",
+      country: "country",
     });
   });
 

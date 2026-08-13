@@ -9,6 +9,7 @@ import { fetchActiveClients } from "@/lib/data/active-clients-client";
 import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
 import type { GhlCustomField } from "@/lib/ghl/custom-fields";
 import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
+import { normalizeGhlFieldSource } from "@/lib/ghl/contact-payload";
 import {
   normalizeSavedGhlCustomFieldMapping,
   type SavedGhlCustomFieldMappingEntry,
@@ -72,17 +73,31 @@ function ScoreIndicator({ score }: { score: number }) {
 
 /** Reset baseline for standardFields between pushes — matches
  * resolveDefaultFieldMapping's (ticket #108) "no brand_name in the pushed
- * set" default so state is never in an undefined shape between the picker
- * step and the mapping step's fetch resolving. */
+ * set" default (free-source mapping: each field defaults to its own record
+ * column) so state is never in an undefined shape between the picker step
+ * and the mapping step's fetch resolving. */
 const FALLBACK_STANDARD_FIELDS: GhlStandardFieldMapping = {
-  companyName: "company_name",
-  firstName: "include",
-  lastName: "include",
-  email: "include",
-  phone: "include",
-  city: "include",
-  country: "include",
+  companyName: "companyName",
+  firstName: "firstName",
+  lastName: "lastName",
+  email: "email",
+  phone: "phone",
+  city: "city",
+  country: "country",
 };
+
+/** Standard-field keys, in the same order the mapping table renders them —
+ * used both to render the free-source rows below and to normalize a saved
+ * mapping field-by-field on load (normalizeSavedMapping). */
+const STANDARD_FIELD_KEYS: (keyof GhlStandardFieldMapping)[] = [
+  "companyName",
+  "firstName",
+  "lastName",
+  "email",
+  "phone",
+  "city",
+  "country",
+];
 
 const STANDARD_FIELD_ROWS: { key: keyof Omit<GhlStandardFieldMapping, "companyName">; label: string }[] = [
   { key: "firstName", label: "First name" },
@@ -92,6 +107,18 @@ const STANDARD_FIELD_ROWS: { key: keyof Omit<GhlStandardFieldMapping, "companyNa
   { key: "city", label: "City" },
   { key: "country", label: "Country" },
 ];
+
+/** A saved mapping (ticket #114) may still be shaped like the pre-free-source
+ * include/skip + 3-way companyName enum — normalize every field through
+ * normalizeGhlFieldSource so an old saved mapping renders correctly in the
+ * new dropdown-per-field table instead of showing a stale/invalid option. */
+function normalizeSavedMapping(mapping: GhlStandardFieldMapping): GhlStandardFieldMapping {
+  const result = {} as GhlStandardFieldMapping;
+  for (const key of STANDARD_FIELD_KEYS) {
+    result[key] = normalizeGhlFieldSource(key, mapping[key]);
+  }
+  return result;
+}
 
 interface ActiveClient {
   id: string;
@@ -277,7 +304,7 @@ export function PushToGhlButton({
       try {
         const saved = await fetchSavedPushFieldMapping<SavedGhlFieldMapping>(selectedClient.id, "ghl");
         if (saved) {
-          setStandardFields(saved.standardFields);
+          setStandardFields(normalizeSavedMapping(saved.standardFields));
           const normalized = normalizeSavedGhlCustomFieldMapping(saved.customFieldMapping);
           setMapping((prev) => {
             const next = { ...prev };
@@ -305,10 +332,7 @@ export function PushToGhlButton({
     }));
   }
 
-  function handleStandardFieldChange<K extends keyof GhlStandardFieldMapping>(
-    key: K,
-    value: GhlStandardFieldMapping[K]
-  ) {
+  function handleStandardFieldChange(key: keyof GhlStandardFieldMapping, value: string) {
     setStandardFields((prev) => ({ ...prev, [key]: value }));
   }
 
@@ -531,17 +555,15 @@ export function PushToGhlButton({
                         <td className="px-4 py-2.5">
                           <select
                             value={standardFields.companyName}
-                            onChange={(e) =>
-                              handleStandardFieldChange(
-                                "companyName",
-                                e.target.value as GhlStandardFieldMapping["companyName"]
-                              )
-                            }
+                            onChange={(e) => handleStandardFieldChange("companyName", e.target.value)}
                             className="w-full rounded border border-rule bg-paper px-2 py-1 text-xs text-ink outline-none focus:border-stamp"
                           >
-                            <option value="brand_name">Cleaned brand name</option>
-                            <option value="company_name">Raw company name</option>
-                            <option value="skip">Skip</option>
+                            <option value="skip">— ignore —</option>
+                            {bindableColumns.map((col) => (
+                              <option key={col.key} value={col.key}>
+                                {col.label}
+                              </option>
+                            ))}
                           </select>
                         </td>
                       </tr>
@@ -551,16 +573,15 @@ export function PushToGhlButton({
                           <td className="px-4 py-2.5">
                             <select
                               value={standardFields[row.key]}
-                              onChange={(e) =>
-                                handleStandardFieldChange(
-                                  row.key,
-                                  e.target.value as "include" | "skip"
-                                )
-                              }
+                              onChange={(e) => handleStandardFieldChange(row.key, e.target.value)}
                               className="w-full rounded border border-rule bg-paper px-2 py-1 text-xs text-ink outline-none focus:border-stamp"
                             >
-                              <option value="include">Include</option>
-                              <option value="skip">Skip</option>
+                              <option value="skip">— ignore —</option>
+                              {bindableColumns.map((col) => (
+                                <option key={col.key} value={col.key}>
+                                  {col.label}
+                                </option>
+                              ))}
                             </select>
                           </td>
                         </tr>

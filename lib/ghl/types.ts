@@ -64,18 +64,27 @@ export interface GhlFieldMapping {
 }
 
 /** The user-chosen (or auto-mapped, ticket #108) source for each standard
- * GHL contact field on a given push. `companyName` is 3-way since GHL can
- * receive either the cleaned name (companies.brand_name) or the raw
- * denormalized company_name; every other field is a plain include/skip
- * toggle. Distinct from `GhlFieldMapping`, which covers custom fields, not
- * these fixed standard ones. Optional on payload builders/orchestrators —
- * omitting it keeps today's always-include, prefer-brand-name behavior. */
+ * GHL contact field on a given push. GHL's 7 destination fields are fixed
+ * (mirrors EmailBisonStandardFieldMapping's field set, swapping EmailBison's
+ * title/website for GHL's city/country) — the freedom is in WHICH of our
+ * columns feeds each one: every value here is either a source-column key (a
+ * GhlPushRecord field name like "firstName", or "brandName" for the cleaned
+ * company name, or any custom_data/virtual-column key) or the sentinel
+ * "skip" meaning "don't send this field". Free-form source mapping, mirroring
+ * the CSV importer's "Map Columns" screen (app/import/page.tsx) — previously
+ * this was a fixed 3-way companyName enum plus include/skip toggles on the
+ * rest. Legacy saved values ("include", "brand_name", "company_name") are
+ * normalized to this shape by lib/ghl/contact-payload.ts's
+ * normalizeGhlFieldSource, so old saved mappings/queued jobs keep working.
+ * Distinct from `GhlFieldMapping`, which covers custom fields, not these
+ * fixed standard ones. Optional on payload builders/orchestrators — omitting
+ * it keeps today's always-include, prefer-brand-name behavior. */
 export interface GhlStandardFieldMapping {
-  companyName: "brand_name" | "company_name" | "skip";
-  firstName: "include" | "skip";
-  lastName: "include" | "skip";
-  email: "include" | "skip";
-  phone: "include" | "skip";
-  city: "include" | "skip";
-  country: "include" | "skip";
+  companyName: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  city: string;
+  country: string;
 }

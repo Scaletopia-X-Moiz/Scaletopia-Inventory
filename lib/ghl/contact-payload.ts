@@ -29,58 +29,116 @@ export const GHL_KNOWN_RECORD_FIELDS: Record<string, keyof GhlPushRecord> = {
 };
 
 /** Resolves a column-bound entry's raw value against one candidate's
- * GhlPushRecord + custom_data. companyName gets the same clean-name
- * preference as buildGhlContactPayload, so a custom field bound to "Company
- * name" isn't left sending the raw value — mirrors EmailBison's
- * resolveCustomVariables special case. */
+ * GhlPushRecord + custom_data — a pure key lookup. Unlike the pre-free-source
+ * mapping version of this function, this has no companyName-prefers-brandName
+ * special case: "companyName" means the raw value and "brandName" means the
+ * cleaned one, each addressable independently now that the standard-field
+ * mapping is free-source (a caller that wants the clean-name-preferred
+ * default gets it from buildGhlContactPayload's own defaultValue, not from
+ * here) — mirrors EmailBison's resolveEmailBisonColumnValue
+ * (lib/emailbison/lead-payload.ts). */
 function resolveGhlColumnValue(
   columnKey: string,
   record: GhlPushRecord | undefined,
   customData: Record<string, unknown> | null
 ): unknown {
-  if (columnKey === "companyName") {
-    return record ? record.brandName || record.companyName : (customData?.[columnKey] ?? null);
-  }
   const recordField = GHL_KNOWN_RECORD_FIELDS[columnKey];
   if (recordField && record) return record[recordField];
   return customData?.[columnKey] ?? null;
 }
 
+/** Maps a legacy saved standard-field value to this feature's current
+ * source-key shape, so old push_field_mappings rows and already-queued
+ * push_jobs keep resolving correctly after the include/skip → free-source
+ * rework: "include" meant "send this field from its own record column",
+ * which is exactly what sourcing the field from its own key now means, so it
+ * maps to `field` itself; "brand_name"/"company_name" were the old 3-way
+ * companyName enum's other two values. "skip" and any value that's already a
+ * source key pass through unchanged. Mirrors EmailBison's
+ * normalizeFieldSource (lib/emailbison/lead-payload.ts). */
+export function normalizeGhlFieldSource(field: keyof GhlStandardFieldMapping, value: string): string {
+  if (value === "include") return field;
+  if (value === "brand_name") return "brandName";
+  if (value === "company_name") return "companyName";
+  return value;
+}
+
+/** Resolves one standard field's outbound value: an omitted mapping (or a
+ * field missing from an older-shaped mapping) falls back to `defaultValue`
+ * — the caller's today's-behavior default — so buildGhlContactPayload's
+ * unmapped path is byte-for-byte what it was before free-source mapping
+ * existed. Otherwise the (possibly legacy) value is normalized via
+ * normalizeGhlFieldSource, "skip" sends null, and anything else is resolved
+ * against the record/custom_data and stringified via
+ * stringifyCustomFieldValue — mirrors EmailBison's resolveStandardField
+ * (lib/emailbison/lead-payload.ts). */
+function resolveStandardField(
+  field: keyof GhlStandardFieldMapping,
+  defaultValue: string | null,
+  mapping: GhlStandardFieldMapping | undefined,
+  record: GhlPushRecord,
+  customData: Record<string, unknown> | null
+): string | null {
+  const raw = mapping?.[field];
+  if (raw === undefined) return defaultValue;
+  const source = normalizeGhlFieldSource(field, raw);
+  if (source === "skip") return null;
+  // companyName sourced from brandName keeps the old 3-way "brand_name"
+  // choice's brand-preferred-with-raw-fallback semantics: the default mapping
+  // (and any normalized-legacy "brand_name") sends companyName: "brandName"
+  // for the *whole* push whenever any record has a cleaned name, so a
+  // brand-less record in that set must still fall back to its raw
+  // companyName rather than send null — otherwise, with brand_name coverage
+  // ~0.2%, a mixed push would blank out company name for nearly every
+  // contact. brandName stays a strict lookup everywhere else (custom fields,
+  // other standard fields), where "no cleaned name" correctly resolves to
+  // null.
+  if (field === "companyName" && source === "brandName") {
+    return stringifyCustomFieldValue(record.brandName || record.companyName);
+  }
+  return stringifyCustomFieldValue(resolveGhlColumnValue(source, record, customData));
+}
+
 /** Shapes a person record into a GHL contact-creation payload. Tags are
- * supplied by the caller rather than derived here,
- * since a single push can attach more than one tag to a contact. `customFields`
- * is likewise pre-built by the caller (via buildGhlCustomFields) — this
- * function just carries it through, defaulting to empty when the push has no
- * active field mapping (ticket #51). `standardFieldMapping` (ticket #109) is
- * optional — omitting it reproduces today's behavior exactly (every standard
- * field included, company name prefers brand_name falling back to
- * company_name). When supplied, "skip" on any field nulls it out, and
- * companyName: "company_name" sends the raw name even when brand_name is
- * present. */
+ * supplied by the caller rather than derived here, since a single push can
+ * attach more than one tag to a contact. `customFields` is likewise
+ * pre-built by the caller (via buildGhlCustomFields) — this function just
+ * carries it through, defaulting to empty when the push has no active field
+ * mapping (ticket #51).
+ *
+ * `customData` is the candidate's raw enrichment data (mirrors the same
+ * argument on buildGhlCustomFields) — needed here too now that a standard
+ * field can be free-sourced from a virtual/enrichment column, not just a
+ * fixed record field. `record` is the full GhlPushRecord (not a narrowed
+ * Pick) for the same reason — a standard field can now be sourced from
+ * niche/employeeCount/source too.
+ *
+ * `standardFieldMapping` (ticket #109, reworked to free-source mapping) lets
+ * the caller override which column feeds each standard field — omitting it,
+ * or omitting an individual field within it, reproduces today's behavior
+ * exactly: prefer brand_name for companyName, include every other field from
+ * its own record column. */
 export function buildGhlContactPayload(
-  record: Pick<
-    GhlPushRecord,
-    "firstName" | "lastName" | "email" | "phone" | "companyName" | "brandName" | "city" | "country"
-  >,
+  record: GhlPushRecord,
+  customData: Record<string, unknown> | null,
   tags: string[],
   customFields: { id: string; value: string }[] = [],
   standardFieldMapping?: GhlStandardFieldMapping
 ): GhlContactPayloadShape {
-  const companyName =
-    standardFieldMapping?.companyName === "skip"
-      ? null
-      : standardFieldMapping?.companyName === "company_name"
-        ? record.companyName
-        : record.brandName || record.companyName;
-
   return {
-    firstName: standardFieldMapping?.firstName === "skip" ? null : record.firstName,
-    lastName: standardFieldMapping?.lastName === "skip" ? null : record.lastName,
-    email: standardFieldMapping?.email === "skip" ? null : record.email,
-    phone: standardFieldMapping?.phone === "skip" ? null : record.phone,
-    companyName,
-    city: standardFieldMapping?.city === "skip" ? null : record.city,
-    country: standardFieldMapping?.country === "skip" ? null : record.country,
+    firstName: resolveStandardField("firstName", record.firstName, standardFieldMapping, record, customData),
+    lastName: resolveStandardField("lastName", record.lastName, standardFieldMapping, record, customData),
+    email: resolveStandardField("email", record.email, standardFieldMapping, record, customData),
+    phone: resolveStandardField("phone", record.phone, standardFieldMapping, record, customData),
+    companyName: resolveStandardField(
+      "companyName",
+      record.brandName || record.companyName,
+      standardFieldMapping,
+      record,
+      customData
+    ),
+    city: resolveStandardField("city", record.city, standardFieldMapping, record, customData),
+    country: resolveStandardField("country", record.country, standardFieldMapping, record, customData),
     tags,
     customFields,
   };

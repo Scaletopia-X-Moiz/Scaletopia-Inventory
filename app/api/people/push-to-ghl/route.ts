@@ -15,18 +15,24 @@ function workerKickHeaders(): Record<string, string> {
   return workerSecret ? { "x-worker-secret": workerSecret } : {};
 }
 
+/** Any string is a valid per-field source now (a record/virtual/custom_data
+ * column key, or the "skip" sentinel) — free-source mapping (rework mirroring
+ * EmailBison's issue #110/#108 rework) dropped the fixed include/skip and
+ * 3-way companyName enums, so this only needs to check shape, not enum
+ * membership. Legacy values ("include", "brand_name", "company_name") are
+ * tolerated downstream by buildGhlContactPayload's normalizeGhlFieldSource,
+ * not rejected here. */
 function isStandardFieldMapping(value: unknown): value is GhlStandardFieldMapping {
   if (typeof value !== "object" || value === null) return false;
   const m = value as Record<string, unknown>;
-  const isIncludeSkip = (v: unknown) => v === "include" || v === "skip";
   return (
-    (m.companyName === "brand_name" || m.companyName === "company_name" || m.companyName === "skip") &&
-    isIncludeSkip(m.firstName) &&
-    isIncludeSkip(m.lastName) &&
-    isIncludeSkip(m.email) &&
-    isIncludeSkip(m.phone) &&
-    isIncludeSkip(m.city) &&
-    isIncludeSkip(m.country)
+    typeof m.companyName === "string" &&
+    typeof m.firstName === "string" &&
+    typeof m.lastName === "string" &&
+    typeof m.email === "string" &&
+    typeof m.phone === "string" &&
+    typeof m.city === "string" &&
+    typeof m.country === "string"
   );
 }
 

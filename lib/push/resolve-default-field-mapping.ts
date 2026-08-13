@@ -111,16 +111,21 @@ export function resolveDefaultFieldMapping(
     }
   }
 
+  // Free-source mapping (rework mirroring EmailBison's issue #110/#108
+  // rework): each field defaults to its own record column, i.e. its own key
+  // — companyName is the one exception, defaulting to the cleaned
+  // "brandName" column when any record in the pushed set has one, else the
+  // raw "companyName" column, per resolveDefaultCompanyNameSource above.
   return {
     platform: "ghl",
     standardFields: {
-      companyName,
-      firstName: "include",
-      lastName: "include",
-      email: "include",
-      phone: "include",
-      city: "include",
-      country: "include",
+      companyName: companyName === "brand_name" ? "brandName" : "companyName",
+      firstName: "firstName",
+      lastName: "lastName",
+      email: "email",
+      phone: "phone",
+      city: "city",
+      country: "country",
     },
     customFieldMapping,
     customFieldScores,

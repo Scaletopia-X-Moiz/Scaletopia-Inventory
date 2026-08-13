@@ -115,4 +115,48 @@ describe("POST /api/people/push-to-ghl (enqueue-only)", () => {
     const arg = createPushJob.mock.calls[0][0];
     expect(arg.options.fieldMapping).toEqual([{ ghlFieldId: "f2", source: "literal", value: "static" }]);
   });
+
+  it("accepts a free-source standardFieldMapping (any string source per field, not just the old enum values)", async () => {
+    const standardFieldMapping = {
+      companyName: "brandName",
+      firstName: "firstName",
+      lastName: "lastName",
+      email: "email",
+      phone: "phone",
+      city: "some_enrichment_key",
+      country: "country",
+    };
+    const response = await POST(makeRequest({ clientId: "client-1", standardFieldMapping }));
+
+    expect(response.status).toBe(200);
+    const arg = createPushJob.mock.calls[0][0];
+    expect(arg.options.standardFieldMapping).toEqual(standardFieldMapping);
+  });
+
+  it("still accepts a legacy include/skip-shaped standardFieldMapping (normalized downstream, not rejected here)", async () => {
+    const legacyMapping = {
+      companyName: "brand_name",
+      firstName: "include",
+      lastName: "include",
+      email: "include",
+      phone: "include",
+      city: "include",
+      country: "include",
+    };
+    const response = await POST(makeRequest({ clientId: "client-1", standardFieldMapping: legacyMapping }));
+
+    expect(response.status).toBe(200);
+    const arg = createPushJob.mock.calls[0][0];
+    expect(arg.options.standardFieldMapping).toEqual(legacyMapping);
+  });
+
+  it("drops a malformed standardFieldMapping (missing fields) rather than rejecting the request", async () => {
+    const response = await POST(
+      makeRequest({ clientId: "client-1", standardFieldMapping: { companyName: "companyName" } })
+    );
+
+    expect(response.status).toBe(200);
+    const arg = createPushJob.mock.calls[0][0];
+    expect(arg.options.standardFieldMapping).toBeUndefined();
+  });
 });

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { buildGhlContactPayload, buildGhlCustomFields } from "@/lib/ghl/contact-payload";
-import type { GhlFieldMapping } from "@/lib/ghl/types";
+import { buildGhlContactPayload, buildGhlCustomFields, normalizeGhlFieldSource } from "@/lib/ghl/contact-payload";
+import type { GhlFieldMapping, GhlPushRecord, GhlStandardFieldMapping } from "@/lib/ghl/types";
 
-const fullRecord = {
+const fullRecord: GhlPushRecord = {
   firstName: "Jane",
   lastName: "Doe",
   email: "jane@example.com",
@@ -11,27 +11,30 @@ const fullRecord = {
   brandName: null,
   city: "Austin",
   country: "US",
+  niche: "dtc-beauty",
+  employeeCount: 42,
+  source: "apollo",
 };
 
 describe("buildGhlContactPayload", () => {
   it("shapes a full record into a GHL contact payload", () => {
-    expect(buildGhlContactPayload(fullRecord, ["Acme - dtc-beauty | 11-50 | US | apollo"])).toEqual(
-      {
-        firstName: "Jane",
-        lastName: "Doe",
-        email: "jane@example.com",
-        phone: "+15551234567",
-        companyName: "Acme Inc",
-        city: "Austin",
-        country: "US",
-        tags: ["Acme - dtc-beauty | 11-50 | US | apollo"],
-        customFields: [],
-      }
-    );
+    expect(
+      buildGhlContactPayload(fullRecord, null, ["Acme - dtc-beauty | 11-50 | US | apollo"])
+    ).toEqual({
+      firstName: "Jane",
+      lastName: "Doe",
+      email: "jane@example.com",
+      phone: "+15551234567",
+      companyName: "Acme Inc",
+      city: "Austin",
+      country: "US",
+      tags: ["Acme - dtc-beauty | 11-50 | US | apollo"],
+      customFields: [],
+    });
   });
 
   it("passes null fields through untouched", () => {
-    const record = {
+    const record: GhlPushRecord = {
       firstName: null,
       lastName: null,
       email: null,
@@ -40,8 +43,11 @@ describe("buildGhlContactPayload", () => {
       brandName: null,
       city: null,
       country: null,
+      niche: null,
+      employeeCount: null,
+      source: null,
     };
-    expect(buildGhlContactPayload(record, [])).toEqual({
+    expect(buildGhlContactPayload(record, null, [])).toEqual({
       firstName: null,
       lastName: null,
       email: null,
@@ -57,88 +63,92 @@ describe("buildGhlContactPayload", () => {
   it("prefers the cleaned brandName over the raw companyName", () => {
     const result = buildGhlContactPayload(
       { ...fullRecord, companyName: "ACME INC dba", brandName: "Acme" },
+      null,
       []
     );
     expect(result.companyName).toBe("Acme");
   });
 
   it("falls back to the raw companyName when brandName is null", () => {
-    const result = buildGhlContactPayload({ ...fullRecord, brandName: null }, []);
+    const result = buildGhlContactPayload({ ...fullRecord, brandName: null }, null, []);
     expect(result.companyName).toBe("Acme Inc");
   });
 
   it("supports attaching more than one tag", () => {
-    const result = buildGhlContactPayload(fullRecord, ["tag-a", "tag-b"]);
+    const result = buildGhlContactPayload(fullRecord, null, ["tag-a", "tag-b"]);
     expect(result.tags).toEqual(["tag-a", "tag-b"]);
   });
 
   it("supports zero tags", () => {
-    const result = buildGhlContactPayload(fullRecord, []);
+    const result = buildGhlContactPayload(fullRecord, null, []);
     expect(result.tags).toEqual([]);
   });
 
   it("carries a supplied customFields array through untouched", () => {
     const customFields = [{ id: "f1", value: "42" }];
-    const result = buildGhlContactPayload(fullRecord, [], customFields);
+    const result = buildGhlContactPayload(fullRecord, null, [], customFields);
     expect(result.customFields).toEqual(customFields);
   });
 
   it("defaults customFields to an empty array when omitted", () => {
-    const result = buildGhlContactPayload(fullRecord, []);
+    const result = buildGhlContactPayload(fullRecord, null, []);
     expect(result.customFields).toEqual([]);
   });
 
-  it("sends the raw company_name even when brand_name is present, given companyName: \"company_name\"", () => {
+  const fullMapping: GhlStandardFieldMapping = {
+    companyName: "brandName",
+    firstName: "firstName",
+    lastName: "lastName",
+    email: "email",
+    phone: "phone",
+    city: "city",
+    country: "country",
+  };
+
+  it("sends the raw companyName even when brandName is present, given companyName sourced from companyName", () => {
     const result = buildGhlContactPayload(
       { ...fullRecord, companyName: "ACME INC dba", brandName: "Acme" },
+      null,
       [],
       [],
-      {
-        companyName: "company_name",
-        firstName: "include",
-        lastName: "include",
-        email: "include",
-        phone: "include",
-        city: "include",
-        country: "include",
-      }
+      { ...fullMapping, companyName: "companyName" }
     );
     expect(result.companyName).toBe("ACME INC dba");
   });
 
-  it("omits company name entirely when the mapping is companyName: \"skip\"", () => {
-    const result = buildGhlContactPayload(fullRecord, [], [], {
-      companyName: "skip",
-      firstName: "include",
-      lastName: "include",
-      email: "include",
-      phone: "include",
-      city: "include",
-      country: "include",
-    });
+  it("omits company name entirely when the mapping skips it", () => {
+    const result = buildGhlContactPayload(fullRecord, null, [], [], { ...fullMapping, companyName: "skip" });
     expect(result.companyName).toBeNull();
   });
 
-  it("still prefers brand_name over company_name when the mapping says brand_name", () => {
+  it("still prefers brandName over companyName when the mapping sources companyName from brandName", () => {
     const result = buildGhlContactPayload(
       { ...fullRecord, companyName: "ACME INC dba", brandName: "Acme" },
+      null,
       [],
       [],
-      {
-        companyName: "brand_name",
-        firstName: "include",
-        lastName: "include",
-        email: "include",
-        phone: "include",
-        city: "include",
-        country: "include",
-      }
+      fullMapping // companyName: "brandName"
     );
     expect(result.companyName).toBe("Acme");
   });
 
-  it("nulls out any field set to \"skip\"", () => {
-    const result = buildGhlContactPayload(fullRecord, [], [], {
+  it("falls back to the raw companyName when a present mapping sources companyName from brandName but brandName is null", () => {
+    // The default mapping sends companyName: "brandName" for the whole push
+    // whenever *any* record has a cleaned name; a brand-less record in that
+    // set must still send its raw companyName, not null — reproducing the old
+    // 3-way "brand_name" choice's brand-preferred-with-raw-fallback behavior.
+    const result = buildGhlContactPayload(
+      { ...fullRecord, companyName: "Acme Inc", brandName: null },
+      null,
+      [],
+      [],
+      fullMapping
+    );
+    expect(result.companyName).toBe("Acme Inc");
+  });
+
+  it("nulls out any field set to skip", () => {
+    const result = buildGhlContactPayload(fullRecord, null, [], [], {
       companyName: "skip",
       firstName: "skip",
       lastName: "skip",
@@ -161,10 +171,88 @@ describe("buildGhlContactPayload", () => {
   });
 
   it("reproduces today's behavior exactly when the mapping is omitted", () => {
-    const withoutMapping = buildGhlContactPayload(fullRecord, ["tag"], []);
-    const withUndefinedMapping = buildGhlContactPayload(fullRecord, ["tag"], [], undefined);
+    const withoutMapping = buildGhlContactPayload(fullRecord, null, ["tag"], []);
+    const withUndefinedMapping = buildGhlContactPayload(fullRecord, null, ["tag"], [], undefined);
     expect(withoutMapping).toEqual(withUndefinedMapping);
     expect(withoutMapping.companyName).toBe(fullRecord.companyName);
+  });
+
+  it("resolves a GHL field from a source column different than its own", () => {
+    const result = buildGhlContactPayload(fullRecord, null, [], [], {
+      ...fullMapping,
+      companyName: "employeeCount",
+    });
+    expect(result.companyName).toBe("42");
+  });
+
+  it("resolves a standard field from custom_data when the mapping sources it from an enrichment column", () => {
+    const result = buildGhlContactPayload(fullRecord, { seniority: "VP" }, [], [], {
+      ...fullMapping,
+      city: "seniority",
+    });
+    expect(result.city).toBe("VP");
+  });
+
+  it("stringifies a standard field sourced from a numeric field", () => {
+    const result = buildGhlContactPayload(fullRecord, null, [], [], {
+      ...fullMapping,
+      city: "employeeCount",
+    });
+    expect(result.city).toBe("42");
+  });
+
+  it("tolerates a legacy 'include'/'brand_name' mapping saved before free-source mapping existed", () => {
+    const legacyMapping: GhlStandardFieldMapping = {
+      companyName: "brand_name",
+      firstName: "include",
+      lastName: "include",
+      email: "include",
+      phone: "include",
+      city: "include",
+      country: "include",
+    };
+    const result = buildGhlContactPayload(
+      { ...fullRecord, brandName: "Acme" },
+      null,
+      [],
+      [],
+      legacyMapping
+    );
+    expect(result).toEqual(
+      buildGhlContactPayload({ ...fullRecord, brandName: "Acme" }, null, [], [], fullMapping)
+    );
+  });
+
+  it("tolerates a legacy 'company_name' companyName value", () => {
+    const result = buildGhlContactPayload(
+      { ...fullRecord, companyName: "ACME INC dba", brandName: "Acme" },
+      null,
+      [],
+      [],
+      { ...fullMapping, companyName: "company_name" }
+    );
+    expect(result.companyName).toBe("ACME INC dba");
+  });
+});
+
+describe("normalizeGhlFieldSource", () => {
+  it("maps legacy 'include' to the field's own key", () => {
+    expect(normalizeGhlFieldSource("firstName", "include")).toBe("firstName");
+    expect(normalizeGhlFieldSource("companyName", "include")).toBe("companyName");
+    expect(normalizeGhlFieldSource("city", "include")).toBe("city");
+  });
+
+  it("maps legacy 'brand_name'/'company_name' to brandName/companyName", () => {
+    expect(normalizeGhlFieldSource("companyName", "brand_name")).toBe("brandName");
+    expect(normalizeGhlFieldSource("companyName", "company_name")).toBe("companyName");
+  });
+
+  it("keeps 'skip' as-is", () => {
+    expect(normalizeGhlFieldSource("email", "skip")).toBe("skip");
+  });
+
+  it("passes an already-normalized source key through unchanged", () => {
+    expect(normalizeGhlFieldSource("country", "some_enrichment_key")).toBe("some_enrichment_key");
   });
 });
 
@@ -236,7 +324,7 @@ describe("buildGhlCustomFields", () => {
   });
 
   it("resolves a column entry bound to a standard record field", () => {
-    const record = {
+    const record: GhlPushRecord = {
       firstName: "Jane",
       lastName: "Doe",
       email: "jane@example.com",
@@ -263,8 +351,8 @@ describe("buildGhlCustomFields", () => {
     ]);
   });
 
-  it("prefers brandName over companyName for a column entry bound to companyName", () => {
-    const record = {
+  it("resolves a column entry bound to companyName as the raw value even when brandName is present (pure lookup, no special-casing)", () => {
+    const record: GhlPushRecord = {
       firstName: "Jane",
       lastName: "Doe",
       email: "jane@example.com",
@@ -278,6 +366,24 @@ describe("buildGhlCustomFields", () => {
       source: null,
     };
     const result = buildGhlCustomFields(null, [{ ghlFieldId: "f7", source: "column", columnKey: "companyName" }], record);
-    expect(result).toEqual([{ id: "f7", value: "Acme" }]);
+    expect(result).toEqual([{ id: "f7", value: "ACME INC dba" }]);
+  });
+
+  it("resolves a column entry bound to brandName independently of companyName", () => {
+    const record: GhlPushRecord = {
+      firstName: "Jane",
+      lastName: "Doe",
+      email: "jane@example.com",
+      phone: "+15551234567",
+      companyName: "ACME INC dba",
+      brandName: "Acme",
+      city: "Austin",
+      country: "US",
+      niche: null,
+      employeeCount: null,
+      source: null,
+    };
+    const result = buildGhlCustomFields(null, [{ ghlFieldId: "f8", source: "column", columnKey: "brandName" }], record);
+    expect(result).toEqual([{ id: "f8", value: "Acme" }]);
   });
 });
