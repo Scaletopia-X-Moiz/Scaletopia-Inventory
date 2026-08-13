@@ -32,6 +32,13 @@ export interface EmailBisonLeadResult {
 export interface EmailBisonCampaign {
   id: string;
   name: string;
+  /** EmailBison's campaign status (e.g. "draft", "active"). A campaign is
+   * considered "not launched / a draft" when `status === "draft"`. Extracted
+   * best-effort: the create response is confirmed to include `status: "draft"`,
+   * but it is UNCONFIRMED whether the `/api/campaigns` LIST endpoint returns
+   * per-row status, so this is `undefined` when absent. A freshly-created
+   * campaign carries status from the create response regardless. */
+  status?: string;
 }
 
 export interface ListCampaignsResult {
@@ -253,7 +260,11 @@ function toCampaign(raw: unknown): EmailBisonCampaign | null {
   const id = record.id;
   const name = record.name;
   if (id === undefined || id === null || typeof name !== "string") return null;
-  return { id: String(id), name };
+  // Status is best-effort: the create response includes `status: "draft"`, but
+  // whether the LIST endpoint returns per-row status is unconfirmed, so extract
+  // it defensively (undefined if absent) rather than requiring it.
+  const status = typeof record.status === "string" ? record.status : undefined;
+  return { id: String(id), name, ...(status !== undefined ? { status } : {}) };
 }
 
 /** Lists campaigns for the workspace (`GET /api/campaigns`), paginated.
@@ -765,12 +776,12 @@ export async function createCampaignSchedule(
 }
 
 /** One sequence step for createSequenceSteps — camelCase mirror of the wire
- * body's email_subject/email_body/wait_in_days/thread_reply. `variant`/
- * `variant_from_step` are NOT part of this shape — createSequenceSteps only
- * ever creates base ("A") steps. An extra split-test variant is its own
- * separate sequence-step record: create it via a second createSequenceSteps
- * call (a single-element array, same title), then link it to its base step
- * with updateSequenceStep below. See lib/emailbison/campaigns.ts's
+ * body's email_subject/email_body/wait_in_days/thread_reply. Split-test
+ * variant fields are NOT part of this shape — createSequenceSteps only creates
+ * plain steps. An extra split-test variant is created the same way (its own
+ * createSequenceSteps call, a single-element array appended to the campaign's
+ * one sequence), and then linked to its base step in a single whole-sequence
+ * PUT via updateSequenceVariants below. See lib/emailbison/campaigns.ts's
  * createEmailBisonCampaign for the orchestration. */
 export interface EmailBisonSequenceStepInput {
   emailSubject: string;
@@ -797,10 +808,16 @@ function toWireSequenceStep(step: EmailBisonSequenceStepInput): Record<string, u
   };
 }
 
-/** Creates a campaign's sequence and its steps in one call (`POST
- * /api/campaigns/{id}/sequence-steps`) — confirmed live: `201` with the
- * persisted sequence + step ids. Subject to the same `{ data: { success:
- * false } }`-on-2xx failure shape as attachSenderEmails. */
+/** Creates sequence steps on a campaign (`POST
+ * /api/campaigns/{id}/sequence-steps`) — confirmed live: `201`/`200` with the
+ * persisted sequence + step ids. `id` in the result is the **sequence** id
+ * (== `campaign.sequence_id`) — the exact id updateSequenceVariants' PUT path
+ * needs. There is only ever one sequence per campaign: a later call appends to
+ * it rather than creating a new one, and `steps` then holds **all** of the
+ * sequence's steps with the newly-created one **last** (not `[0]`), so a
+ * caller adding a variant reads the new step id from the end of `steps`.
+ * Subject to the same `{ data: { success: false } }`-on-2xx failure shape as
+ * attachSenderEmails. */
 export async function createSequenceSteps(
   credentials: EmailBisonCredentials,
   campaignId: string,
@@ -836,44 +853,130 @@ export async function createSequenceSteps(
   return { id: String(id), steps: resultSteps };
 }
 
-/** Input for updateSequenceStep — camelCase mirror of the wire body's
- * `variant`/`variant_from_step`. `variant` is the split-test letter for this
- * step ("B", "C", "D", …; the base step is implicitly "A" and is never
- * updated this way). `variantFromStep` is the base step's id this variant is
- * linked to. */
-export interface EmailBisonUpdateSequenceStepInput {
-  variant: string;
-  variantFromStep: string;
+/** Full detail of one persisted sequence step, as read back from the v1.1
+ * sequence-steps GET — everything updateSequenceVariants' PUT must echo. The
+ * API returns `order`/`wait_in_days` as either a number or a numeric string
+ * depending on the endpoint, so both are coerced to numbers here. `order` is
+ * EmailBison-assigned and must be echoed unchanged and kept unique per step
+ * (a duplicate order 422s "duplicate value"). */
+export interface EmailBisonSequenceStepDetail {
+  id: string;
+  emailSubject: string;
+  order: number;
+  emailBody: string;
+  waitInDays: number;
+  threadReply: boolean;
 }
 
-function toWireUpdateSequenceStep(input: EmailBisonUpdateSequenceStepInput): Record<string, unknown> {
+export interface EmailBisonSequenceStepsDetail {
+  sequenceId: string;
+  steps: EmailBisonSequenceStepDetail[];
+}
+
+function toNumber(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function toSequenceStepDetail(raw: unknown): EmailBisonSequenceStepDetail | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const id = record.id;
+  if (id === undefined || id === null) return null;
   return {
-    variant: input.variant,
-    variant_from_step: input.variantFromStep,
+    id: String(id),
+    emailSubject: typeof record.email_subject === "string" ? record.email_subject : "",
+    order: toNumber(record.order),
+    emailBody: typeof record.email_body === "string" ? record.email_body : "",
+    waitInDays: toNumber(record.wait_in_days),
+    threadReply: typeof record.thread_reply === "boolean" ? record.thread_reply : false,
   };
 }
 
-/** Links a sequence step as a split-test variant of another (`PUT
- * /api/campaigns/sequence-steps/{sequenceId}`) — the second half of creating
- * an extra ("B", "C", …) variant: the step itself is created first via
- * createSequenceSteps (a single-element array), then this call attaches it to
- * its base step. Subject to the same `{ data: { success: false } }`-on-2xx
- * failure shape as attachSenderEmails. */
-export async function updateSequenceStep(
+/** Reads a campaign's full sequence (`GET
+ * /api/campaigns/v1.1/{campaign_id}/sequence-steps`) — returns the sequence id
+ * plus every step with its EmailBison-assigned `order`. The v1.1 GET is the
+ * authoritative source of each step's `order`, which updateSequenceVariants
+ * must echo on the whole-sequence PUT that links split-test variants. */
+export async function getSequenceSteps(
+  credentials: EmailBisonCredentials,
+  campaignId: string,
+  deps: EmailBisonClientDeps = {}
+): Promise<EmailBisonSequenceStepsDetail> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const { status, json } = await requestGetWithRetry(
+    fetchImpl,
+    credentials,
+    `/api/campaigns/v1.1/${campaignId}/sequence-steps`
+  );
+  assertOk(status, json, "sequence-steps read");
+
+  const data = json && typeof json === "object" ? (json as Record<string, unknown>).data : null;
+  const record = data && typeof data === "object" ? (data as Record<string, unknown>) : null;
+  const sequenceId = record ? record.sequence_id : undefined;
+  if (sequenceId === undefined || sequenceId === null) {
+    throw new EmailBisonApiError("EmailBison sequence-steps read returned no sequence id");
+  }
+  const rawSteps = record && Array.isArray(record.sequence_steps) ? record.sequence_steps : [];
+  const steps = rawSteps
+    .map(toSequenceStepDetail)
+    .filter((step): step is EmailBisonSequenceStepDetail => step !== null);
+
+  return { sequenceId: String(sequenceId), steps };
+}
+
+/** One step in an updateSequenceVariants PUT body: an
+ * EmailBisonSequenceStepDetail (echoed verbatim from getSequenceSteps) plus its
+ * split-test role. A base step is `variant: false`; an extra ("B", "C", …)
+ * variant is `variant: true` with `variantFromStepId` set to the id of the base
+ * step it splits from (the API requires it whenever `variant` is true).
+ * EmailBison has no letter concept — multiple variants of one base step are all
+ * `variant: true` pointing at the same base id, distinguished only by `order`. */
+export interface EmailBisonSequenceVariantStep extends EmailBisonSequenceStepDetail {
+  variant: boolean;
+  variantFromStepId?: string;
+}
+
+function toWireVariantStep(step: EmailBisonSequenceVariantStep): Record<string, unknown> {
+  return {
+    id: toNumber(step.id),
+    email_subject: step.emailSubject,
+    order: step.order,
+    email_body: step.emailBody,
+    wait_in_days: step.waitInDays,
+    thread_reply: step.threadReply,
+    variant: step.variant,
+    ...(step.variant && step.variantFromStepId !== undefined
+      ? { variant_from_step_id: toNumber(step.variantFromStepId) }
+      : {}),
+  };
+}
+
+/** Links split-test variants by PUTting the **whole** sequence to the v1.1
+ * endpoint (`PUT /api/campaigns/v1.1/sequence-steps/{sequenceId}`, where
+ * `sequenceId` is `campaign.sequence_id`) — the single, live-verified way to
+ * attach variants (issue #143). Every step is echoed with its id/subject/order/
+ * body/wait; variant steps additionally carry `variant: true` +
+ * `variant_from_step_id`. One PUT links all variants at once, so the caller
+ * builds the full step array first (see createEmailBisonCampaign). Subject to
+ * the same `{ data: { success: false } }`-on-2xx failure shape as
+ * attachSenderEmails. */
+export async function updateSequenceVariants(
   credentials: EmailBisonCredentials,
   sequenceId: string,
-  input: EmailBisonUpdateSequenceStepInput,
+  title: string,
+  steps: EmailBisonSequenceVariantStep[],
   deps: EmailBisonClientDeps = {}
 ): Promise<void> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const { status, json } = await requestPutWithRetry(
     fetchImpl,
     credentials,
-    `/api/campaigns/sequence-steps/${sequenceId}`,
-    toWireUpdateSequenceStep(input)
+    `/api/campaigns/v1.1/sequence-steps/${sequenceId}`,
+    { title, sequence_steps: steps.map(toWireVariantStep) }
   );
-  assertOk(status, json, "sequence-step update");
-  assertSuccessBody(json, "sequence-step update");
+  assertOk(status, json, "sequence-step variant link");
+  assertSuccessBody(json, "sequence-step variant link");
 }
 
 /** Resumes a paused/draft campaign, starting real sending (`PATCH

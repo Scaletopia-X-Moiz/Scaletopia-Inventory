@@ -89,6 +89,10 @@ export async function POST(request: NextRequest) {
   }
 
   const { entity, action, clientId, campaignId, parallel } = body;
+  // Whether to auto-launch (resume) the campaign once the worker finishes
+  // attaching leads. Only meaningful for the campaign action, but stored as-is;
+  // the worker applies it on the terminal tick when ≥1 lead attached.
+  const launchOnComplete = typeof body.launchOnComplete === "boolean" ? body.launchOnComplete : undefined;
 
   if (!isEntity(entity)) {
     return Response.json({ error: 'entity must be "people" or "companies"' }, { status: 400 });
@@ -148,6 +152,7 @@ export async function POST(request: NextRequest) {
       customVariables,
       standardFieldMapping,
       parallel: typeof parallel === "boolean" ? parallel : undefined,
+      launchOnComplete,
     },
     triggeredByUserId: user.id,
     triggeredByEmail: user.email,

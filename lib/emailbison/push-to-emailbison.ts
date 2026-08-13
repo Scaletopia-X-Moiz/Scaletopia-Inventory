@@ -588,6 +588,14 @@ export interface EmailBisonCampaignPushResult {
  * instead of wall-clock time. */
 const EMAILBISON_CAMPAIGN_TICK_SIZE = 2000;
 
+/** Person-ids per platform_pushes `.in("person_id", …)` query in a campaign
+ * tick — a request-size cap, not a rate-limit concern. A tick holds up to
+ * EMAILBISON_CAMPAIGN_TICK_SIZE candidates, and PostgREST rejects the URL once
+ * the id list pushes it past ~11KB (~300-500 uuids), so the lookup/update
+ * queries are chunked here, mirroring the 200-sized id-list chunks in
+ * lib/data/people.ts (VIRTUAL_FILTER_ROW_CHUNK_SIZE, COMPANY_ID_CHUNK_SIZE). */
+const CAMPAIGN_LOOKUP_CHUNK_SIZE = 200;
+
 export interface EmailBisonCampaignPushProgress {
   phase: "resolving" | "adding-to-workspace" | "attaching" | "done";
   done: number;
@@ -675,16 +683,26 @@ async function runEmailBisonAddToCampaign<TFilters>(
   const nextOffset = offset + candidates.length;
   const isDone = nextOffset >= total_matched;
 
-  const { data: existingRows, error: lookupError } = await supabaseAdmin
-    .from("platform_pushes")
-    .select("person_id,platform_contact_id")
-    .eq("client_id", client.id)
-    .eq("platform", PLATFORM)
-    .in(
-      "person_id",
-      candidates.map((c) => c.id)
-    );
+  // Chunked at CAMPAIGN_LOOKUP_CHUNK_SIZE so the `.in("person_id", …)` URL stays
+  // under PostgREST's length limit even for a full 2000-candidate tick; rows are
+  // merged and order doesn't matter (they feed a Set and a Map below).
+  const lookupChunks = chunk(
+    candidates.map((c) => c.id),
+    CAMPAIGN_LOOKUP_CHUNK_SIZE
+  );
+  const lookupResults = await Promise.all(
+    lookupChunks.map((ids) =>
+      supabaseAdmin
+        .from("platform_pushes")
+        .select("person_id,platform_contact_id")
+        .eq("client_id", client.id)
+        .eq("platform", PLATFORM)
+        .in("person_id", ids)
+    )
+  );
+  const lookupError = lookupResults.find((r) => r.error)?.error;
   if (lookupError) throw lookupError;
+  const existingRows = lookupResults.flatMap((r) => r.data ?? []);
 
   const leadIdByPersonId = new Map<string, string>();
   // Created vs updated (feedback item 2b), same DB-side heuristic as the
@@ -771,20 +789,28 @@ async function runEmailBisonAddToCampaign<TFilters>(
 
     if (attachedCandidates.length > 0) {
       const pushedAt = new Date().toISOString();
-      const { error: updateError } = await supabaseAdmin
-        .from("platform_pushes")
-        .update({
-          campaign_tag: campaignId,
-          pushed_at: pushedAt,
-          pushed_by_user_id: actor.id,
-          pushed_by_email: actor.email,
-        })
-        .eq("client_id", client.id)
-        .eq("platform", PLATFORM)
-        .in(
-          "person_id",
-          attachedCandidates.map((c) => c.id)
-        );
+      // Chunked at CAMPAIGN_LOOKUP_CHUNK_SIZE for the same URL-length reason as
+      // the lookup above; same payload per chunk, fail-fast on any chunk error.
+      const updateChunks = chunk(
+        attachedCandidates.map((c) => c.id),
+        CAMPAIGN_LOOKUP_CHUNK_SIZE
+      );
+      const updateResults = await Promise.all(
+        updateChunks.map((ids) =>
+          supabaseAdmin
+            .from("platform_pushes")
+            .update({
+              campaign_tag: campaignId,
+              pushed_at: pushedAt,
+              pushed_by_user_id: actor.id,
+              pushed_by_email: actor.email,
+            })
+            .eq("client_id", client.id)
+            .eq("platform", PLATFORM)
+            .in("person_id", ids)
+        )
+      );
+      const updateError = updateResults.find((r) => r.error)?.error;
       if (updateError) throw updateError;
     }
 

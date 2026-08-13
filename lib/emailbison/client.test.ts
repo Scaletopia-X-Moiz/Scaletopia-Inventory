@@ -11,7 +11,8 @@ import {
   attachSenderEmails,
   createCampaignSchedule,
   createSequenceSteps,
-  updateSequenceStep,
+  getSequenceSteps,
+  updateSequenceVariants,
   resumeCampaign,
   requestWithRetry,
   EmailBisonApiError,
@@ -184,6 +185,27 @@ describe("listCampaigns", () => {
     });
     const [url] = fetchImpl.mock.calls[0];
     expect(url).toBe(`${CREDENTIALS.workspaceId}/api/campaigns?page=1`);
+  });
+
+  it("carries per-row status when the list endpoint returns it, and leaves it undefined when absent", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          { id: 10, name: "Q3 outbound", status: "active" },
+          { id: 11, name: "Draft campaign", status: "draft" },
+          { id: 12, name: "No status" },
+        ],
+        meta: { current_page: 1, last_page: 1 },
+      })
+    );
+
+    const result = await listCampaigns(CREDENTIALS, 1, { fetchImpl });
+
+    expect(result.campaigns).toEqual([
+      { id: "10", name: "Q3 outbound", status: "active" },
+      { id: "11", name: "Draft campaign", status: "draft" },
+      { id: "12", name: "No status" },
+    ]);
   });
 
   it("reports no more pages once current_page reaches last_page", async () => {
@@ -369,7 +391,10 @@ describe("createCampaign", () => {
 
     const result = await createCampaign(CREDENTIALS, "Q4 outbound", { fetchImpl });
 
-    expect(result).toEqual({ id: "20", name: "Q4 outbound" });
+    // The create response includes `status: "draft"`, which the returned
+    // campaign carries so callers can tell a freshly-created (unlaunched)
+    // campaign apart from an active one.
+    expect(result).toEqual({ id: "20", name: "Q4 outbound", status: "draft" });
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe(`${CREDENTIALS.workspaceId}/api/campaigns`);
     expect(JSON.parse(init.body)).toEqual({ name: "Q4 outbound" });
@@ -674,36 +699,137 @@ describe("createSequenceSteps", () => {
   });
 });
 
-describe("updateSequenceStep", () => {
-  it("PUTs the variant fields in snake_case", async () => {
+describe("getSequenceSteps", () => {
+  it("GETs the v1.1 sequence and returns the sequence id + steps, coercing numeric-string order/wait", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        data: {
+          sequence_id: 873,
+          sequence_steps: [
+            {
+              id: 2444,
+              email_subject: "Base A",
+              order: "1",
+              email_body: "<p>A</p>",
+              wait_in_days: "1",
+              thread_reply: false,
+            },
+            {
+              id: 2445,
+              email_subject: "Variant B",
+              order: 2,
+              email_body: "<p>B</p>",
+              wait_in_days: 1,
+              thread_reply: true,
+            },
+          ],
+        },
+      })
+    );
+
+    const result = await getSequenceSteps(CREDENTIALS, "camp_1", { fetchImpl });
+
+    expect(result).toEqual({
+      sequenceId: "873",
+      steps: [
+        { id: "2444", emailSubject: "Base A", order: 1, emailBody: "<p>A</p>", waitInDays: 1, threadReply: false },
+        { id: "2445", emailSubject: "Variant B", order: 2, emailBody: "<p>B</p>", waitInDays: 1, threadReply: true },
+      ],
+    });
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${CREDENTIALS.workspaceId}/api/campaigns/v1.1/camp_1/sequence-steps`);
+    expect(init.method ?? "GET").toBe("GET");
+  });
+
+  it("throws a typed error when the response carries no sequence id", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { data: { sequence_steps: [] } }));
+
+    await expect(getSequenceSteps(CREDENTIALS, "camp_1", { fetchImpl })).rejects.toThrow(EmailBisonApiError);
+  });
+
+  it("throws a typed error on a non-transient HTTP failure", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(404, { message: "not found" }));
+
+    await expect(getSequenceSteps(CREDENTIALS, "camp_1", { fetchImpl })).rejects.toThrow(EmailBisonApiError);
+  });
+});
+
+describe("updateSequenceVariants", () => {
+  const STEPS = [
+    { id: "2444", emailSubject: "Base A", order: 1, emailBody: "<p>A</p>", waitInDays: 1, threadReply: false, variant: false },
+    {
+      id: "2445",
+      emailSubject: "Variant B",
+      order: 2,
+      emailBody: "<p>B</p>",
+      waitInDays: 1,
+      threadReply: false,
+      variant: true,
+      variantFromStepId: "2444",
+    },
+  ];
+
+  it("PUTs the whole sequence to the v1.1 endpoint keyed on the sequence id, with numeric ids/orders and variant flags", async () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValue(jsonResponse(200, { data: { success: true, message: "ok" } }));
 
-    await updateSequenceStep(CREDENTIALS, "step_9", { variant: "B", variantFromStep: "step_1" }, { fetchImpl });
+    await updateSequenceVariants(CREDENTIALS, "873", "Initial outreach", STEPS, { fetchImpl });
 
     const [url, init] = fetchImpl.mock.calls[0];
-    expect(url).toBe(`${CREDENTIALS.workspaceId}/api/campaigns/sequence-steps/step_9`);
+    expect(url).toBe(`${CREDENTIALS.workspaceId}/api/campaigns/v1.1/sequence-steps/873`);
     expect(init.method).toBe("PUT");
-    expect(JSON.parse(init.body)).toEqual({ variant: "B", variant_from_step: "step_1" });
+    expect(JSON.parse(init.body)).toEqual({
+      title: "Initial outreach",
+      sequence_steps: [
+        { id: 2444, email_subject: "Base A", order: 1, email_body: "<p>A</p>", wait_in_days: 1, thread_reply: false, variant: false },
+        {
+          id: 2445,
+          email_subject: "Variant B",
+          order: 2,
+          email_body: "<p>B</p>",
+          wait_in_days: 1,
+          thread_reply: false,
+          variant: true,
+          variant_from_step_id: 2444,
+        },
+      ],
+    });
+  });
+
+  it("omits variant_from_step_id for base (variant: false) steps", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { data: { success: true, message: "ok" } }));
+
+    await updateSequenceVariants(
+      CREDENTIALS,
+      "873",
+      "Initial outreach",
+      [{ id: "2444", emailSubject: "Base A", order: 1, emailBody: "<p>A</p>", waitInDays: 1, threadReply: false, variant: false }],
+      { fetchImpl }
+    );
+
+    const body = JSON.parse(fetchImpl.mock.calls[0][1].body);
+    expect(body.sequence_steps[0]).not.toHaveProperty("variant_from_step_id");
   });
 
   it("throws a typed error on a non-transient HTTP failure", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(422, { message: "invalid variant" }));
 
-    await expect(
-      updateSequenceStep(CREDENTIALS, "step_9", { variant: "B", variantFromStep: "step_1" }, { fetchImpl })
-    ).rejects.toThrow(EmailBisonApiError);
+    await expect(updateSequenceVariants(CREDENTIALS, "873", "t", STEPS, { fetchImpl })).rejects.toThrow(
+      EmailBisonApiError
+    );
   });
 
   it("throws a typed error on a 200 with a { data: { success: false } } body", async () => {
     const fetchImpl = vi
       .fn()
-      .mockResolvedValue(jsonResponse(200, { data: { success: false, message: "step not found" } }));
+      .mockResolvedValue(jsonResponse(200, { data: { success: false, message: "record not found" } }));
 
-    await expect(
-      updateSequenceStep(CREDENTIALS, "step_9", { variant: "B", variantFromStep: "step_1" }, { fetchImpl })
-    ).rejects.toThrow(EmailBisonApiError);
+    await expect(updateSequenceVariants(CREDENTIALS, "873", "t", STEPS, { fetchImpl })).rejects.toThrow(
+      EmailBisonApiError
+    );
   });
 });
 

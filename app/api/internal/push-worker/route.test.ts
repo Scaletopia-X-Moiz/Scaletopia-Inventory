@@ -50,6 +50,9 @@ vi.mock("@/lib/emailbison/push-to-emailbison", () => ({
   runCompaniesAddToCampaign,
 }));
 
+const { resumeCampaign } = vi.hoisted(() => ({ resumeCampaign: vi.fn() }));
+vi.mock("@/lib/emailbison/client", () => ({ resumeCampaign }));
+
 const { GET, POST } = await import("@/app/api/internal/push-worker/route");
 
 const testClient: ClientRow = {
@@ -120,6 +123,7 @@ beforeEach(() => {
   delete process.env.PUSH_WORKER_SECRET;
   getClientById.mockResolvedValue(testClient);
   resetStaleRunningJobs.mockResolvedValue(0);
+  resumeCampaign.mockResolvedValue(undefined);
 });
 
 describe("push-worker auth", () => {
@@ -305,6 +309,95 @@ describe("push-worker dispatch + finish", () => {
   });
 });
 
+describe("push-worker auto-launch on complete (launchOnComplete)", () => {
+  function campaignResult(overrides: Record<string, unknown> = {}) {
+    return {
+      total_matched: 2,
+      attached: 2,
+      created: 2,
+      updated: 0,
+      errors: 0,
+      failed_people: [],
+      failed: [],
+      succeededPersonIds: ["p1", "p2"],
+      failedPersonIds: [],
+      nextOffset: 2,
+      done: true,
+      ...overrides,
+    };
+  }
+
+  const campaignJob = (overrides: Partial<PushJob> = {}) =>
+    makeJob({
+      platform: "emailbison_campaign",
+      entity: "people",
+      action: "campaign",
+      campaignId: "camp-9",
+      options: { launchOnComplete: true },
+      ...overrides,
+    });
+
+  it("resumes the campaign on the terminal tick when launchOnComplete and succeeded>=1", async () => {
+    claimNextRunnableJob.mockResolvedValueOnce(campaignJob()).mockResolvedValue(null);
+    runPeopleAddToCampaign.mockResolvedValue(campaignResult());
+
+    await POST(req());
+
+    expect(finishJob).toHaveBeenCalledWith("job-1", expect.objectContaining({ status: "succeeded" }));
+    expect(resumeCampaign).toHaveBeenCalledTimes(1);
+    const [credentials, campaignId] = resumeCampaign.mock.calls[0];
+    expect(credentials).toEqual({ apiKey: "key", workspaceId: "ws" });
+    expect(campaignId).toBe("camp-9");
+  });
+
+  it("does NOT resume when succeeded===0 (guards the empty-campaign 400 / #106 drop)", async () => {
+    claimNextRunnableJob
+      .mockResolvedValueOnce(campaignJob())
+      .mockResolvedValue(null);
+    runPeopleAddToCampaign.mockResolvedValue(
+      campaignResult({
+        succeededPersonIds: [],
+        failedPersonIds: ["p1", "p2"],
+        failed: [
+          { name: "p1", reason: "already in another sequence" },
+          { name: "p2", reason: "already in another sequence" },
+        ],
+        attached: 0,
+        created: 0,
+        errors: 2,
+      })
+    );
+
+    await POST(req());
+
+    expect(finishJob).toHaveBeenCalledWith("job-1", expect.objectContaining({ status: "failed" }));
+    expect(resumeCampaign).not.toHaveBeenCalled();
+  });
+
+  it("does NOT resume when launchOnComplete is absent", async () => {
+    claimNextRunnableJob.mockResolvedValueOnce(campaignJob({ options: {} })).mockResolvedValue(null);
+    runPeopleAddToCampaign.mockResolvedValue(campaignResult());
+
+    await POST(req());
+
+    expect(resumeCampaign).not.toHaveBeenCalled();
+  });
+
+  it("does not fail the job when the auto-launch throws (leads were attached)", async () => {
+    claimNextRunnableJob.mockResolvedValueOnce(campaignJob()).mockResolvedValue(null);
+    runPeopleAddToCampaign.mockResolvedValue(campaignResult());
+    resumeCampaign.mockRejectedValue(new Error("resume 500"));
+
+    const res = await POST(req());
+    expect(res.status).toBe(200);
+
+    // Job still finished on its real attach outcome; the failed launch is
+    // swallowed, not surfaced as a job failure.
+    expect(finishJob).toHaveBeenCalledWith("job-1", expect.objectContaining({ status: "succeeded" }));
+    expect(resumeCampaign).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("push-worker continue + self-chain", () => {
   it("updates progress and self-chains when a tick is not done", async () => {
     claimNextRunnableJob.mockResolvedValueOnce(makeJob()).mockResolvedValue(null);
@@ -409,6 +502,20 @@ describe("push-worker error handling", () => {
       "job-1",
       expect.objectContaining({ status: "failed", error: "EmailBison exploded" })
     );
+  });
+
+  it("serializes a thrown non-Error object diagnosably, not as '[object Object]'", async () => {
+    claimNextRunnableJob.mockResolvedValueOnce(makeJob()).mockResolvedValue(null);
+    // The bare {message} shape supabase-js can return on an oversized request —
+    // String()'ing it would collapse to the useless "[object Object]" that
+    // masked real failures in the job's error column.
+    runPeopleGhlPush.mockRejectedValue({ message: "", code: "PGRST100" });
+
+    const res = await POST(req());
+    expect(res.status).toBe(200);
+    const errorArg = finishJob.mock.calls[0][1].error as string;
+    expect(errorArg).not.toBe("[object Object]");
+    expect(errorArg).toContain("PGRST100");
   });
 
   it("finishes a job failed when its client no longer exists", async () => {

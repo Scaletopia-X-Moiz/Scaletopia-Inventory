@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { AlertDialog } from "radix-ui";
-import { Loader2, Rocket, TriangleAlert } from "lucide-react";
+import { Loader2, Rocket } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
 import { fetchActiveClients } from "@/lib/data/active-clients-client";
@@ -89,7 +89,7 @@ interface SequenceStepForm {
 function newSequenceStep(): SequenceStepForm {
   return {
     key: Math.random().toString(36).slice(2),
-    waitInDays: "0",
+    waitInDays: "1",
     variants: [newStepVariant()],
   };
 }
@@ -123,7 +123,7 @@ interface ActiveClient {
 }
 
 type Status = "idle" | "open" | "pushing";
-type Step = "picker" | "campaign" | "confirm";
+type Step = "picker" | "campaign" | "confirm" | "launch-confirm";
 
 /** "Add to Campaign", the Companies-table counterpart of
  * push-to-emailbison-campaign-button.tsx (People table, issue #63) — resolves
@@ -166,7 +166,7 @@ export function PushToEmailBisonCampaignButton({
   const [creatingCampaign, setCreatingCampaign] = useState(false);
   const [createForm, setCreateForm] = useState<CreateCampaignForm>(newCreateCampaignForm);
   const [createCampaignError, setCreateCampaignError] = useState<string | null>(null);
-  const [createCampaignBusy, setCreateCampaignBusy] = useState<"draft" | "launch" | null>(null);
+  const [createCampaignBusy, setCreateCampaignBusy] = useState(false);
 
   const busy = status === "pushing";
   const selectedClient = clients?.find((c) => c.id === selectedClientId) ?? null;
@@ -201,7 +201,7 @@ export function PushToEmailBisonCampaignButton({
     setCreatingCampaign(false);
     setCreateForm(newCreateCampaignForm());
     setCreateCampaignError(null);
-    setCreateCampaignBusy(null);
+    setCreateCampaignBusy(false);
   }
 
   async function handleClick() {
@@ -323,10 +323,10 @@ export function PushToEmailBisonCampaignButton({
     }));
   }
 
-  async function handleSubmitCreateCampaign(launch: boolean) {
+  async function handleSubmitCreateCampaign() {
     if (!selectedClient || !createFormValid || createCampaignBusy) return;
     setCreateCampaignError(null);
-    setCreateCampaignBusy(launch ? "launch" : "draft");
+    setCreateCampaignBusy(true);
 
     try {
       const res = await fetch(`/api/clients/${selectedClient.id}/emailbison-campaigns`, {
@@ -347,16 +347,21 @@ export function PushToEmailBisonCampaignButton({
             // EmailBison requires wait_in_days >= 1 for every step, including
             // the first — but "wait days after the previous step" is
             // meaningless for step 1 (no previous step), so the UI doesn't
-            // render a control for it (see `i > 0` below) and we force the
-            // wire value here rather than exposing a nonsensical input.
-            waitInDays: i === 0 ? 1 : Number(step.waitInDays) || 0,
+            // render a control for it (see `i > 0` below). Steps 2+ can still
+            // be left at 0/blank in the form, so clamp EVERY step to at least 1
+            // here rather than trusting the raw value (issue #104).
+            waitInDays: Math.max(1, Math.floor(Number(step.waitInDays)) || 1),
             threadReply: false,
             extraVariants: step.variants.slice(1).map((variant) => ({
               emailSubject: variant.emailSubject,
               emailBody: variant.emailBody,
             })),
           })),
-          launch,
+          // Always create as a draft. Launching at create time fails because a
+          // just-created campaign has zero leads and EmailBison rejects
+          // launching an empty campaign — the launch decision moved to the
+          // lead-push step (launchOnComplete in handleConfirm).
+          launch: false,
         }),
       });
       const data = (await res.json()) as { campaign?: EmailBisonCampaign; error?: string };
@@ -366,16 +371,29 @@ export function PushToEmailBisonCampaignButton({
 
       const created = data.campaign;
       setCampaigns((prev) => (prev ? [created, ...prev] : [created]));
+      setSelectedCampaignId(created.id);
       setCreatingCampaign(false);
       setCreateForm(newCreateCampaignForm());
     } catch (error) {
       setCreateCampaignError((error as Error).message || "Failed to create campaign.");
     } finally {
-      setCreateCampaignBusy(null);
+      setCreateCampaignBusy(false);
     }
   }
 
-  async function handleConfirm() {
+  // Push button on the confirm step. A freshly created (or otherwise draft)
+  // campaign hasn't been launched — route through the in-dialog launch-confirm
+  // step so the user can opt into launching once these leads attach. Any
+  // non-draft campaign pushes immediately, exactly as before.
+  function handlePushClick() {
+    if (selectedCampaign?.status === "draft") {
+      setStep("launch-confirm");
+      return;
+    }
+    handleConfirm(false);
+  }
+
+  async function handleConfirm(launchOnComplete: boolean) {
     if (!selectedClient || !selectedCampaign) return;
 
     setStatus("pushing");
@@ -395,6 +413,7 @@ export function PushToEmailBisonCampaignButton({
           clientId: selectedClient.id,
           campaignId: selectedCampaign.id,
           parallel,
+          launchOnComplete,
         }),
       });
       if (!res.ok) {
@@ -621,7 +640,7 @@ export function PushToEmailBisonCampaignButton({
                                     Wait
                                     <input
                                       type="number"
-                                      min={0}
+                                      min={1}
                                       value={step.waitInDays}
                                       onChange={(e) =>
                                         updateStep(step.key, { waitInDays: e.target.value })
@@ -782,44 +801,26 @@ export function PushToEmailBisonCampaignButton({
                   <button
                     type="button"
                     onClick={handleCancelCreateCampaign}
-                    disabled={!!createCampaignBusy}
+                    disabled={createCampaignBusy}
                     className="rounded-md border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-smooth hover:bg-hover focus-visible:ring-2 focus-visible:ring-stamp/50 disabled:opacity-50"
                   >
                     ← Back
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleSubmitCreateCampaign(false)}
-                    disabled={!createFormValid || !!createCampaignBusy}
+                    onClick={handleSubmitCreateCampaign}
+                    disabled={!createFormValid || createCampaignBusy}
                     className={cn(
-                      "inline-flex items-center gap-1.5 rounded-md border border-rule px-3 py-1.5 text-xs font-medium transition-smooth focus-visible:ring-2 focus-visible:ring-stamp/50",
+                      "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-white transition-smooth focus-visible:ring-2 focus-visible:ring-stamp/50",
                       createFormValid && !createCampaignBusy
-                        ? "text-ink hover:bg-hover"
-                        : "cursor-not-allowed text-ink-mute opacity-50"
+                        ? "bg-stamp hover:opacity-90"
+                        : "cursor-not-allowed bg-stamp/40"
                     )}
                   >
-                    {createCampaignBusy === "draft" ? (
+                    {createCampaignBusy ? (
                       <Loader2 size={12} className="animate-spin" />
                     ) : null}
-                    Save as Draft
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleSubmitCreateCampaign(true)}
-                    disabled={!createFormValid || !!createCampaignBusy}
-                    className={cn(
-                      "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-white transition-smooth focus-visible:ring-2 focus-visible:ring-amber-500/50",
-                      createFormValid && !createCampaignBusy
-                        ? "bg-amber-600 hover:opacity-90"
-                        : "cursor-not-allowed bg-amber-600/40"
-                    )}
-                  >
-                    {createCampaignBusy === "launch" ? (
-                      <Loader2 size={12} className="animate-spin" />
-                    ) : (
-                      <TriangleAlert size={12} />
-                    )}
-                    Launch Campaign
+                    Create campaign
                   </button>
                 </>
               ) : (
@@ -847,7 +848,7 @@ export function PushToEmailBisonCampaignButton({
               )}
             </div>
           </AlertDialog.Content>
-        ) : (
+        ) : step === "confirm" ? (
           <AlertDialog.Content className="fixed top-[26%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
             <AlertDialog.Title className="text-sm font-semibold text-ink">
               Add to {selectedCampaign?.name}?
@@ -872,10 +873,39 @@ export function PushToEmailBisonCampaignButton({
               </AlertDialog.Cancel>
               <button
                 type="button"
-                onClick={handleConfirm}
+                onClick={handlePushClick}
                 className="rounded-md bg-stamp px-3 py-1.5 text-xs font-medium text-white transition-smooth hover:opacity-90 focus-visible:ring-2 focus-visible:ring-stamp/50"
               >
                 Push {total.toLocaleString("en-US")}
+              </button>
+            </div>
+          </AlertDialog.Content>
+        ) : (
+          <AlertDialog.Content className="fixed top-[26%] left-1/2 z-50 w-full max-w-md -translate-x-1/2 rounded-xl border border-rule bg-popover p-5 shadow-2xl outline-none">
+            <AlertDialog.Title className="flex items-center gap-2 text-sm font-semibold text-ink">
+              <Rocket size={14} className="text-stamp" />
+              Launch {selectedCampaign?.name ? `"${selectedCampaign.name}"` : "campaign"}?
+            </AlertDialog.Title>
+            <AlertDialog.Description className="mt-2 text-sm text-ink-soft">
+              This campaign isn&apos;t launched yet. Launch it automatically once these leads are
+              added? (It won&apos;t launch if no leads attach.)
+            </AlertDialog.Description>
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => handleConfirm(false)}
+                className="rounded-md border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-smooth hover:bg-hover focus-visible:ring-2 focus-visible:ring-stamp/50"
+              >
+                Just add leads
+              </button>
+              <button
+                type="button"
+                onClick={() => handleConfirm(true)}
+                className="inline-flex items-center gap-1.5 rounded-md bg-stamp px-3 py-1.5 text-xs font-medium text-white transition-smooth hover:opacity-90 focus-visible:ring-2 focus-visible:ring-stamp/50"
+              >
+                <Rocket size={12} />
+                Add leads &amp; launch
               </button>
             </div>
           </AlertDialog.Content>

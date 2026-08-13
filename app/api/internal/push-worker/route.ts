@@ -18,6 +18,7 @@ import {
   runPeopleAddToCampaign,
   runCompaniesAddToCampaign,
 } from "@/lib/emailbison/push-to-emailbison";
+import { resumeCampaign } from "@/lib/emailbison/client";
 import { runPeopleGhlPush } from "@/lib/ghl/push-to-ghl";
 import type { PersonListFilters } from "@/lib/data/people";
 import type { CompanyListFilters } from "@/lib/data/companies";
@@ -83,6 +84,41 @@ function authorized(request: Request): boolean {
 function selfChainHeaders(): Record<string, string> {
   const workerSecret = process.env.PUSH_WORKER_SECRET;
   return workerSecret ? { "x-worker-secret": workerSecret } : {};
+}
+
+/** Serializes a thrown value to a human-diagnosable string. An `Error` yields
+ * its message; a non-Error object (e.g. the bare {message} shape supabase-js
+ * can return on an oversized request) is JSON-stringified rather than
+ * String()'d, which would otherwise collapse to the useless "[object Object]"
+ * that masked a real failure in a push job's error column. */
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+
+  // Prefer a compact JSON dump — it preserves fields like {message, code} that
+  // are the whole point of surfacing a non-Error throw.
+  try {
+    const json = JSON.stringify(err);
+    if (json && json !== "{}" && json !== "null") return json;
+  } catch {
+    // circular / non-serializable — fall through to the field/String path
+  }
+
+  // JSON gave us nothing useful (undefined, "{}", empty, or it threw). Try to
+  // pull a recognizable diagnostic field off the object before giving up.
+  if (err && typeof err === "object") {
+    const rec = err as Record<string, unknown>;
+    for (const key of ["message", "code", "error_description", "error", "details"]) {
+      const val = rec[key];
+      if (typeof val === "string" && val.length > 0) return `${key}: ${val}`;
+    }
+  }
+
+  const str = String(err);
+  // String()'ing a plain object yields the diagnostically worthless
+  // "[object Object]" — the exact value that masked a real push failure.
+  // Surface the internal tag instead so at least the shape is identifiable.
+  if (str === "[object Object]") return `non-Error thrown: ${Object.prototype.toString.call(err)}`;
+  return str;
 }
 
 interface TickOutcome {
@@ -286,6 +322,49 @@ async function processJobTick(job: PushJob, workerDeadline: number): Promise<boo
       },
       actor
     );
+
+    // Auto-launch the campaign now that leads are attached (moved off create
+    // time, where a just-created campaign has zero leads and EmailBison 400s an
+    // empty launch). Fires exactly once — only here on the terminal tick — and
+    // only when ≥1 lead actually attached (`succeeded >= 1`), which guards both
+    // the original empty-campaign 400 and the #106 partial/empty-drop case
+    // (a 2xx attach that silently no-ops every lead). Best-effort: the leads
+    // were attached successfully, so a failed auto-launch is logged but must
+    // NOT mark the job failed.
+    if (
+      job.platform === "emailbison_campaign" &&
+      job.campaignId &&
+      job.options?.launchOnComplete === true &&
+      succeeded >= 1
+    ) {
+      if (client.emailbisonApiKey && client.emailbisonWorkspaceId) {
+        const credentials = {
+          apiKey: client.emailbisonApiKey,
+          workspaceId: client.emailbisonWorkspaceId,
+        };
+        try {
+          await resumeCampaign(credentials, job.campaignId);
+          console.log(
+            `[push-worker] auto-launched EmailBison campaign ${job.campaignId} (jobId=${job.id}, succeeded=${succeeded})`
+          );
+          await logActivity(
+            "emailbison.campaign.launch",
+            { clientId: job.clientId, jobId: job.id, campaignId: job.campaignId, succeeded },
+            actor
+          );
+        } catch (err) {
+          const message = errorMessage(err);
+          console.error(
+            `[push-worker] auto-launch failed for campaign ${job.campaignId} (jobId=${job.id}): ${message}`
+          );
+        }
+      } else {
+        console.error(
+          `[push-worker] cannot auto-launch campaign ${job.campaignId} (jobId=${job.id}): client has no EmailBison credentials`
+        );
+      }
+    }
+
     return true;
   }
 
@@ -348,7 +427,7 @@ async function runWorker(request: Request): Promise<Response> {
       console.warn(`[push-worker] reaped ${reaped} stale running job(s) back to queued`);
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     console.error(`[push-worker] stale-job reaper failed: ${message}`);
   }
 
@@ -362,7 +441,7 @@ async function runWorker(request: Request): Promise<Response> {
           : selfChainHeaders(),
         body: jobId ? JSON.stringify({ jobId }) : undefined,
       }).catch((err) => {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         console.error(
           `[push-worker] self-chain kick failed${jobId ? ` (jobId=${jobId})` : ""}: ${message}`
         );
@@ -400,7 +479,7 @@ async function runWorker(request: Request): Promise<Response> {
         job = await claimNextRunnableJob(MAX_CONCURRENT_JOBS);
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       console.error(
         `[push-worker] failed to acquire next job${
           resumeJobId ? ` (resume jobId=${resumeJobId})` : " (claim)"
@@ -420,7 +499,7 @@ async function runWorker(request: Request): Promise<Response> {
     try {
       finished = await processJobTick(job, workerDeadline);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       await finishJob(job.id, {
         status: "failed",
         total: job.total,
