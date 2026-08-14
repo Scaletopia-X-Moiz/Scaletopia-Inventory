@@ -122,15 +122,23 @@ export interface EmailBisonPushRecord {
 /** Wire-level shape sent to EmailBison's create-or-update lead endpoint
  * (lib/emailbison/client.ts's upsertLeadsBulk). `existingLeadBehavior`
  * chooses between a partial update ("patch", the default per issue #52) and
- * a full replace ("put") when the lead already exists in the workspace. */
+ * a full replace ("put") when the lead already exists in the workspace.
+ *
+ * No `phone`/`website` fields — ground-truth audit (2026-08-15) against
+ * `.scratch/eb-openapi.yaml`'s request schema confirmed EmailBison's
+ * lead-write endpoints accept ONLY `first_name, last_name, email, title,
+ * company, notes, custom_variables` at the top level; phone/website are not
+ * native lead fields at all. Per the fixing principle, they're not given a
+ * secret auto-routing exception — a user who wants to send phone/website
+ * data sends it exactly like any other non-native field: as a
+ * `custom_variables` entry, via the existing custom-variable UI (the phone/
+ * website columns remain bindable there, see EmailBisonPushRecord). */
 export interface EmailBisonLeadPayload {
   email: string | null;
   firstName: string | null;
   lastName: string | null;
   companyName: string | null;
   title: string | null;
-  phone: string | null;
-  website: string | null;
   existingLeadBehavior: "patch" | "put";
   customVariables: { name: string; value: string }[];
 }
@@ -152,26 +160,30 @@ export interface EmailBisonCustomVariableEntry {
 }
 
 /** The user-chosen (or auto-mapped, ticket #108) source for each standard
- * EmailBison lead field on a given push. EmailBison's 7 destination fields
- * are fixed (mirrors GhlStandardFieldMapping's field set, swapping GHL's
- * city/country for EmailBison's title/website) — the freedom is in WHICH of
- * our columns feeds each one: every value here is either a source-column key
- * (a PushRecord field name like "firstName", or "brandName" for the cleaned
- * company name, or any custom_data/virtual-column key) or the sentinel
- * "skip" meaning "don't send this field". Free-form source mapping, mirroring
- * the CSV importer's "Map Columns" screen (app/import/page.tsx) — previously
- * this was a fixed 3-way companyName enum plus include/skip toggles on the
- * rest. Legacy saved values ("include", "brand_name", "company_name") are
- * normalized to this shape by lib/emailbison/lead-payload.ts's
- * normalizeFieldSource, so old saved mappings/queued jobs keep working.
- * Optional on payload builders/orchestrators — omitting it keeps today's
- * always-include, prefer-brand-name behavior. */
+ * EmailBison lead field on a given push. EmailBison's 5 destination fields
+ * are fixed (mirrors GhlStandardFieldMapping's field set) — the freedom is in
+ * WHICH of our columns feeds each one: every value here is either a
+ * source-column key (a PushRecord field name like "firstName", or
+ * "brandName" for the cleaned company name, or any custom_data/virtual-column
+ * key) or the sentinel "skip" meaning "don't send this field". Free-form
+ * source mapping, mirroring the CSV importer's "Map Columns" screen
+ * (app/import/page.tsx) — previously this was a fixed 3-way companyName enum
+ * plus include/skip toggles on the rest. Legacy saved values ("include",
+ * "brand_name", "company_name") are normalized to this shape by
+ * lib/emailbison/lead-payload.ts's normalizeFieldSource, so old saved
+ * mappings/queued jobs keep working. Optional on payload builders/
+ * orchestrators — omitting it keeps today's always-include, prefer-brand-name
+ * behavior.
+ *
+ * No `phone`/`website` — ground-truth audit (2026-08-15) confirmed those
+ * aren't native EmailBison lead fields (see EmailBisonLeadPayload's doc
+ * comment); they were removed from the standard-field set so they're sent
+ * the same way as any other non-native field, through a custom-variable row,
+ * not through a special-cased standard-field slot. */
 export interface EmailBisonStandardFieldMapping {
   companyName: string;
   firstName: string;
   lastName: string;
   email: string;
-  phone: string;
   title: string;
-  website: string;
 }

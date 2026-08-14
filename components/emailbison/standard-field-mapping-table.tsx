@@ -13,9 +13,7 @@ const STANDARD_FIELD_ROWS: { key: keyof EmailBisonStandardFieldMapping; label: s
   { key: "firstName", label: "First name" },
   { key: "lastName", label: "Last name" },
   { key: "email", label: "Email" },
-  { key: "phone", label: "Phone" },
   { key: "title", label: "Title" },
-  { key: "website", label: "Website" },
 ];
 
 /** Standard-field mapping table shown above the custom-variable editor on
@@ -23,12 +21,18 @@ const STANDARD_FIELD_ROWS: { key: keyof EmailBisonStandardFieldMapping; label: s
  * ticket #113) — one shared component so the two entry points can't diverge
  * in behavior. Reworked to free-form source mapping, mirroring the CSV
  * importer's "Map Columns" screen (app/import/page.tsx's MappingTable):
- * EmailBison's 7 destination fields are fixed, but each row's `<select>`
+ * EmailBison's 5 destination fields are fixed, but each row's `<select>`
  * picks WHICH of the caller's `columns` feeds it, with "— ignore —" (value
  * "skip") first — matching the importer's "ignore" option and this file's
  * prior "skip" sentinel. The caller pre-populates `value` via
  * resolveDefaultFieldMapping before rendering; this component is just a
- * controlled set of dropdowns over it. */
+ * controlled set of dropdowns over it.
+ *
+ * `phone`/`website` are deliberately NOT rows here (ground-truth audit,
+ * 2026-08-15): they aren't native EmailBison lead fields, so per the fixing
+ * principle they're handled the same way as any other non-native field —
+ * through an ordinary custom-variable row bound to the phone/website column
+ * (still offered in `columns` there), not a dedicated standard-field slot. */
 export function StandardFieldMappingTable({
   value,
   columns,

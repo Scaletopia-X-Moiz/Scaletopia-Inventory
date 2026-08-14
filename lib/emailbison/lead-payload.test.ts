@@ -70,8 +70,6 @@ describe("buildEmailBisonLeadPayload", () => {
       lastName: "Doe",
       companyName: "Acme Inc",
       title: "VP Sales",
-      phone: "+15551234567",
-      website: "acme.com",
       existingLeadBehavior: "patch",
       customVariables: [],
     });
@@ -139,8 +137,6 @@ describe("buildEmailBisonLeadPayload", () => {
       lastName: null,
       companyName: null,
       title: null,
-      phone: null,
-      website: null,
       existingLeadBehavior: "patch",
       customVariables: [],
     });
@@ -193,9 +189,7 @@ describe("buildEmailBisonLeadPayload", () => {
     firstName: "firstName",
     lastName: "lastName",
     email: "email",
-    phone: "phone",
     title: "title",
-    website: "website",
   };
 
   it("reproduces today's default behavior when standardFieldMapping is omitted", () => {
@@ -248,12 +242,10 @@ describe("buildEmailBisonLeadPayload", () => {
     const result = buildEmailBisonLeadPayload(fullRecord, null, [], "patch", {
       ...fullMapping,
       firstName: "skip",
-      phone: "skip",
-      website: "skip",
+      title: "skip",
     });
     expect(result.firstName).toBeNull();
-    expect(result.phone).toBeNull();
-    expect(result.website).toBeNull();
+    expect(result.title).toBeNull();
     expect(result.lastName).toBe("Doe");
   });
 
@@ -307,9 +299,7 @@ describe("buildEmailBisonLeadPayload", () => {
       firstName: "include",
       lastName: "include",
       email: "include",
-      phone: "include",
       title: "include",
-      website: "include",
     };
     const result = buildEmailBisonLeadPayload({ ...fullRecord, brandName: "Acme" }, null, [], "patch", legacyMapping);
     expect(result).toEqual(
@@ -322,7 +312,7 @@ describe("normalizeFieldSource", () => {
   it("maps legacy 'include' to the field's own key", () => {
     expect(normalizeFieldSource("firstName", "include")).toBe("firstName");
     expect(normalizeFieldSource("companyName", "include")).toBe("companyName");
-    expect(normalizeFieldSource("website", "include")).toBe("website");
+    expect(normalizeFieldSource("title", "include")).toBe("title");
   });
 
   it("maps legacy 'brand_name'/'company_name' to brandName/companyName", () => {

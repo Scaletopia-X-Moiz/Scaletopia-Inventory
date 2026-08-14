@@ -218,12 +218,13 @@ function assertSuccessBody(json: unknown, action: string): void {
  *    accepted key for phone/website either; the schema's only phone/website-
  *    shaped examples (e.g. `company_website`) appear solely as arbitrary
  *    example *custom_variables* names on unrelated endpoints, not as a
- *    documented convention for our phone/website fields. Renaming these to
- *    custom_variables would mean guessing an undefined variable name (and
- *    custom variables must be pre-created workspace-side per
- *    api-research.md), so they're left as unsupported/silently-dropped
- *    top-level keys here rather than guessed at — flagged for a follow-up
- *    product decision instead of invented.
+ *    documented convention for our phone/website fields. EmailBisonLeadPayload
+ *    (lib/emailbison/types.ts) no longer carries phone/website at all — per
+ *    the fixing principle, they're not native fields, so they're not given
+ *    any special top-level (or auto-routed custom-variable) treatment here;
+ *    a user who wants to send phone/website data adds an ordinary
+ *    custom-variable row bound to the phone/website column, exactly like any
+ *    other non-native field.
  * `existing_lead_behavior` is NOT one of those confirmed fields either —
  * it's our own unverified guess at how to wire up the "Existing Lead
  * Behavior" (PATCH-vs-PUT) control Clay's UI surfaces, since the research
@@ -236,8 +237,6 @@ function toWireLead(lead: EmailBisonLeadPayload): Record<string, unknown> {
     last_name: lead.lastName,
     company: lead.companyName,
     title: lead.title,
-    phone: lead.phone,
-    website: lead.website,
     existing_lead_behavior: lead.existingLeadBehavior,
   };
   // EmailBison treats an explicit `custom_variables: []` as "clear all

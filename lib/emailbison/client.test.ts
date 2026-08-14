@@ -32,8 +32,6 @@ const LEAD: EmailBisonLeadPayload = {
   lastName: "Lovelace",
   companyName: "Acme",
   title: "Engineer",
-  phone: "+15551234567",
-  website: "acme.com",
   existingLeadBehavior: "patch",
   customVariables: [{ name: "industry", value: "IoT" }],
 };
@@ -150,8 +148,6 @@ describe("upsertLeadsBulk", () => {
           last_name: "Lovelace",
           company: "Acme",
           title: "Engineer",
-          phone: "+15551234567",
-          website: "acme.com",
           existing_lead_behavior: "patch",
           custom_variables: [{ name: "industry", value: "IoT" }],
         },

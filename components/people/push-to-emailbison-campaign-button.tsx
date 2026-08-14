@@ -121,9 +121,7 @@ const STANDARD_FIELD_KEYS: (keyof EmailBisonStandardFieldMapping)[] = [
   "firstName",
   "lastName",
   "email",
-  "phone",
   "title",
-  "website",
 ];
 
 /** A saved mapping (ticket #114) may still be shaped like the pre-free-source

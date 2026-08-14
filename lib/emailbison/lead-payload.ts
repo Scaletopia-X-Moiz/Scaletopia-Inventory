@@ -238,8 +238,6 @@ export function buildEmailBisonLeadPayload(
       customData
     ),
     title: resolveStandardField("title", record.title, standardFieldMapping, record, customData),
-    phone: resolveStandardField("phone", record.phone, standardFieldMapping, record, customData),
-    website: resolveStandardField("website", record.website, standardFieldMapping, record, customData),
     existingLeadBehavior,
     customVariables: customVariables.map(({ name, value }) => ({ name, value })),
   };

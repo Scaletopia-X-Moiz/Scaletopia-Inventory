@@ -65,9 +65,7 @@ describe("GET /api/emailbison/default-field-mapping", () => {
       firstName: "firstName",
       lastName: "lastName",
       email: "email",
-      phone: "phone",
       title: "title",
-      website: "website",
     });
   });
 

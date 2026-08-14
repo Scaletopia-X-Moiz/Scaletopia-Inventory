@@ -59,9 +59,7 @@ function isStandardFieldMapping(value: unknown): value is EmailBisonStandardFiel
     typeof v.firstName === "string" &&
     typeof v.lastName === "string" &&
     typeof v.email === "string" &&
-    typeof v.phone === "string" &&
-    typeof v.title === "string" &&
-    typeof v.website === "string"
+    typeof v.title === "string"
   );
 }
 

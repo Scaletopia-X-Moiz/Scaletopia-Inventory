@@ -219,7 +219,7 @@ describe("standardFieldMapping (issue #110)", () => {
     });
 
     expect(capturedLeads).toHaveLength(1);
-    expect(capturedLeads[0].company_name).toBe("Acme");
+    expect(capturedLeads[0].company).toBe("Acme");
     expect(capturedLeads[0].first_name).toBeTruthy();
   });
 
@@ -234,9 +234,7 @@ describe("standardFieldMapping (issue #110)", () => {
       firstName: "firstName",
       lastName: "lastName",
       email: "email",
-      phone: "phone",
       title: "title",
-      website: "website",
     };
 
     await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, {
@@ -245,7 +243,7 @@ describe("standardFieldMapping (issue #110)", () => {
     });
 
     expect(capturedLeads).toHaveLength(1);
-    expect(capturedLeads[0].company_name).toBe("Acme Co");
+    expect(capturedLeads[0].company).toBe("Acme Co");
   });
 
   it("omits fields the mapping sets to skip", async () => {
@@ -258,9 +256,7 @@ describe("standardFieldMapping (issue #110)", () => {
       firstName: "firstName",
       lastName: "lastName",
       email: "email",
-      phone: "skip",
       title: "skip",
-      website: "skip",
     };
 
     await runPeopleAddToEmailBison({ niche: includeOnly([niche]) }, client, testActor, {
@@ -269,10 +265,8 @@ describe("standardFieldMapping (issue #110)", () => {
     });
 
     expect(capturedLeads).toHaveLength(1);
-    expect(capturedLeads[0].company_name).toBeNull();
-    expect(capturedLeads[0].phone).toBeNull();
+    expect(capturedLeads[0].company).toBeNull();
     expect(capturedLeads[0].title).toBeNull();
-    expect(capturedLeads[0].website).toBeNull();
     expect(capturedLeads[0].first_name).toBeTruthy();
   });
 
@@ -294,9 +288,7 @@ describe("standardFieldMapping (issue #110)", () => {
       firstName: "firstName",
       lastName: "lastName",
       email: "email",
-      phone: "phone",
       title: "title",
-      website: "website",
     };
 
     await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, testActor, {
@@ -305,7 +297,7 @@ describe("standardFieldMapping (issue #110)", () => {
     });
 
     expect(capturedLeads).toHaveLength(1);
-    expect(capturedLeads[0].company_name).toBeNull();
+    expect(capturedLeads[0].company).toBeNull();
   });
 
   it("uses resolveDefaultFieldMapping's fallback default (from #108) when no brand_name is present in the pushed set", async () => {
@@ -326,7 +318,7 @@ describe("standardFieldMapping (issue #110)", () => {
     });
 
     expect(capturedLeads).toHaveLength(1);
-    expect(capturedLeads[0].company_name).toBe("Acme Co");
+    expect(capturedLeads[0].company).toBe("Acme Co");
   });
 });
 

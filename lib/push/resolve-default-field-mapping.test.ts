@@ -126,9 +126,7 @@ describe("resolveDefaultFieldMapping (emailbison)", () => {
       firstName: "firstName",
       lastName: "lastName",
       email: "email",
-      phone: "phone",
       title: "title",
-      website: "website",
     });
   });
 });
