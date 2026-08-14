@@ -12,19 +12,6 @@ import type { EmailBisonCustomVariable } from "@/lib/emailbison/client";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
 import type { EnrichmentField } from "@/lib/data/enrichment-fields";
 import { StandardFieldMappingTable } from "@/components/emailbison/standard-field-mapping-table";
-import { normalizeFieldSource } from "@/lib/emailbison/lead-payload";
-import {
-  fetchSavedPushFieldMapping,
-  savePushFieldMapping,
-} from "@/lib/data/push-field-mappings-client";
-
-/** Stored shape for platform "emailbison_companies" in push_field_mappings
- * (ticket #114) — distinct from "emailbison_people" since the two entities
- * map an entirely different field set despite sharing
- * EmailBisonStandardFieldMapping's shape. */
-interface SavedEmailBisonFieldMapping {
-  standardFields: EmailBisonStandardFieldMapping;
-}
 
 interface ActiveClient {
   id: string;
@@ -115,32 +102,6 @@ const BINDABLE_RECORD_COLUMNS: { key: string; label: string }[] = [
   { key: "companyCreatedAt", label: "Created at" },
   { key: "companyLastUpdated", label: "Last updated" },
 ];
-
-/** Standard-field keys, in the same order the mapping table renders them —
- * used only to normalize a saved mapping field-by-field on load (below), not
- * as a source of truth for the table itself (that's
- * StandardFieldMappingTable's own STANDARD_FIELD_ROWS). */
-const STANDARD_FIELD_KEYS: (keyof EmailBisonStandardFieldMapping)[] = [
-  "companyName",
-  "firstName",
-  "lastName",
-  "email",
-  "phone",
-  "title",
-  "website",
-];
-
-/** A saved mapping (ticket #114) may still be shaped like the pre-free-source
- * include/skip + 3-way companyName enum — normalize every field through
- * normalizeFieldSource so an old saved mapping renders correctly in the new
- * dropdown-per-field table instead of showing a stale/invalid option. */
-function normalizeSavedMapping(mapping: EmailBisonStandardFieldMapping): EmailBisonStandardFieldMapping {
-  const result = {} as EmailBisonStandardFieldMapping;
-  for (const key of STANDARD_FIELD_KEYS) {
-    result[key] = normalizeFieldSource(key, mapping[key]);
-  }
-  return result;
-}
 
 interface CustomVariableRow {
   id: number;
@@ -268,32 +229,20 @@ export function PushToEmailBisonButton({
 
     // These endpoints are independent, so fire them together instead of
     // awaiting each in series (issue: the dialog took 13-23s to open). Each
-    // keeps its own error handling; the saved-mapping override is applied on
-    // top of the auto-mapping default purely for ordering, not because the two
-    // requests depend on each other — so it fetches in parallel too.
-
-    // Ticket #114: a saved mapping for this (client, "emailbison_companies")
-    // pair — if one exists — overrides the pure auto-mapping default.
-    // Best-effort: a fetch failure just leaves the auto-mapping default in
-    // place, same as having no saved mapping.
-    const savedPromise = fetchSavedPushFieldMapping<SavedEmailBisonFieldMapping>(
-      client.id,
-      "emailbison_companies"
-    ).catch(() => null);
-
+    // keeps its own error handling.
+    //
+    // This screen intentionally does NOT load or save a per-client mapping
+    // (unlike the People/GHL push buttons under ticket #114) — it always
+    // starts from the pure auto-mapping default.
     const mappingPromise = (async () => {
-      let base: EmailBisonStandardFieldMapping;
       try {
         const res = await fetch(`/api/emailbison/default-field-mapping?entity=companies&${paramsStr}`);
         if (!res.ok) throw new Error("Failed to load default field mapping");
         const data = (await res.json()) as { standardFields: EmailBisonStandardFieldMapping };
-        base = data.standardFields;
+        setStandardFieldMapping(data.standardFields);
       } catch (error) {
         setStandardFieldMappingError((error as Error).message || "Failed to load default field mapping.");
-        return;
       }
-      const saved = await savedPromise;
-      setStandardFieldMapping(saved ? normalizeSavedMapping(saved.standardFields) : base);
     })();
 
     const referencePromise = (async () => {
@@ -382,17 +331,6 @@ export function PushToEmailBisonButton({
 
     setStatus("pushing");
     setPushLabel("Queuing…");
-
-    // Ticket #114: save the mapping actually being used as the new starting
-    // point for the next push to this (client, "emailbison_companies") pair.
-    // Fire-and-forget — never blocks or fails the push; only ever affects
-    // future pushes. Skipped when null (e.g. the default-mapping fetch
-    // failed) so a saved override isn't wiped by an unrelated fetch error.
-    if (standardFieldMapping) {
-      savePushFieldMapping(selectedClient.id, "emailbison_companies", {
-        standardFields: standardFieldMapping,
-      } satisfies SavedEmailBisonFieldMapping).catch(() => {});
-    }
 
     // Pushes now run as durable background jobs (issue #120): POST enqueues a
     // push_jobs row and returns immediately. Rather than block the dialog on
