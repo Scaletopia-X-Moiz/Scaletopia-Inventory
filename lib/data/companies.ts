@@ -657,6 +657,61 @@ export async function getAllFilteredCompanies(
   return sortByLastUpdatedDesc(await fetchFilteredRows(filters)).map(toListRow);
 }
 
+/** Ids per `.in("id", ...)` chunk for the branded-company existence check
+ * below — same URL-length rationale as the other by-id chunk constants. */
+const BRAND_NAME_EXISTENCE_CHUNK_SIZE = 200;
+
+/** Existence check powering the EmailBison default-field-mapping preview
+ * (app/api/emailbison/default-field-mapping/route.ts) for the Companies-table
+ * trigger. Answers a single boolean: does the current Companies filter set
+ * contain at least one company that (a) has >=1 linked person AND (b) carries a
+ * non-null brand_name? That is the ONLY thing resolveDefaultFieldMapping reads
+ * out of the resolved push set (`records.some(r => !!r.brandName)`), so we
+ * never need to enumerate the linked people — a short-circuiting `.limit(1)`
+ * query answers it in one round-trip instead of loading every linked person
+ * across hundreds of chunked requests (the >1min stall this replaces).
+ *
+ * Semantics match the old getEmailBisonCompanyNameFieldsByCompanyFilters path:
+ * it resolved every filtered company to its linked People and read each
+ * person's OWN linked company brand_name (people.companies.brand_name). Since a
+ * person's company IS the filtered company, "any linked person carries a
+ * brand_name" ⇔ "a filtered company with >=1 linked person has a brand_name".
+ * The `people!inner(id)` embed enforces the linked-person requirement (a
+ * branded company with zero people contributed no rows — hence no brand_name —
+ * in the old code, and must not flip this boolean either). */
+export async function filteredCompaniesHaveLinkedPersonWithBrandName(
+  filters: CompanyListFilters
+): Promise<boolean> {
+  const restricted = await resolveRestrictedRows(filters);
+  if (restricted !== null) {
+    // Restricted dimensions (virtualFilters/pushJobId) already resolved to a
+    // bounded row set that carries brand_name (LIST_COLUMNS). Filter to the
+    // branded companies in memory, then confirm at least one has a linked
+    // person via a chunked existence check — the set is already small, so
+    // correctness over cleverness here.
+    const brandedIds = restricted.filter((row) => row.brand_name != null).map((row) => row.id);
+    if (brandedIds.length === 0) return false;
+    for (const chunk of chunkIds(brandedIds, BRAND_NAME_EXISTENCE_CHUNK_SIZE)) {
+      const { data, error } = await supabaseAdmin
+        .from("companies")
+        .select("id, people!inner(id)")
+        .in("id", chunk)
+        .limit(1);
+      if (error) throw error;
+      if ((data?.length ?? 0) > 0) return true;
+    }
+    return false;
+  }
+
+  // Hot path (no id-restricting dimension): one short-circuiting query.
+  const { data, error } = await applyCompanyFilters(
+    supabaseAdmin.from("companies").select("id, people!inner(id)").not("brand_name", "is", null),
+    filters
+  ).limit(1);
+  if (error) throw error;
+  return (data?.length ?? 0) > 0;
+}
+
 /** Every column the list query omits, plus the raw enrichment blob. */
 interface FullCompanyRow extends RawCompanyRow {
   description: string | null;

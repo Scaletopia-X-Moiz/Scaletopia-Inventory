@@ -10,7 +10,11 @@ import type { ClayPushRecord } from "@/lib/clay/types";
 import type { GhlPushRecord } from "@/lib/ghl/types";
 import type { EmailBisonPushRecord } from "@/lib/emailbison/types";
 import type { PushRecordCompanyNameFields } from "@/lib/push/resolve-default-field-mapping";
-import { getAllFilteredCompanies, type CompanyListFilters } from "@/lib/data/companies";
+import {
+  getAllFilteredCompanies,
+  filteredCompaniesHaveLinkedPersonWithBrandName,
+  type CompanyListFilters,
+} from "@/lib/data/companies";
 import { getPushJobPersonIds, type PushJobOutcome } from "@/lib/data/push-jobs";
 import type { IncludeExclude } from "@/lib/data/include-exclude";
 import type { ActiveVirtualColumn, VirtualFilterSet } from "@/lib/data/virtual-columns";
@@ -918,10 +922,6 @@ interface CompanyNameFieldRow {
   companies: { brand_name: string | null } | null;
 }
 
-function toCompanyNameFields(row: CompanyNameFieldRow): PushRecordCompanyNameFields {
-  return { companyName: row.company_name, brandName: row.companies?.brand_name ?? null };
-}
-
 /** Narrow (two-column) counterpart to fetchPeopleByIds — same chunking and
  * bounded concurrency, minus the `*` payload. */
 async function fetchCompanyNameFieldsByIds(ids: string[]): Promise<CompanyNameFieldRow[]> {
@@ -942,51 +942,64 @@ async function fetchCompanyNameFieldsByIds(ids: string[]): Promise<CompanyNameFi
   return rows;
 }
 
-/** Narrow (two-column) counterpart to fetchFullPeopleByCompanyIds. */
-async function fetchCompanyNameFieldsByCompanyIds(
-  companyIds: string[]
-): Promise<CompanyNameFieldRow[]> {
-  if (companyIds.length === 0) return [];
-  const chunks = chunkIds(companyIds, COMPANY_ID_CHUNK_SIZE);
-  const rows: CompanyNameFieldRow[] = [];
-  for (let i = 0; i < chunks.length; i += FULL_ROW_FETCH_CONCURRENCY) {
-    const window = chunks.slice(i, i + FULL_ROW_FETCH_CONCURRENCY);
-    const results = await Promise.all(
-      window.map((chunk) =>
-        fetchAllRows<CompanyNameFieldRow>("people", COMPANY_NAME_FIELD_COLUMNS, (query) =>
-          query.in("company_id", chunk)
-        )
-      )
-    );
-    rows.push(...results.flat());
-  }
-  return rows;
-}
+/** Sentinel row standing in for "at least one record in the pushed set carries
+ * a linked-company brand_name". The two getEmailBison…CompanyNameFields loaders
+ * below exist only to feed resolveDefaultFieldMapping, which reads exactly one
+ * thing out of the array — `records.some(r => !!r.brandName)` (see
+ * lib/push/resolve-default-field-mapping.ts). So instead of materializing the
+ * whole filtered set's {company_name, brand_name} rows (hundreds of chunked
+ * round-trips for a large push — the >1min "Loading default field mapping…"
+ * stall this replaces), we answer that boolean with a single short-circuiting
+ * existence query and return this one-element sentinel when a brand_name
+ * exists, or an empty array when it doesn't. The Promise<PushRecordCompanyNameFields[]>
+ * contract is preserved so the route, the shared resolver, and the route test
+ * (which mocks these loaders) are untouched. */
+const BRAND_NAME_PRESENT_SENTINEL: PushRecordCompanyNameFields[] = [
+  { companyName: null, brandName: "x" },
+];
 
-/** Company-name/brand-name fields for every Person in the current People-table
- * filtered view — the read-only input resolveDefaultFieldMapping needs for the
- * EmailBison default-mapping preview. Same matched set as getPeopleForEmailBison
- * (order is irrelevant: the resolver only checks whether *any* record has a
- * brand_name), without pulling `*`. */
+/** Company-name/brand-name signal for the current People-table filtered view —
+ * the read-only input resolveDefaultFieldMapping needs for the EmailBison
+ * default-mapping preview. Returns BRAND_NAME_PRESENT_SENTINEL iff any person in
+ * the filtered set has a linked company with a non-null brand_name, else `[]`
+ * (see the sentinel comment above for why we don't return the real rows). */
 export async function getEmailBisonCompanyNameFields(
   filters: PersonListFilters
 ): Promise<PushRecordCompanyNameFields[]> {
-  const ids = (await fetchFilteredRows(filters)).map((row) => row.id);
-  const rows = await fetchCompanyNameFieldsByIds(ids);
-  return rows.map(toCompanyNameFields);
+  const restricted = await resolveRestrictedRows(filters);
+  if (restricted !== null) {
+    // Restricted dimensions (virtualFilters/pushJobId) already resolved to a
+    // bounded id set — cheap to fetch its narrow rows and read brand_name off
+    // them. Preserves exact behavior for this small-set path.
+    const rows = await fetchCompanyNameFieldsByIds(restricted.map((row) => row.id));
+    return rows.some((row) => !!row.companies?.brand_name) ? BRAND_NAME_PRESENT_SENTINEL : [];
+  }
+
+  // Hot path (plain PostgREST filters): one short-circuiting existence query
+  // for "any filtered person with a linked-company brand_name" via an inner
+  // join on companies, filtered to non-null brand_name, capped at one row.
+  const { data, error } = await applyPersonFilters(
+    supabaseAdmin
+      .from("people")
+      .select("id, companies!inner(brand_name)")
+      .not("companies.brand_name", "is", null),
+    filters
+  ).limit(1);
+  if (error) throw error;
+  return (data?.length ?? 0) > 0 ? BRAND_NAME_PRESENT_SENTINEL : [];
 }
 
 /** Companies-table counterpart of getEmailBisonCompanyNameFields — resolves the
- * Companies filters to their linked People (ADR 0003), same as the actual push,
- * but only selects the two company-name columns. */
+ * Companies filters to their linked People (ADR 0003), same as the actual push.
+ * Delegates to the single-query existence check in companies.ts; returns
+ * BRAND_NAME_PRESENT_SENTINEL iff any filtered company with a linked person
+ * carries a non-null brand_name, else `[]`. */
 export async function getEmailBisonCompanyNameFieldsByCompanyFilters(
   companyFilters: CompanyListFilters
 ): Promise<PushRecordCompanyNameFields[]> {
-  const companies = await getAllFilteredCompanies(companyFilters);
-  const companyIds = companies.map((c) => c.id);
-  if (companyIds.length === 0) return [];
-  const rows = await fetchCompanyNameFieldsByCompanyIds(companyIds);
-  return rows.map(toCompanyNameFields);
+  return (await filteredCompaniesHaveLinkedPersonWithBrandName(companyFilters))
+    ? BRAND_NAME_PRESENT_SENTINEL
+    : [];
 }
 
 interface FacetIdCount {
