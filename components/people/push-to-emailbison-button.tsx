@@ -48,6 +48,16 @@ const BINDABLE_RECORD_COLUMNS: { key: string; label: string }[] = [
   { key: "brandName", label: "Cleaned brand name" },
   { key: "title", label: "Title" },
   { key: "website", label: "Website (domain)" },
+  { key: "city", label: "City" },
+  { key: "state", label: "State" },
+  { key: "country", label: "Country" },
+  { key: "fullName", label: "Full name" },
+  { key: "linkedinUrl", label: "LinkedIn URL" },
+  { key: "linkedinUsername", label: "LinkedIn username" },
+  { key: "phoneType", label: "Phone type" },
+  { key: "phoneStatus", label: "Phone status" },
+  { key: "emailStatus", label: "Email status" },
+  { key: "sourceId", label: "Source" },
 ];
 
 /** Standard-field keys, in the same order the mapping table renders them —

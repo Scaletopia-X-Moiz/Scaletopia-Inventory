@@ -24,6 +24,39 @@ export interface EmailBisonPushRecord {
   brandName: string | null;
   title: string | null;
   website: string | null;
+  /** The person's own real columns, exposed so any people row column is
+   * bindable in the push dialogs (not just the 8 legacy fields). Sourced
+   * directly from the person row, distinct from the company* fields below
+   * which come from the linked company embed. */
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  fullName: string | null;
+  linkedinUrl: string | null;
+  linkedinUsername: string | null;
+  phoneType: string | null;
+  phoneStatus: string | null;
+  emailStatus: string | null;
+  sourceId: string | null;
+  /** The linked company's real columns (people.company_id -> companies.id
+   * embed), namespaced with a `company*` prefix so they never collide with
+   * the person's own same-named fields above. Makes every real company column
+   * bindable in the Companies-side push dialogs alongside the enrichment
+   * (custom_data) fields. All null when the person has no linked company. */
+  companyCity: string | null;
+  companyState: string | null;
+  companyCountry: string | null;
+  companyIndustry: string | null;
+  companyEmployeeCount: number | null;
+  companyWebsiteUrl: string | null;
+  companyLinkedinUrl: string | null;
+  companyDomain: string | null;
+  companyPhone: string | null;
+  companyPhoneType: string | null;
+  companyEmail: string | null;
+  companyEmailStatus: string | null;
+  companyNiche: string | null;
+  companyQualityTier: string | null;
 }
 
 /** Wire-level shape sent to EmailBison's create-or-update lead endpoint

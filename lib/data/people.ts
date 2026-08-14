@@ -542,14 +542,33 @@ interface FullPersonRow extends RawPersonRow {
    * joined in alongside the person's own denormalized (raw) company_name so
    * push builders can prefer it. null when the company has no linked row or
    * hasn't been cleaned yet. */
-  companies: { brand_name: string | null } | null;
+  companies: {
+    brand_name: string | null;
+    city: string | null;
+    state: string | null;
+    country: string | null;
+    industry: string | null;
+    employee_count: number | null;
+    website_url: string | null;
+    linkedin_url: string | null;
+    domain: string | null;
+    phone: string | null;
+    phone_type: string | null;
+    email: string | null;
+    email_status: string | null;
+    niche: string | null;
+    quality_tier: string | null;
+  } | null;
 }
 
 /** Select string for the full `*` row fetches below — joins in the linked
  * company's brand_name (ticket: GHL/EmailBison push should prefer the
- * cleaned company name over the raw denormalized one) without a second
- * round trip. */
-const FULL_ROW_COLUMNS = "*, companies(brand_name)";
+ * cleaned company name over the raw denormalized one) plus every real company
+ * column the push dialogs expose as a bindable `company*` field, so a
+ * Companies-side push can bind any real company column without a second round
+ * trip. These columns already exist on the companies table — no DDL needed. */
+const FULL_ROW_COLUMNS =
+  "*, companies(brand_name, city, state, country, industry, employee_count, website_url, linkedin_url, domain, phone, phone_type, email, email_status, niche, quality_tier)";
 
 export interface PersonExportRow {
   firstName: string | null;
@@ -789,6 +808,32 @@ function toEmailBisonPushRecord(row: FullPersonRow): EmailBisonPushRecord {
     brandName: row.companies?.brand_name ?? null,
     title: row.job_title,
     website: row.domain,
+    // Person's own real columns.
+    city: row.city,
+    state: row.state,
+    country: row.country,
+    fullName: row.full_name,
+    linkedinUrl: row.linkedin_url,
+    linkedinUsername: row.linkedin_username,
+    phoneType: row.phone_type,
+    phoneStatus: row.phone_status,
+    emailStatus: row.email_status,
+    sourceId: row.source_id,
+    // Linked company's real columns (company* namespace).
+    companyCity: row.companies?.city ?? null,
+    companyState: row.companies?.state ?? null,
+    companyCountry: row.companies?.country ?? null,
+    companyIndustry: row.companies?.industry ?? null,
+    companyEmployeeCount: row.companies?.employee_count ?? null,
+    companyWebsiteUrl: row.companies?.website_url ?? null,
+    companyLinkedinUrl: row.companies?.linkedin_url ?? null,
+    companyDomain: row.companies?.domain ?? null,
+    companyPhone: row.companies?.phone ?? null,
+    companyPhoneType: row.companies?.phone_type ?? null,
+    companyEmail: row.companies?.email ?? null,
+    companyEmailStatus: row.companies?.email_status ?? null,
+    companyNiche: row.companies?.niche ?? null,
+    companyQualityTier: row.companies?.quality_tier ?? null,
   };
 }
 

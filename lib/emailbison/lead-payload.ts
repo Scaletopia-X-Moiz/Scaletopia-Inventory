@@ -23,6 +23,33 @@ const KNOWN_RECORD_FIELDS: Record<string, keyof EmailBisonPushRecord> = {
   brandName: "brandName",
   title: "title",
   website: "website",
+  // Person's own real columns (plain keys — resolved from the person row).
+  city: "city",
+  state: "state",
+  country: "country",
+  fullName: "fullName",
+  linkedinUrl: "linkedinUrl",
+  linkedinUsername: "linkedinUsername",
+  phoneType: "phoneType",
+  phoneStatus: "phoneStatus",
+  emailStatus: "emailStatus",
+  sourceId: "sourceId",
+  // Linked company's real columns (company* namespace — resolved from the
+  // company embed). Distinct from the person's own same-named fields above.
+  companyCity: "companyCity",
+  companyState: "companyState",
+  companyCountry: "companyCountry",
+  companyIndustry: "companyIndustry",
+  companyEmployeeCount: "companyEmployeeCount",
+  companyWebsiteUrl: "companyWebsiteUrl",
+  companyLinkedinUrl: "companyLinkedinUrl",
+  companyDomain: "companyDomain",
+  companyPhone: "companyPhone",
+  companyPhoneType: "companyPhoneType",
+  companyEmail: "companyEmail",
+  companyEmailStatus: "companyEmailStatus",
+  companyNiche: "companyNiche",
+  companyQualityTier: "companyQualityTier",
 };
 
 /** String-ifies a resolved column value for the wire (EmailBison custom

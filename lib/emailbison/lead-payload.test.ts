@@ -4,9 +4,9 @@ import {
   normalizeFieldSource,
   resolveCustomVariables,
 } from "@/lib/emailbison/lead-payload";
-import type { EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
+import type { EmailBisonPushRecord, EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
 
-const fullRecord = {
+const fullRecord: EmailBisonPushRecord = {
   firstName: "Jane",
   lastName: "Doe",
   email: "jane@example.com",
@@ -15,6 +15,30 @@ const fullRecord = {
   brandName: null,
   title: "VP Sales",
   website: "acme.com",
+  city: null,
+  state: null,
+  country: null,
+  fullName: "Jane Doe",
+  linkedinUrl: null,
+  linkedinUsername: null,
+  phoneType: null,
+  phoneStatus: null,
+  emailStatus: null,
+  sourceId: null,
+  companyCity: null,
+  companyState: null,
+  companyCountry: null,
+  companyIndustry: null,
+  companyEmployeeCount: null,
+  companyWebsiteUrl: null,
+  companyLinkedinUrl: null,
+  companyDomain: null,
+  companyPhone: null,
+  companyPhoneType: null,
+  companyEmail: null,
+  companyEmailStatus: null,
+  companyNiche: null,
+  companyQualityTier: null,
 };
 
 describe("buildEmailBisonLeadPayload", () => {
@@ -33,7 +57,7 @@ describe("buildEmailBisonLeadPayload", () => {
   });
 
   it("passes null fields through untouched", () => {
-    const record = {
+    const record: EmailBisonPushRecord = {
       firstName: null,
       lastName: null,
       email: null,
@@ -42,6 +66,30 @@ describe("buildEmailBisonLeadPayload", () => {
       brandName: null,
       title: null,
       website: null,
+      city: null,
+      state: null,
+      country: null,
+      fullName: null,
+      linkedinUrl: null,
+      linkedinUsername: null,
+      phoneType: null,
+      phoneStatus: null,
+      emailStatus: null,
+      sourceId: null,
+      companyCity: null,
+      companyState: null,
+      companyCountry: null,
+      companyIndustry: null,
+      companyEmployeeCount: null,
+      companyWebsiteUrl: null,
+      companyLinkedinUrl: null,
+      companyDomain: null,
+      companyPhone: null,
+      companyPhoneType: null,
+      companyEmail: null,
+      companyEmailStatus: null,
+      companyNiche: null,
+      companyQualityTier: null,
     };
     expect(buildEmailBisonLeadPayload(record, null)).toEqual({
       email: null,

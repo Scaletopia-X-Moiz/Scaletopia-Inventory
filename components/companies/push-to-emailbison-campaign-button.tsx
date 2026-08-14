@@ -46,6 +46,24 @@ const BINDABLE_RECORD_COLUMNS: { key: string; label: string }[] = [
   { key: "brandName", label: "Cleaned brand name" },
   { key: "title", label: "Title" },
   { key: "website", label: "Website (domain)" },
+  // Linked company's real columns (company* namespace). Every real company
+  // column is bindable here alongside enrichment/virtual columns — the
+  // Companies-side push resolves to linked Person records, which carry the
+  // company embed. company name / brand / website are already covered above.
+  { key: "companyCity", label: "City" },
+  { key: "companyState", label: "State" },
+  { key: "companyCountry", label: "Country" },
+  { key: "companyIndustry", label: "Industry" },
+  { key: "companyEmployeeCount", label: "Employees" },
+  { key: "companyWebsiteUrl", label: "Website URL" },
+  { key: "companyLinkedinUrl", label: "Company LinkedIn" },
+  { key: "companyDomain", label: "Domain" },
+  { key: "companyPhone", label: "Company phone" },
+  { key: "companyPhoneType", label: "Company phone type" },
+  { key: "companyEmail", label: "Company email" },
+  { key: "companyEmailStatus", label: "Company email status" },
+  { key: "companyNiche", label: "Niche" },
+  { key: "companyQualityTier", label: "Quality tier" },
 ];
 
 /** Standard-field keys, in the same order the mapping table renders them —
