@@ -111,6 +111,18 @@ export async function POST(request: NextRequest) {
   const customVariables = parseCustomVariables(body.customVariables);
   const standardFieldMapping = parseStandardFieldMapping(body.standardFieldMapping);
 
+  // The count of the *source* rows the user selected — for a Companies push
+  // this is the number of companies, which the worker then resolves to linked
+  // People (ADR 0003). `job.total` ends up being the resolved People count, so
+  // without this the panel can't say "X companies → Y people"; a company with
+  // no linked people would just make the whole job read 0 with no explanation.
+  // Only meaningful for the Companies entity (People pushes already have
+  // total === the person count), so it's stored only there.
+  const sourceEntityTotal =
+    typeof body.sourceEntityTotal === "number" && Number.isFinite(body.sourceEntityTotal)
+      ? body.sourceEntityTotal
+      : undefined;
+
   const client = await getClientById(clientId);
   if (!client) {
     return Response.json({ error: "Client not found" }, { status: 404 });
@@ -151,6 +163,7 @@ export async function POST(request: NextRequest) {
       standardFieldMapping,
       parallel: typeof parallel === "boolean" ? parallel : undefined,
       launchOnComplete,
+      sourceEntityTotal: entity === "companies" ? sourceEntityTotal : undefined,
     },
     triggeredByUserId: user.id,
     triggeredByEmail: user.email,

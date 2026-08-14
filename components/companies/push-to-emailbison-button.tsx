@@ -343,6 +343,13 @@ export function PushToEmailBisonButton({
           entity: "companies",
           action: "workspace",
           clientId: selectedClient.id,
+          // The company count the user is looking at (the "Push {total}"
+          // confirm). Persisted on the job so Push Activity can report
+          // "X companies selected → Y linked people sent" — a Companies push
+          // resolves to linked People (ADR 0003), so a company with no people
+          // contributes nothing, and this is the only way the summary can show
+          // the company-vs-people gap.
+          sourceEntityTotal: total,
           existingLeadBehavior,
           customVariables: customVariablesForPush(),
           standardFieldMapping: standardFieldMapping ?? undefined,

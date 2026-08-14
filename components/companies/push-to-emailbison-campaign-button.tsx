@@ -664,6 +664,10 @@ export function PushToEmailBisonCampaignButton({
           action: "campaign",
           clientId: selectedClient.id,
           campaignId: selectedCampaign.id,
+          // The company count shown on the confirm step — persisted so Push
+          // Activity can report "X companies selected → Y linked people sent"
+          // (see the workspace button for the full rationale).
+          sourceEntityTotal: total,
           parallel,
           launchOnComplete,
           existingLeadBehavior,

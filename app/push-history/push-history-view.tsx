@@ -101,6 +101,22 @@ export function PushHistoryView({
         </select>
       </div>
 
+      {/* Push History is a per-person ledger (one row per platform_pushes
+          record). A Companies push targets the People linked to the matched
+          companies (ADR 0003), so companies with no linked people create no
+          rows here at all — the Push Activity panel is where a company push's
+          "X companies → Y people" summary lives, including the 0-people case
+          that never surfaces in this table. */}
+      <p className="text-xs text-ink-mute">
+        Each row is one person. A Companies push shows the people it reached here; its
+        company-vs-people breakdown (including company selections that had no linked people, which
+        add no rows) lives in{" "}
+        <Link href="/push-activity" className="text-stamp hover:underline">
+          Push Activity
+        </Link>
+        .
+      </p>
+
       {rows.length === 0 ? (
         <div className="rounded-xl border border-rule bg-card p-8 text-center text-sm text-ink-soft">
           {isFiltered ? "No pushes match these filters." : "No pushes recorded yet."}
