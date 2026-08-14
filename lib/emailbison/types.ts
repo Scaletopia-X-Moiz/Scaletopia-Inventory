@@ -38,6 +38,36 @@ export interface EmailBisonPushRecord {
   phoneStatus: string | null;
   emailStatus: string | null;
   sourceId: string | null;
+  /** Remaining person-own real columns (ground-truth audit against the live
+   * `people` table, 2026-08-15, same pass that added the company* fields
+   * below). tags is JSON-stringified by resolveEmailBisonColumnValue's
+   * stringifier since it's an array; the two verified-at timestamps are
+   * legitimate real columns even though email_verified_at is sparsely
+   * populated in production (3/24593 live rows at audit time) — kept per this
+   * audit's "include timestamps unless there's a concrete reason not to"
+   * rule. Deliberately excluded (see also the company* doc comment below for
+   * the equivalent company-side calls): `id`/`company_id` (PKs/FKs);
+   * `pushed_to_emailbison[_at]`/`pushed_to_ghl[_at]` (internal push-tracking
+   * — circular to push "pushed_to_emailbison" back into EmailBison itself);
+   * `custom_data` (its keys are already offered separately via the
+   * enrichment-fields mechanism); `country_id`/`industry_id` (duplicate the
+   * already-exposed country/companyIndustry labels — confirmed via probe that
+   * industry_id already holds a human string, e.g. "marketing and
+   * advertising", identical to the linked company's industry, not an opaque
+   * id); `source_tokens`/`niche_tokens` (raw arrays duplicating the
+   * already-exposed sourceId/companyNiche); the raw `source` string (a
+   * comma/ampersand-delimited combination of source_tokens — sourceId is the
+   * cleaner single label to expose); `job_title` (already exposed as
+   * `title`); and `employee_count`/`company_linkedin_url` — confirmed via a
+   * live-data probe (8/8 sampled QA rows) to be exact synced mirrors of
+   * companies.employee_count/linkedin_url, already exposed below as
+   * companyEmployeeCount/companyLinkedinUrl — exposing both would be a
+   * duplicate with zero information gain. */
+  tags: string[] | null;
+  emailVerifiedAt: string | null;
+  phoneVerifiedAt: string | null;
+  lastUpdated: string | null;
+  createdAt: string | null;
   /** The linked company's real columns (people.company_id -> companies.id
    * embed), namespaced with a `company*` prefix so they never collide with
    * the person's own same-named fields above. Makes every real company column
@@ -57,6 +87,36 @@ export interface EmailBisonPushRecord {
   companyEmailStatus: string | null;
   companyNiche: string | null;
   companyQualityTier: string | null;
+  /** Ground-truth audit (docs/emailbison-push-test-plan.md-adjacent companies
+   * push-dialog audit) found 16 more real `companies` columns with no
+   * bindable field yet — companyPhoneStatus fills a genuine gap (phone_type
+   * was covered, phone_status wasn't); the rest (client/timestamps/
+   * description/domain_status/founded_year/mx_provider/revenue/
+   * security_gateway/source/keywords/tags/technologies) had no bindable
+   * field at all. Excluded on purpose: id, country_id/industry_id (duplicate
+   * the already-exposed country/industry labels), custom_data (its keys are
+   * already offered separately via the enrichment-fields mechanism),
+   * pushed_to_clay/pushed_to_clay_at (internal bookkeeping), source_tokens
+   * (raw tokenized array — companySource's plain string already covers it). */
+  companyPhoneStatus: string | null;
+  companyClient: string | null;
+  companyCreatedAt: string | null;
+  companyDescription: string | null;
+  companyDomainStatus: string | null;
+  companyEmailVerifiedAt: string | null;
+  companyFoundedYear: number | null;
+  companyKeywords: string[] | null;
+  companyLastUpdated: string | null;
+  companyMxProvider: string | null;
+  companyPhoneVerifiedAt: string | null;
+  /** companies.revenue is a text column in the live schema (e.g. "0-99999",
+   * "USD $6,000.00" — a bucket label or free-text string, not a numeric
+   * value), confirmed via a live-data probe; typed as string, not number. */
+  companyRevenue: string | null;
+  companySecurityGateway: string | null;
+  companySource: string | null;
+  companyTags: string[] | null;
+  companyTechnologies: string[] | null;
 }
 
 /** Wire-level shape sent to EmailBison's create-or-update lead endpoint

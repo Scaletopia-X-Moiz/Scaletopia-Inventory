@@ -28,12 +28,32 @@ interface SavedEmailBisonFieldMapping {
   standardFields: EmailBisonStandardFieldMapping;
 }
 
-/** A People-table column bindable by a custom-variable row — the seven
- * standard fields the EmailBison lead payload already carries
- * (lib/emailbison/lead-payload.ts's KNOWN_RECORD_FIELDS). Enrichment/virtual
- * columns are offered separately, from the `virtualColumns` prop. Identical
- * to push-to-emailbison-button.tsx's list — kept in sync deliberately, since
- * both buttons feed the same EmailBison lead payload. */
+/** A People-table column bindable by a custom-variable row — every real
+ * column of the resolved Person record, including the linked company's real
+ * columns (lib/emailbison/lead-payload.ts's KNOWN_RECORD_FIELDS), not just
+ * the original 18. Enrichment/virtual columns are offered separately, from
+ * the `virtualColumns` prop. Identical to push-to-emailbison-button.tsx's
+ * list — kept in sync deliberately, since both buttons feed the same
+ * EmailBison lead payload.
+ *
+ * Ground-truth audit (2026-08-15) against the live `people` (36 cols) and
+ * `companies` (39 cols) tables found this dropdown was missing every one of
+ * the linked company's fields (the reported bug: no way to bind "Employees" —
+ * companyEmployeeCount — even though the backend already resolves it) plus
+ * five more person-own columns. Excluded on purpose: `id`/`company_id`
+ * (PK/FK); `pushed_to_emailbison[_at]`/`pushed_to_ghl[_at]` (internal
+ * push-tracking — circular to send back into EmailBison itself);
+ * `custom_data` (its keys are already offered separately via the
+ * enrichment-fields mechanism); `country_id`/`industry_id` (FK-like,
+ * duplicate the already-exposed country/companyIndustry labels);
+ * `source_tokens`/`niche_tokens` (raw arrays duplicating the already-exposed
+ * sourceId/companyNiche); `job_title` (already exposed as `title`); and
+ * `employee_count`/`company_linkedin_url` — confirmed via a live-data probe
+ * to be exact synced mirrors of the linked company's own employee_count/
+ * linkedin_url, already exposed below as companyEmployeeCount/
+ * companyLinkedinUrl. "Company " is prefixed on the company* labels that
+ * would otherwise collide with the person's own bare City/State/Country
+ * labels above. */
 const BINDABLE_RECORD_COLUMNS: { key: string; label: string }[] = [
   { key: "firstName", label: "First name" },
   { key: "lastName", label: "Last name" },
@@ -52,7 +72,44 @@ const BINDABLE_RECORD_COLUMNS: { key: string; label: string }[] = [
   { key: "phoneType", label: "Phone type" },
   { key: "phoneStatus", label: "Phone status" },
   { key: "emailStatus", label: "Email status" },
-  { key: "sourceId", label: "Source" },
+  { key: "sourceId", label: "Source ID" },
+  { key: "tags", label: "Tags" },
+  { key: "emailVerifiedAt", label: "Email verified at" },
+  { key: "phoneVerifiedAt", label: "Phone verified at" },
+  { key: "lastUpdated", label: "Last updated" },
+  { key: "createdAt", label: "Created at" },
+  // Linked company's real columns (company* namespace) — previously entirely
+  // absent from this dropdown despite being fully resolved on the backend.
+  { key: "companyCity", label: "Company city" },
+  { key: "companyState", label: "Company state" },
+  { key: "companyCountry", label: "Company country" },
+  { key: "companyIndustry", label: "Industry" },
+  { key: "companyEmployeeCount", label: "Employees" },
+  { key: "companyWebsiteUrl", label: "Website URL" },
+  { key: "companyLinkedinUrl", label: "Company LinkedIn" },
+  { key: "companyDomain", label: "Domain" },
+  { key: "companyPhone", label: "Company phone" },
+  { key: "companyPhoneType", label: "Company phone type" },
+  { key: "companyPhoneStatus", label: "Company phone status" },
+  { key: "companyEmail", label: "Company email" },
+  { key: "companyEmailStatus", label: "Company email status" },
+  { key: "companyEmailVerifiedAt", label: "Company email verified at" },
+  { key: "companyPhoneVerifiedAt", label: "Company phone verified at" },
+  { key: "companyNiche", label: "Niche" },
+  { key: "companyQualityTier", label: "Quality tier" },
+  { key: "companyClient", label: "Client" },
+  { key: "companySource", label: "Source" },
+  { key: "companyDescription", label: "Description" },
+  { key: "companyFoundedYear", label: "Founded year" },
+  { key: "companyRevenue", label: "Revenue" },
+  { key: "companyDomainStatus", label: "Domain status" },
+  { key: "companyMxProvider", label: "MX provider" },
+  { key: "companySecurityGateway", label: "Security gateway" },
+  { key: "companyKeywords", label: "Keywords" },
+  { key: "companyTechnologies", label: "Technologies" },
+  { key: "companyTags", label: "Company tags" },
+  { key: "companyCreatedAt", label: "Company created at" },
+  { key: "companyLastUpdated", label: "Company last updated" },
 ];
 
 /** Standard-field keys, in the same order the mapping table renders them —

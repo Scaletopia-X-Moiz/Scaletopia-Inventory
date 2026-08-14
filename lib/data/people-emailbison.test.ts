@@ -76,7 +76,10 @@ describe("getPeopleForEmailBison", () => {
     expect(candidates).toHaveLength(1);
     const [candidate] = candidates;
     expect(candidate.displayName).toBe("Bison Test Person");
-    expect(candidate.record).toEqual({
+    // toMatchObject (not toEqual): createdAt/lastUpdated are DB-generated
+    // timestamps (not explicitly set by insertPerson above), so their exact
+    // value isn't asserted here — everything else IS checked exactly.
+    expect(candidate.record).toMatchObject({
       firstName: "Bison",
       lastName: "Person",
       email: `${TEST_PREFIX}${niche}@example.com`,
@@ -96,6 +99,10 @@ describe("getPeopleForEmailBison", () => {
       phoneStatus: null,
       emailStatus: null,
       sourceId: null,
+      // tags defaults to [] at the DB level (not null) when not set on insert.
+      tags: [],
+      emailVerifiedAt: null,
+      phoneVerifiedAt: null,
       // No company_id on this person, so the company embed is null → all null.
       companyCity: null,
       companyState: null,
@@ -111,6 +118,22 @@ describe("getPeopleForEmailBison", () => {
       companyEmailStatus: null,
       companyNiche: null,
       companyQualityTier: null,
+      companyPhoneStatus: null,
+      companyClient: null,
+      companyCreatedAt: null,
+      companyDescription: null,
+      companyDomainStatus: null,
+      companyEmailVerifiedAt: null,
+      companyFoundedYear: null,
+      companyKeywords: null,
+      companyLastUpdated: null,
+      companyMxProvider: null,
+      companyPhoneVerifiedAt: null,
+      companyRevenue: null,
+      companySecurityGateway: null,
+      companySource: null,
+      companyTags: null,
+      companyTechnologies: null,
     });
     expect(candidate.customData).toEqual({ favorite_color: "blue" });
   });

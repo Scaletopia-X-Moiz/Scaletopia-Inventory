@@ -18,6 +18,74 @@ export interface GhlPushRecord {
   niche: string | null;
   employeeCount: number | null;
   source: string | null;
+  /** Remaining person-own real columns (ground-truth audit against the live
+   * `people` table, 2026-08-15 — mirrors the equivalent EmailBisonPushRecord
+   * audit in lib/emailbison/types.ts, but scoped to GHL's own contact
+   * schema/BINDABLE_RECORD_COLUMNS). `state` fills a genuine gap (city and
+   * country were already bindable, state wasn't). `title`/`website` reuse
+   * EmailBison's job_title/domain field choice and label text ("Title"/
+   * "Website (domain)") even though GHL's own 7 standard fields don't include
+   * them — they're still legitimate custom-field bind targets. Deliberately
+   * excludes the same columns EmailBisonPushRecord excludes, for the same
+   * reasons (see that type's doc comment): id/company_id, pushed_to_*
+   * bookkeeping, custom_data, country_id/industry_id, source_tokens/
+   * niche_tokens, job_title (covered by `title`), and employee_count/
+   * company_linkedin_url (confirmed via live-data probe to be exact synced
+   * mirrors of the linked company's own employee_count/linkedin_url). */
+  title: string | null;
+  website: string | null;
+  state: string | null;
+  fullName: string | null;
+  linkedinUrl: string | null;
+  linkedinUsername: string | null;
+  phoneType: string | null;
+  phoneStatus: string | null;
+  emailStatus: string | null;
+  sourceId: string | null;
+  tags: string[] | null;
+  emailVerifiedAt: string | null;
+  phoneVerifiedAt: string | null;
+  lastUpdated: string | null;
+  createdAt: string | null;
+  /** The linked company's real columns (people.company_id -> companies.id
+   * embed), namespaced with a `company*` prefix — mirrors
+   * EmailBisonPushRecord's company* fields (lib/emailbison/types.ts).
+   * Deliberately omits companyEmployeeCount/companyNiche/companySource: this
+   * type already exposes the linked company's employee count/niche/source
+   * directly as `employeeCount`/`niche`/`source` above (denormalized straight
+   * onto the person row and confirmed via a live-data probe to be exact
+   * synced mirrors of the company's own columns) — a company*-namespaced
+   * duplicate would be a redundant option with zero information gain. All
+   * null when the person has no linked company. */
+  companyCity: string | null;
+  companyState: string | null;
+  companyCountry: string | null;
+  companyIndustry: string | null;
+  companyWebsiteUrl: string | null;
+  companyLinkedinUrl: string | null;
+  companyDomain: string | null;
+  companyPhone: string | null;
+  companyPhoneType: string | null;
+  companyPhoneStatus: string | null;
+  companyEmail: string | null;
+  companyEmailStatus: string | null;
+  companyEmailVerifiedAt: string | null;
+  companyPhoneVerifiedAt: string | null;
+  companyQualityTier: string | null;
+  companyClient: string | null;
+  companyDescription: string | null;
+  companyFoundedYear: number | null;
+  /** companies.revenue is a text column in the live schema (e.g. "0-99999",
+   * "USD $6,000.00"), not numeric — confirmed via a live-data probe. */
+  companyRevenue: string | null;
+  companyDomainStatus: string | null;
+  companyMxProvider: string | null;
+  companySecurityGateway: string | null;
+  companyKeywords: string[] | null;
+  companyTechnologies: string[] | null;
+  companyTags: string[] | null;
+  companyCreatedAt: string | null;
+  companyLastUpdated: string | null;
 }
 
 /** Shape produced by buildGhlContactPayload — distinct from lib/ghl/client.ts's

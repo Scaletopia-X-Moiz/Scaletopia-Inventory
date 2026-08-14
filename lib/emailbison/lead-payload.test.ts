@@ -25,6 +25,11 @@ const fullRecord: EmailBisonPushRecord = {
   phoneStatus: null,
   emailStatus: null,
   sourceId: null,
+  tags: null,
+  emailVerifiedAt: null,
+  phoneVerifiedAt: null,
+  lastUpdated: null,
+  createdAt: null,
   companyCity: null,
   companyState: null,
   companyCountry: null,
@@ -39,6 +44,22 @@ const fullRecord: EmailBisonPushRecord = {
   companyEmailStatus: null,
   companyNiche: null,
   companyQualityTier: null,
+  companyPhoneStatus: null,
+  companyClient: null,
+  companyCreatedAt: null,
+  companyDescription: null,
+  companyDomainStatus: null,
+  companyEmailVerifiedAt: null,
+  companyFoundedYear: null,
+  companyKeywords: null,
+  companyLastUpdated: null,
+  companyMxProvider: null,
+  companyPhoneVerifiedAt: null,
+  companyRevenue: null,
+  companySecurityGateway: null,
+  companySource: null,
+  companyTags: null,
+  companyTechnologies: null,
 };
 
 describe("buildEmailBisonLeadPayload", () => {
@@ -76,6 +97,11 @@ describe("buildEmailBisonLeadPayload", () => {
       phoneStatus: null,
       emailStatus: null,
       sourceId: null,
+      tags: null,
+      emailVerifiedAt: null,
+      phoneVerifiedAt: null,
+      lastUpdated: null,
+      createdAt: null,
       companyCity: null,
       companyState: null,
       companyCountry: null,
@@ -90,6 +116,22 @@ describe("buildEmailBisonLeadPayload", () => {
       companyEmailStatus: null,
       companyNiche: null,
       companyQualityTier: null,
+      companyPhoneStatus: null,
+      companyClient: null,
+      companyCreatedAt: null,
+      companyDescription: null,
+      companyDomainStatus: null,
+      companyEmailVerifiedAt: null,
+      companyFoundedYear: null,
+      companyKeywords: null,
+      companyLastUpdated: null,
+      companyMxProvider: null,
+      companyPhoneVerifiedAt: null,
+      companyRevenue: null,
+      companySecurityGateway: null,
+      companySource: null,
+      companyTags: null,
+      companyTechnologies: null,
     };
     expect(buildEmailBisonLeadPayload(record, null)).toEqual({
       email: null,
@@ -298,7 +340,10 @@ describe("normalizeFieldSource", () => {
 });
 
 describe("resolveCustomVariables", () => {
-  const customData = { lead_score: 87, is_decision_maker: true, tags: ["a", "b"], empty: null };
+  // "interests" (not "tags") — "tags" is now a real bindable person-record
+  // field (KNOWN_RECORD_FIELDS), so a custom_data key literally named "tags"
+  // would collide and resolve from the record instead of custom_data.
+  const customData = { lead_score: 87, is_decision_maker: true, interests: ["a", "b"], empty: null };
 
   it("passes literal entries through untouched", () => {
     const entries = [{ name: "plan", value: "pro" }];
@@ -334,7 +379,7 @@ describe("resolveCustomVariables", () => {
   it("stringifies booleans, numbers, and arrays from custom_data", () => {
     const entries = [
       { name: "dm", value: "", columnKey: "is_decision_maker" },
-      { name: "tags", value: "", columnKey: "tags" },
+      { name: "tags", value: "", columnKey: "interests" },
     ];
     expect(resolveCustomVariables(entries, fullRecord, customData)).toEqual([
       { name: "dm", value: "true" },

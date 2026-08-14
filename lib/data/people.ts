@@ -542,6 +542,9 @@ interface FullPersonRow extends RawPersonRow {
   custom_data: Record<string, unknown> | null;
   employee_count: number | null;
   niche_tokens: string[] | null;
+  /** Not in LIST_COLUMNS (the narrow list-page select) — only reachable via
+   * FULL_ROW_COLUMNS's `*`, needed for the createdAt bindable push field. */
+  created_at: string | null;
   /** The linked company's cleaned name (lib/clean-names/clean-names.ts),
    * joined in alongside the person's own denormalized (raw) company_name so
    * push builders can prefer it. null when the company has no linked row or
@@ -562,6 +565,30 @@ interface FullPersonRow extends RawPersonRow {
     email_status: string | null;
     niche: string | null;
     quality_tier: string | null;
+    // Ground-truth audit against the live `companies` table (39 columns)
+    // found these 16 with no bindable field yet — phone_status fills a
+    // genuine gap (phone_type was covered, phone_status wasn't); the rest had
+    // no bindable field at all. id/country_id/industry_id/custom_data/
+    // pushed_to_clay/pushed_to_clay_at/source_tokens deliberately excluded
+    // (see EmailBisonPushRecord's doc comment).
+    phone_status: string | null;
+    client: string | null;
+    created_at: string | null;
+    description: string | null;
+    domain_status: string | null;
+    email_verified_at: string | null;
+    founded_year: number | null;
+    keywords: string[] | null;
+    last_updated: string | null;
+    mx_provider: string | null;
+    phone_verified_at: string | null;
+    /** Text column in the live schema (e.g. "0-99999", "USD $6,000.00"), not
+     * numeric — confirmed via a live-data probe. */
+    revenue: string | null;
+    security_gateway: string | null;
+    source: string | null;
+    tags: string[] | null;
+    technologies: string[] | null;
   } | null;
 }
 
@@ -572,7 +599,7 @@ interface FullPersonRow extends RawPersonRow {
  * Companies-side push can bind any real company column without a second round
  * trip. These columns already exist on the companies table — no DDL needed. */
 const FULL_ROW_COLUMNS =
-  "*, companies(brand_name, city, state, country, industry, employee_count, website_url, linkedin_url, domain, phone, phone_type, email, email_status, niche, quality_tier)";
+  "*, companies(brand_name, city, state, country, industry, employee_count, website_url, linkedin_url, domain, phone, phone_type, phone_status, email, email_status, niche, quality_tier, client, created_at, description, domain_status, email_verified_at, founded_year, keywords, last_updated, mx_provider, phone_verified_at, revenue, security_gateway, source, tags, technologies)";
 
 export interface PersonExportRow {
   firstName: string | null;
@@ -765,6 +792,50 @@ function toGhlPushRecord(row: FullPersonRow): GhlPushRecord {
     niche: row.niche_tokens?.[0] ?? null,
     employeeCount: row.employee_count,
     source: row.source,
+    // Remaining person-own real columns (ground-truth audit, 2026-08-15).
+    title: row.job_title,
+    website: row.domain,
+    state: row.state,
+    fullName: row.full_name,
+    linkedinUrl: row.linkedin_url,
+    linkedinUsername: row.linkedin_username,
+    phoneType: row.phone_type,
+    phoneStatus: row.phone_status,
+    emailStatus: row.email_status,
+    sourceId: row.source_id,
+    tags: row.tags,
+    emailVerifiedAt: row.email_verified_at,
+    phoneVerifiedAt: row.phone_verified_at,
+    lastUpdated: row.last_updated,
+    createdAt: row.created_at,
+    // Linked company's real columns (company* namespace).
+    companyCity: row.companies?.city ?? null,
+    companyState: row.companies?.state ?? null,
+    companyCountry: row.companies?.country ?? null,
+    companyIndustry: row.companies?.industry ?? null,
+    companyWebsiteUrl: row.companies?.website_url ?? null,
+    companyLinkedinUrl: row.companies?.linkedin_url ?? null,
+    companyDomain: row.companies?.domain ?? null,
+    companyPhone: row.companies?.phone ?? null,
+    companyPhoneType: row.companies?.phone_type ?? null,
+    companyPhoneStatus: row.companies?.phone_status ?? null,
+    companyEmail: row.companies?.email ?? null,
+    companyEmailStatus: row.companies?.email_status ?? null,
+    companyEmailVerifiedAt: row.companies?.email_verified_at ?? null,
+    companyPhoneVerifiedAt: row.companies?.phone_verified_at ?? null,
+    companyQualityTier: row.companies?.quality_tier ?? null,
+    companyClient: row.companies?.client ?? null,
+    companyDescription: row.companies?.description ?? null,
+    companyFoundedYear: row.companies?.founded_year ?? null,
+    companyRevenue: row.companies?.revenue ?? null,
+    companyDomainStatus: row.companies?.domain_status ?? null,
+    companyMxProvider: row.companies?.mx_provider ?? null,
+    companySecurityGateway: row.companies?.security_gateway ?? null,
+    companyKeywords: row.companies?.keywords ?? null,
+    companyTechnologies: row.companies?.technologies ?? null,
+    companyTags: row.companies?.tags ?? null,
+    companyCreatedAt: row.companies?.created_at ?? null,
+    companyLastUpdated: row.companies?.last_updated ?? null,
   };
 }
 
@@ -823,6 +894,12 @@ function toEmailBisonPushRecord(row: FullPersonRow): EmailBisonPushRecord {
     phoneStatus: row.phone_status,
     emailStatus: row.email_status,
     sourceId: row.source_id,
+    // Remaining person-own real columns (ground-truth audit, 2026-08-15).
+    tags: row.tags,
+    emailVerifiedAt: row.email_verified_at,
+    phoneVerifiedAt: row.phone_verified_at,
+    lastUpdated: row.last_updated,
+    createdAt: row.created_at,
     // Linked company's real columns (company* namespace).
     companyCity: row.companies?.city ?? null,
     companyState: row.companies?.state ?? null,
@@ -838,6 +915,22 @@ function toEmailBisonPushRecord(row: FullPersonRow): EmailBisonPushRecord {
     companyEmailStatus: row.companies?.email_status ?? null,
     companyNiche: row.companies?.niche ?? null,
     companyQualityTier: row.companies?.quality_tier ?? null,
+    companyPhoneStatus: row.companies?.phone_status ?? null,
+    companyClient: row.companies?.client ?? null,
+    companyCreatedAt: row.companies?.created_at ?? null,
+    companyDescription: row.companies?.description ?? null,
+    companyDomainStatus: row.companies?.domain_status ?? null,
+    companyEmailVerifiedAt: row.companies?.email_verified_at ?? null,
+    companyFoundedYear: row.companies?.founded_year ?? null,
+    companyKeywords: row.companies?.keywords ?? null,
+    companyLastUpdated: row.companies?.last_updated ?? null,
+    companyMxProvider: row.companies?.mx_provider ?? null,
+    companyPhoneVerifiedAt: row.companies?.phone_verified_at ?? null,
+    companyRevenue: row.companies?.revenue ?? null,
+    companySecurityGateway: row.companies?.security_gateway ?? null,
+    companySource: row.companies?.source ?? null,
+    companyTags: row.companies?.tags ?? null,
+    companyTechnologies: row.companies?.technologies ?? null,
   };
 }
 

@@ -50,12 +50,33 @@ interface CustomFieldRowState {
 
 /** Standard People-table fields bindable by a custom-field row — mirrors
  * EmailBison's BINDABLE_RECORD_COLUMNS (components/people/push-to-emailbison-button.tsx)
- * over GHL's own field set (lib/ghl/contact-payload.ts's GHL_KNOWN_RECORD_FIELDS).
- * Must stay a superset of GHL_KNOWN_RECORD_FIELDS's keys — resolveDefaultFieldMapping
+ * over GHL's own field set (lib/ghl/contact-payload.ts's GHL_KNOWN_RECORD_FIELDS) —
+ * NOT a copy of EmailBison's list, since GHL's own GhlPushRecord contract
+ * differs (see lib/ghl/types.ts). Must stay a superset of
+ * GHL_KNOWN_RECORD_FIELDS's keys — resolveDefaultFieldMapping
  * (lib/push/resolve-default-field-mapping.ts) auto-maps against that same field
  * set, and an auto-matched columnKey with no corresponding <option> here would
  * render as a blank/unselected row. brandName is included for that reason even
- * though "Company name" (bound to companyName) already prefers it. */
+ * though "Company name" (bound to companyName) already prefers it.
+ *
+ * Ground-truth audit (2026-08-15) against the live `people`/`companies`
+ * tables, independent of (but mirroring the shape of) the EmailBison audit —
+ * this dropdown had the same class of drift bug: only 11 of GhlPushRecord's
+ * now much larger field set were bindable. Reuses EmailBison's label text
+ * where a field already has one there (e.g. "Employees" for the linked
+ * company's employee count). Deliberately excludes companyEmployeeCount/
+ * companyNiche/companySource: GHL already denormalizes the linked company's
+ * employee count/niche/source directly onto the person row as employeeCount/
+ * niche/source above (confirmed via a live-data probe to be exact synced
+ * mirrors of the company's own columns) — a company*-namespaced duplicate of
+ * an existing field would be a redundant option with zero information gain.
+ * sourceId's label is "Source ID" (not "Source") to leave "Source" for the
+ * pre-existing `source` field above. Otherwise excludes the same columns
+ * EmailBison's list excludes, for the same reasons (see that file's doc
+ * comment): id/company_id, pushed_to_* bookkeeping, custom_data,
+ * country_id/industry_id, source_tokens/niche_tokens, job_title (covered by
+ * `title`), and employee_count/company_linkedin_url (synced mirrors, same as
+ * above). */
 const BINDABLE_RECORD_COLUMNS: { key: string; label: string }[] = [
   { key: "firstName", label: "First name" },
   { key: "lastName", label: "Last name" },
@@ -64,10 +85,54 @@ const BINDABLE_RECORD_COLUMNS: { key: string; label: string }[] = [
   { key: "companyName", label: "Company name" },
   { key: "brandName", label: "Cleaned brand name" },
   { key: "city", label: "City" },
+  { key: "state", label: "State" },
   { key: "country", label: "Country" },
   { key: "niche", label: "Niche" },
-  { key: "employeeCount", label: "Employee count" },
+  { key: "employeeCount", label: "Employees" },
   { key: "source", label: "Source" },
+  { key: "title", label: "Title" },
+  { key: "website", label: "Website (domain)" },
+  { key: "fullName", label: "Full name" },
+  { key: "linkedinUrl", label: "LinkedIn URL" },
+  { key: "linkedinUsername", label: "LinkedIn username" },
+  { key: "phoneType", label: "Phone type" },
+  { key: "phoneStatus", label: "Phone status" },
+  { key: "emailStatus", label: "Email status" },
+  { key: "sourceId", label: "Source ID" },
+  { key: "tags", label: "Tags" },
+  { key: "emailVerifiedAt", label: "Email verified at" },
+  { key: "phoneVerifiedAt", label: "Phone verified at" },
+  { key: "lastUpdated", label: "Last updated" },
+  { key: "createdAt", label: "Created at" },
+  // Linked company's real columns (company* namespace) — previously entirely
+  // absent from this dropdown.
+  { key: "companyCity", label: "Company city" },
+  { key: "companyState", label: "Company state" },
+  { key: "companyCountry", label: "Company country" },
+  { key: "companyIndustry", label: "Industry" },
+  { key: "companyWebsiteUrl", label: "Website URL" },
+  { key: "companyLinkedinUrl", label: "Company LinkedIn" },
+  { key: "companyDomain", label: "Domain" },
+  { key: "companyPhone", label: "Company phone" },
+  { key: "companyPhoneType", label: "Company phone type" },
+  { key: "companyPhoneStatus", label: "Company phone status" },
+  { key: "companyEmail", label: "Company email" },
+  { key: "companyEmailStatus", label: "Company email status" },
+  { key: "companyEmailVerifiedAt", label: "Company email verified at" },
+  { key: "companyPhoneVerifiedAt", label: "Company phone verified at" },
+  { key: "companyQualityTier", label: "Quality tier" },
+  { key: "companyClient", label: "Client" },
+  { key: "companyDescription", label: "Description" },
+  { key: "companyFoundedYear", label: "Founded year" },
+  { key: "companyRevenue", label: "Revenue" },
+  { key: "companyDomainStatus", label: "Domain status" },
+  { key: "companyMxProvider", label: "MX provider" },
+  { key: "companySecurityGateway", label: "Security gateway" },
+  { key: "companyKeywords", label: "Keywords" },
+  { key: "companyTechnologies", label: "Technologies" },
+  { key: "companyTags", label: "Company tags" },
+  { key: "companyCreatedAt", label: "Company created at" },
+  { key: "companyLastUpdated", label: "Company last updated" },
 ];
 
 function ScoreIndicator({ score }: { score: number }) {

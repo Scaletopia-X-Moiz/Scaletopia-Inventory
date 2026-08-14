@@ -2,6 +2,51 @@ import { describe, expect, it } from "vitest";
 import { buildGhlContactPayload, buildGhlCustomFields, normalizeGhlFieldSource } from "@/lib/ghl/contact-payload";
 import type { GhlFieldMapping, GhlPushRecord, GhlStandardFieldMapping } from "@/lib/ghl/types";
 
+const NULL_GHL_EXTRA_FIELDS = {
+  title: null,
+  website: null,
+  state: null,
+  fullName: null,
+  linkedinUrl: null,
+  linkedinUsername: null,
+  phoneType: null,
+  phoneStatus: null,
+  emailStatus: null,
+  sourceId: null,
+  tags: null,
+  emailVerifiedAt: null,
+  phoneVerifiedAt: null,
+  lastUpdated: null,
+  createdAt: null,
+  companyCity: null,
+  companyState: null,
+  companyCountry: null,
+  companyIndustry: null,
+  companyWebsiteUrl: null,
+  companyLinkedinUrl: null,
+  companyDomain: null,
+  companyPhone: null,
+  companyPhoneType: null,
+  companyPhoneStatus: null,
+  companyEmail: null,
+  companyEmailStatus: null,
+  companyEmailVerifiedAt: null,
+  companyPhoneVerifiedAt: null,
+  companyQualityTier: null,
+  companyClient: null,
+  companyDescription: null,
+  companyFoundedYear: null,
+  companyRevenue: null,
+  companyDomainStatus: null,
+  companyMxProvider: null,
+  companySecurityGateway: null,
+  companyKeywords: null,
+  companyTechnologies: null,
+  companyTags: null,
+  companyCreatedAt: null,
+  companyLastUpdated: null,
+} satisfies Partial<GhlPushRecord>;
+
 const fullRecord: GhlPushRecord = {
   firstName: "Jane",
   lastName: "Doe",
@@ -14,6 +59,7 @@ const fullRecord: GhlPushRecord = {
   niche: "dtc-beauty",
   employeeCount: 42,
   source: "apollo",
+  ...NULL_GHL_EXTRA_FIELDS,
 };
 
 describe("buildGhlContactPayload", () => {
@@ -46,6 +92,7 @@ describe("buildGhlContactPayload", () => {
       niche: null,
       employeeCount: null,
       source: null,
+      ...NULL_GHL_EXTRA_FIELDS,
     };
     expect(buildGhlContactPayload(record, null, [])).toEqual({
       firstName: null,
@@ -356,6 +403,7 @@ describe("buildGhlCustomFields", () => {
       niche: "dtc-beauty",
       employeeCount: 42,
       source: "apollo",
+      ...NULL_GHL_EXTRA_FIELDS,
     };
     const result = buildGhlCustomFields(
       null,
@@ -384,6 +432,7 @@ describe("buildGhlCustomFields", () => {
       niche: null,
       employeeCount: null,
       source: null,
+      ...NULL_GHL_EXTRA_FIELDS,
     };
     const result = buildGhlCustomFields(null, [{ ghlFieldId: "f7", source: "column", columnKey: "companyName" }], record);
     expect(result).toEqual([{ id: "f7", value: "ACME INC dba" }]);
@@ -402,6 +451,7 @@ describe("buildGhlCustomFields", () => {
       niche: null,
       employeeCount: null,
       source: null,
+      ...NULL_GHL_EXTRA_FIELDS,
     };
     const result = buildGhlCustomFields(null, [{ ghlFieldId: "f8", source: "column", columnKey: "brandName" }], record);
     expect(result).toEqual([{ id: "f8", value: "Acme" }]);

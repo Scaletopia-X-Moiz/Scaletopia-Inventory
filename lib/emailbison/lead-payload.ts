@@ -34,6 +34,12 @@ const KNOWN_RECORD_FIELDS: Record<string, keyof EmailBisonPushRecord> = {
   phoneStatus: "phoneStatus",
   emailStatus: "emailStatus",
   sourceId: "sourceId",
+  // Remaining person-own real columns (ground-truth audit, 2026-08-15).
+  tags: "tags",
+  emailVerifiedAt: "emailVerifiedAt",
+  phoneVerifiedAt: "phoneVerifiedAt",
+  lastUpdated: "lastUpdated",
+  createdAt: "createdAt",
   // Linked company's real columns (company* namespace — resolved from the
   // company embed). Distinct from the person's own same-named fields above.
   companyCity: "companyCity",
@@ -50,6 +56,24 @@ const KNOWN_RECORD_FIELDS: Record<string, keyof EmailBisonPushRecord> = {
   companyEmailStatus: "companyEmailStatus",
   companyNiche: "companyNiche",
   companyQualityTier: "companyQualityTier",
+  // Remaining real company columns (ground-truth audit against the live
+  // `companies` table — see lib/emailbison/types.ts's EmailBisonPushRecord).
+  companyPhoneStatus: "companyPhoneStatus",
+  companyClient: "companyClient",
+  companyCreatedAt: "companyCreatedAt",
+  companyDescription: "companyDescription",
+  companyDomainStatus: "companyDomainStatus",
+  companyEmailVerifiedAt: "companyEmailVerifiedAt",
+  companyFoundedYear: "companyFoundedYear",
+  companyKeywords: "companyKeywords",
+  companyLastUpdated: "companyLastUpdated",
+  companyMxProvider: "companyMxProvider",
+  companyPhoneVerifiedAt: "companyPhoneVerifiedAt",
+  companyRevenue: "companyRevenue",
+  companySecurityGateway: "companySecurityGateway",
+  companySource: "companySource",
+  companyTags: "companyTags",
+  companyTechnologies: "companyTechnologies",
 };
 
 /** String-ifies a resolved column value for the wire (EmailBison custom
