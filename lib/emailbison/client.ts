@@ -199,26 +199,57 @@ function assertSuccessBody(json: unknown, action: string): void {
 }
 
 /** Converts our camelCase EmailBisonLeadPayload (lib/emailbison/types.ts)
- * into the snake_case field names confirmed in api-research.md
- * (email/first_name/last_name/company_name/title/phone/website/
- * custom_variables). `existing_lead_behavior` is NOT one of those confirmed
- * fields or one of api-research.md's two "Still open" items — it's our own
- * unverified guess at how to wire up the "Existing Lead Behavior"
- * (PATCH-vs-PUT) control Clay's UI surfaces, since the research doc never
- * pins down a body-field name for it. Needs the same live-token check as the
- * "Still open" items before shipping. */
+ * into the snake_case field names the create-or-update lead endpoints
+ * actually accept, per the request-body schema in `.scratch/eb-openapi.yaml`
+ * (checked across every lead-write endpoint: POST /api/leads,
+ * /api/leads/create-or-update/{lead_id}, /api/leads/create-or-update/multiple,
+ * and the bulk-create endpoint — all five expose the exact same request
+ * shape: `first_name, last_name, email, title, company, notes,
+ * custom_variables`). Two corrections from api-research.md's
+ * `company_name`/phone/website belief, confirmed live (`title` and
+ * `custom_variables` land, company never did):
+ *  - `company` is the real key, not `company_name` — the response/example
+ *    bodies throughout the schema use `company:` (e.g. line ~2436, ~3166),
+ *    and the request schema itself names the property `company`. Sending
+ *    `company_name` means EmailBison silently drops the whole field.
+ *  - `phone` and `website` are NOT in the request schema on ANY lead-write
+ *    endpoint — only `first_name, last_name, email, title, company, notes,
+ *    custom_variables` are accepted top-level keys. There is no alternate
+ *    accepted key for phone/website either; the schema's only phone/website-
+ *    shaped examples (e.g. `company_website`) appear solely as arbitrary
+ *    example *custom_variables* names on unrelated endpoints, not as a
+ *    documented convention for our phone/website fields. Renaming these to
+ *    custom_variables would mean guessing an undefined variable name (and
+ *    custom variables must be pre-created workspace-side per
+ *    api-research.md), so they're left as unsupported/silently-dropped
+ *    top-level keys here rather than guessed at — flagged for a follow-up
+ *    product decision instead of invented.
+ * `existing_lead_behavior` is NOT one of those confirmed fields either —
+ * it's our own unverified guess at how to wire up the "Existing Lead
+ * Behavior" (PATCH-vs-PUT) control Clay's UI surfaces, since the research
+ * doc never pins down a body-field name for it. CONFIRMED WORKING via a live
+ * patch-vs-put test, so left as-is. */
 function toWireLead(lead: EmailBisonLeadPayload): Record<string, unknown> {
-  return {
+  const wire: Record<string, unknown> = {
     email: lead.email,
     first_name: lead.firstName,
     last_name: lead.lastName,
-    company_name: lead.companyName,
+    company: lead.companyName,
     title: lead.title,
     phone: lead.phone,
     website: lead.website,
     existing_lead_behavior: lead.existingLeadBehavior,
-    custom_variables: lead.customVariables.map(({ name, value }) => ({ name, value })),
   };
+  // EmailBison treats an explicit `custom_variables: []` as "clear all
+  // existing custom variables" on a patch (confirmed live: an empty-array
+  // patch wiped previously-set qa_* vars), so a push with no custom
+  // variables selected must omit the key entirely rather than send `[]` —
+  // that's the only way "nothing to say about custom variables" and
+  // "explicitly clear them" stay distinguishable on the wire.
+  if (lead.customVariables.length > 0) {
+    wire.custom_variables = lead.customVariables.map(({ name, value }) => ({ name, value }));
+  }
+  return wire;
 }
 
 function extractArray(json: unknown): unknown[] {

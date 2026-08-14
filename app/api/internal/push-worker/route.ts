@@ -41,8 +41,11 @@ const WORKER_BUDGET_MS = 270_000;
 const TICK_BUDGET_MS = 240_000;
 /** Cap on the `failures` array persisted to the job row — the jsonb column
  * would otherwise grow unbounded across ticks of a large, failure-heavy run.
- * The Push Activity panel (#122) surfaces only a sample of failures anyway. */
-const MAX_FAILURES_KEPT = 50;
+ * Raised from 50 (confirmed live: a 100-failure job only surfaced 50 reasons
+ * in the Push Activity panel) to 500 — comfortably above any single push
+ * batch's realistic failure count while still bounding jsonb growth on a
+ * pathological all-failed run. */
+const MAX_FAILURES_KEPT = 500;
 
 /** Soft cap on how many jobs may be `running` at once across all clients
  * (ticket #121). Per-client serialization already keeps one client to a single

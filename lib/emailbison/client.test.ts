@@ -148,7 +148,7 @@ describe("upsertLeadsBulk", () => {
           email: "ada@example.com",
           first_name: "Ada",
           last_name: "Lovelace",
-          company_name: "Acme",
+          company: "Acme",
           title: "Engineer",
           phone: "+15551234567",
           website: "acme.com",
@@ -164,6 +164,16 @@ describe("upsertLeadsBulk", () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(401, { message: "invalid token" }));
 
     await expect(upsertLeadsBulk(CREDENTIALS, [LEAD], { fetchImpl })).rejects.toThrow(EmailBisonApiError);
+  });
+
+  it("omits the custom_variables key entirely when the lead has none, so a patch doesn't wipe existing vars (confirmed live: an empty-array patch cleared previously-set custom variables)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { data: [{ id: 1, email: "ada@example.com" }] }));
+
+    await upsertLeadsBulk(CREDENTIALS, [{ ...LEAD, customVariables: [] }], { fetchImpl });
+
+    const [, init] = fetchImpl.mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.leads[0]).not.toHaveProperty("custom_variables");
   });
 });
 
