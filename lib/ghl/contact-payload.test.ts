@@ -147,6 +147,26 @@ describe("buildGhlContactPayload", () => {
     expect(result.companyName).toBe("Acme Inc");
   });
 
+  it("sends a static value verbatim to every field the mapping sets to a literal", () => {
+    const result = buildGhlContactPayload(fullRecord, null, [], [], {
+      ...fullMapping,
+      companyName: "literal:Acme Corp",
+      city: "literal:Remote",
+    });
+    expect(result.companyName).toBe("Acme Corp");
+    expect(result.city).toBe("Remote");
+    // non-literal fields still resolve from their own column
+    expect(result.firstName).toBe("Jane");
+  });
+
+  it("does not resolve a static value as a column key even when text collides with a field name", () => {
+    const result = buildGhlContactPayload(fullRecord, null, [], [], {
+      ...fullMapping,
+      city: "literal:firstName",
+    });
+    expect(result.city).toBe("firstName");
+  });
+
   it("nulls out any field set to skip", () => {
     const result = buildGhlContactPayload(fullRecord, null, [], [], {
       companyName: "skip",

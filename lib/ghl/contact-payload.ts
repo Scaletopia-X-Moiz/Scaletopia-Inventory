@@ -5,6 +5,7 @@ import type {
   GhlStandardFieldMapping,
 } from "@/lib/ghl/types";
 import { resolveMappedValue } from "@/lib/push/resolve-mapped-value";
+import { isLiteralSource, literalSourceText } from "@/lib/push/standard-field-source";
 
 /** Maps a bindable "People-table column" name (offered in the GHL push
  * mapping step, ticket #142) to the matching GhlPushRecord field — the
@@ -83,6 +84,11 @@ function resolveStandardField(
   if (raw === undefined) return defaultValue;
   const source = normalizeGhlFieldSource(field, raw);
   if (source === "skip") return null;
+  // A static value ("literal:<text>") is sent verbatim to every contact —
+  // the standard-field twin of a literal custom-field entry. Decoded here
+  // before any column lookup so the typed text is never resolved as a column
+  // key.
+  if (isLiteralSource(source)) return literalSourceText(source);
   // companyName sourced from brandName keeps the old 3-way "brand_name"
   // choice's brand-preferred-with-raw-fallback semantics: the default mapping
   // (and any normalized-legacy "brand_name") sends companyName: "brandName"

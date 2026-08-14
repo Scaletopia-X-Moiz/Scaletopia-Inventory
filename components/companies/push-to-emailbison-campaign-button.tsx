@@ -1238,7 +1238,7 @@ export function PushToEmailBisonCampaignButton({
                               }
                               className="rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
                             >
-                              <option value="literal">Literal</option>
+                              <option value="literal">Static value</option>
                               <option value="column">Column</option>
                             </select>
                             {row.source === "literal" ? (

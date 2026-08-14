@@ -183,6 +183,34 @@ describe("buildEmailBisonLeadPayload", () => {
     expect(result.title).toBe("VP");
   });
 
+  it("sends a static value verbatim to every field the mapping sets to a literal", () => {
+    const result = buildEmailBisonLeadPayload(fullRecord, null, [], "patch", {
+      ...fullMapping,
+      companyName: "literal:Acme Corp",
+      title: "literal:Founder",
+    });
+    expect(result.companyName).toBe("Acme Corp");
+    expect(result.title).toBe("Founder");
+    // non-literal fields still resolve from their own column
+    expect(result.firstName).toBe("Jane");
+  });
+
+  it("does not resolve a static value as a column key even when text collides with a field name", () => {
+    const result = buildEmailBisonLeadPayload(fullRecord, null, [], "patch", {
+      ...fullMapping,
+      companyName: "literal:firstName",
+    });
+    expect(result.companyName).toBe("firstName");
+  });
+
+  it("sends an empty string when a field is a literal with no text typed", () => {
+    const result = buildEmailBisonLeadPayload(fullRecord, null, [], "patch", {
+      ...fullMapping,
+      title: "literal:",
+    });
+    expect(result.title).toBe("");
+  });
+
   it("tolerates a legacy 'include'/'brand_name' mapping saved before free-source mapping existed", () => {
     const legacyMapping: EmailBisonStandardFieldMapping = {
       companyName: "brand_name",

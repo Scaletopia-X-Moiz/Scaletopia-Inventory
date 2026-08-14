@@ -5,6 +5,7 @@ import type {
   EmailBisonStandardFieldMapping,
 } from "@/lib/emailbison/types";
 import { resolveMappedValue } from "@/lib/push/resolve-mapped-value";
+import { isLiteralSource, literalSourceText } from "@/lib/push/standard-field-source";
 
 /** Maps a bindable "People-table column" name (as offered in the Add-to-
  * EmailBison row-adder, issue #52/#61, and in the standard-field mapping's
@@ -129,6 +130,11 @@ function resolveStandardField(
   if (raw === undefined) return defaultValue;
   const source = normalizeFieldSource(field, raw);
   if (source === "skip") return null;
+  // A static value ("literal:<text>") is sent verbatim to every contact —
+  // the standard-field twin of a literal custom-variable entry. Decoded here
+  // before any column lookup so the typed text is never resolved as a column
+  // key.
+  if (isLiteralSource(source)) return literalSourceText(source);
   // companyName sourced from brandName keeps the old 3-way "brand_name"
   // choice's brand-preferred-with-raw-fallback semantics: the default mapping
   // (and any normalized-legacy "brand_name") sends companyName: "brandName"

@@ -11,6 +11,12 @@ import type { GhlCustomField } from "@/lib/ghl/custom-fields";
 import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
 import { normalizeGhlFieldSource } from "@/lib/ghl/contact-payload";
 import {
+  LITERAL_SENTINEL,
+  isLiteralSource,
+  literalSourceText,
+  toLiteralSource,
+} from "@/lib/push/standard-field-source";
+import {
   normalizeSavedGhlCustomFieldMapping,
   type SavedGhlCustomFieldMappingEntry,
 } from "@/lib/ghl/field-mapping";
@@ -550,42 +556,53 @@ export function PushToGhlButton({
                     </tr>
                   ) : (
                     <>
-                      <tr className="bg-paper">
-                        <td className="px-4 py-2.5 text-xs font-medium text-ink">Company name</td>
-                        <td className="px-4 py-2.5">
-                          <select
-                            value={standardFields.companyName}
-                            onChange={(e) => handleStandardFieldChange("companyName", e.target.value)}
-                            className="w-full rounded border border-rule bg-paper px-2 py-1 text-xs text-ink outline-none focus:border-stamp"
-                          >
-                            <option value="skip">— ignore —</option>
-                            {bindableColumns.map((col) => (
-                              <option key={col.key} value={col.key}>
-                                {col.label}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                      </tr>
-                      {STANDARD_FIELD_ROWS.map((row) => (
-                        <tr key={row.key} className="bg-paper">
-                          <td className="px-4 py-2.5 text-xs font-medium text-ink">{row.label}</td>
-                          <td className="px-4 py-2.5">
-                            <select
-                              value={standardFields[row.key]}
-                              onChange={(e) => handleStandardFieldChange(row.key, e.target.value)}
-                              className="w-full rounded border border-rule bg-paper px-2 py-1 text-xs text-ink outline-none focus:border-stamp"
-                            >
-                              <option value="skip">— ignore —</option>
-                              {bindableColumns.map((col) => (
-                                <option key={col.key} value={col.key}>
-                                  {col.label}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                        </tr>
-                      ))}
+                      {(
+                        [
+                          { key: "companyName" as const, label: "Company name" },
+                          ...STANDARD_FIELD_ROWS,
+                        ] as { key: keyof GhlStandardFieldMapping; label: string }[]
+                      ).map((row) => {
+                        const raw = standardFields[row.key];
+                        const literal = isLiteralSource(raw);
+                        return (
+                          <tr key={row.key} className="bg-paper">
+                            <td className="px-4 py-2.5 text-xs font-medium text-ink">{row.label}</td>
+                            <td className="px-4 py-2.5">
+                              <div className="flex items-center gap-1.5">
+                                <select
+                                  value={literal ? LITERAL_SENTINEL : raw}
+                                  onChange={(e) =>
+                                    handleStandardFieldChange(
+                                      row.key,
+                                      e.target.value === LITERAL_SENTINEL ? toLiteralSource("") : e.target.value
+                                    )
+                                  }
+                                  className="rounded border border-rule bg-paper px-2 py-1 text-xs text-ink outline-none focus:border-stamp"
+                                >
+                                  <option value="skip">— ignore —</option>
+                                  <option value={LITERAL_SENTINEL}>Static value</option>
+                                  {bindableColumns.map((col) => (
+                                    <option key={col.key} value={col.key}>
+                                      {col.label}
+                                    </option>
+                                  ))}
+                                </select>
+                                {literal ? (
+                                  <input
+                                    type="text"
+                                    placeholder="Value"
+                                    value={literalSourceText(raw)}
+                                    onChange={(e) =>
+                                      handleStandardFieldChange(row.key, toLiteralSource(e.target.value))
+                                    }
+                                    className="w-full rounded border border-rule bg-paper px-2 py-1 text-xs text-ink outline-none focus:border-stamp"
+                                  />
+                                ) : null}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
                       {customFields.map((field) => {
                         const row = mapping[field.id] ?? { source: "ignore" as const, columnKey: "", value: "" };
                         const score = matchScores[field.id] ?? 0;
@@ -610,7 +627,7 @@ export function PushToGhlButton({
                                 >
                                   <option value="ignore">— ignore —</option>
                                   <option value="column">Column</option>
-                                  <option value="literal">Literal</option>
+                                  <option value="literal">Static value</option>
                                 </select>
                                 {row.source === "column" ? (
                                   <select

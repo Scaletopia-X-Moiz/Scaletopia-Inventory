@@ -1,6 +1,12 @@
 "use client";
 
 import type { EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
+import {
+  LITERAL_SENTINEL,
+  isLiteralSource,
+  literalSourceText,
+  toLiteralSource,
+} from "@/lib/push/standard-field-source";
 
 const STANDARD_FIELD_ROWS: { key: keyof EmailBisonStandardFieldMapping; label: string }[] = [
   { key: "companyName", label: "Company name" },
@@ -39,7 +45,8 @@ export function StandardFieldMappingTable({
     <div>
       <p className="text-xs font-medium text-ink">Standard fields</p>
       <p className="mt-1 text-xs text-ink-mute">
-        Choose which column feeds each EmailBison field. Ignored fields aren&apos;t sent.
+        Choose which column feeds each EmailBison field, or pick &ldquo;Static value&rdquo; to send
+        the same text to every contact. Ignored fields aren&apos;t sent.
       </p>
       <div className="mt-2 overflow-hidden rounded-md border border-rule">
         <table className="w-full text-xs">
@@ -50,25 +57,49 @@ export function StandardFieldMappingTable({
             </tr>
           </thead>
           <tbody className="divide-y divide-rule">
-            {STANDARD_FIELD_ROWS.map((row) => (
-              <tr key={row.key}>
-                <td className="px-2 py-1.5 text-ink">{row.label}</td>
-                <td className="px-2 py-1.5">
-                  <select
-                    value={value[row.key]}
-                    onChange={(e) => onChange({ ...value, [row.key]: e.target.value })}
-                    className="w-full rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
-                  >
-                    <option value="skip">— ignore —</option>
-                    {columns.map((col) => (
-                      <option key={col.key} value={col.key}>
-                        {col.label}
-                      </option>
-                    ))}
-                  </select>
-                </td>
-              </tr>
-            ))}
+            {STANDARD_FIELD_ROWS.map((row) => {
+              const raw = value[row.key];
+              const literal = isLiteralSource(raw);
+              return (
+                <tr key={row.key}>
+                  <td className="px-2 py-1.5 text-ink">{row.label}</td>
+                  <td className="px-2 py-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <select
+                        value={literal ? LITERAL_SENTINEL : raw}
+                        onChange={(e) =>
+                          onChange({
+                            ...value,
+                            [row.key]:
+                              e.target.value === LITERAL_SENTINEL ? toLiteralSource("") : e.target.value,
+                          })
+                        }
+                        className="rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                      >
+                        <option value="skip">— ignore —</option>
+                        <option value={LITERAL_SENTINEL}>Static value</option>
+                        {columns.map((col) => (
+                          <option key={col.key} value={col.key}>
+                            {col.label}
+                          </option>
+                        ))}
+                      </select>
+                      {literal ? (
+                        <input
+                          type="text"
+                          placeholder="Value"
+                          value={literalSourceText(raw)}
+                          onChange={(e) =>
+                            onChange({ ...value, [row.key]: toLiteralSource(e.target.value) })
+                          }
+                          className="w-full rounded-md border border-rule bg-transparent px-2 py-1 text-xs text-ink"
+                        />
+                      ) : null}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
