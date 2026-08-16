@@ -7,6 +7,9 @@ import {
   pollUntilTerminal,
   mapCertainty,
   verifyWebhookSignature,
+  submitBulkEmailVerification,
+  readBulkResults,
+  mapBulkItem,
   EMAIL_STATUSES,
   type RawItem,
 } from "@/lib/icypeas/verify";
@@ -287,6 +290,218 @@ describe("pollUntilTerminal", () => {
         email: "a@b.com",
       })
     ).rejects.toThrow(/timed out/);
+  });
+});
+
+describe("submitBulkEmailVerification", () => {
+  it("posts task/name/data/custom.externalIds and returns the file id", async () => {
+    const fetchImpl = jsonFetch({ success: true, file: "FILE123", status: "in_progress" });
+
+    const result = await submitBulkEmailVerification(
+      [
+        { email: "a@x.com", externalId: "people:1" },
+        { email: "b@x.com", externalId: "people:2" },
+      ],
+      { fetchImpl, apiKey }
+    );
+
+    expect(result).toEqual({ files: ["FILE123"] });
+
+    const call = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[0]).toBe("https://app.icypeas.com/api/bulk-search");
+    const init = call[1] as RequestInit;
+    expect((init.headers as Record<string, string>).Authorization).toBe(apiKey);
+    const body = JSON.parse(init.body as string);
+    expect(body.task).toBe("email-verification");
+    expect(body.data).toEqual([["a@x.com"], ["b@x.com"]]);
+    expect(body.custom).toEqual({ externalIds: ["people:1", "people:2"] });
+  });
+
+  it("returns an empty file list and makes no call when there are no valid rows", async () => {
+    const fetchImpl = jsonFetch({ success: true, file: "FILE123" });
+    const result = await submitBulkEmailVerification([{ email: "  ", externalId: "people:1" }], {
+      fetchImpl,
+      apiKey,
+    });
+    expect(result).toEqual({ files: [] });
+    expect((fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+  });
+
+  it("chunks at 5000 rows/call and submits multiple chunks", async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (_url, init) => {
+      const body = JSON.parse((init as RequestInit).body as string);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ success: true, file: `FILE-${body.data.length}` }),
+      };
+    }) as unknown as typeof fetch;
+
+    const rows = Array.from({ length: 5001 }, (_, i) => ({
+      email: `person${i}@x.com`,
+      externalId: `people:${i}`,
+    }));
+
+    const result = await submitBulkEmailVerification(rows, { fetchImpl, apiKey });
+
+    expect(result.files.length).toBe(2);
+    expect((fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2);
+  }, 10000);
+
+  it("throws on a non-success ack", async () => {
+    const fetchImpl = jsonFetch({ success: false, error: "bad request" });
+    await expect(
+      submitBulkEmailVerification([{ email: "a@x.com", externalId: "people:1" }], {
+        fetchImpl,
+        apiKey,
+      })
+    ).rejects.toThrow(/bad request/);
+  });
+
+  it("throws when no file id comes back", async () => {
+    const fetchImpl = jsonFetch({ success: true });
+    await expect(
+      submitBulkEmailVerification([{ email: "a@x.com", externalId: "people:1" }], {
+        fetchImpl,
+        apiKey,
+      })
+    ).rejects.toThrow(/did not return a file id/);
+  });
+});
+
+describe("readBulkResults", () => {
+  const itemA: RawItem = {
+    _id: "1",
+    status: "FOUND",
+    order: 0,
+    results: { emails: [{ email: "a@x.com", certainty: "ultra_sure" }] },
+    userData: { externalId: "people:1" },
+  };
+  const itemB: RawItem = {
+    _id: "2",
+    status: "IN_PROGRESS",
+    order: 1,
+    userData: { externalId: "people:2" },
+  };
+
+  it("returns items + total + sorts from a full page (hasMore)", async () => {
+    const fetchImpl = jsonFetch({
+      success: true,
+      items: Array.from({ length: 100 }, (_, i) => ({ ...itemA, _id: String(i), order: i })),
+      sorts: ["cursor-1"],
+      total: 250,
+    });
+
+    const page = await readBulkResults("FILE123", { limit: 100, deps: { fetchImpl, apiKey } });
+    expect(page.items.length).toBe(100);
+    expect(page.sorts).toEqual(["cursor-1"]);
+    expect(page.total).toBe(250);
+  });
+
+  it("pages using next/sorts and stops when a short page comes back", async () => {
+    const fetchImpl = vi.fn();
+    (fetchImpl as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          items: [itemA, itemB],
+          sorts: ["cursor-1"],
+          total: 3,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          items: [{ ...itemA, _id: "3", order: 2, userData: { externalId: "people:3" } }],
+          sorts: null,
+          total: 3,
+        }),
+      });
+
+    const page1 = await readBulkResults("FILE123", {
+      limit: 2,
+      deps: { fetchImpl: fetchImpl as unknown as typeof fetch, apiKey },
+    });
+    expect(page1.items.length).toBe(2);
+    expect(page1.sorts).toEqual(["cursor-1"]);
+    expect(page1.total).toBe(3);
+
+    const page2 = await readBulkResults("FILE123", {
+      limit: 2,
+      next: true,
+      sorts: page1.sorts ?? undefined,
+      deps: { fetchImpl: fetchImpl as unknown as typeof fetch, apiKey },
+    });
+    expect(page2.items.length).toBe(1);
+    expect(page2.sorts).toBeNull(); // short page -> treated as last page
+
+    const firstCallBody = JSON.parse(
+      (fetchImpl.mock.calls[0][1] as RequestInit).body as string
+    );
+    expect(firstCallBody).toEqual({ mode: "bulk", file: "FILE123", limit: 2 });
+
+    const secondCallBody = JSON.parse(
+      (fetchImpl.mock.calls[1][1] as RequestInit).body as string
+    );
+    expect(secondCallBody).toEqual({
+      mode: "bulk",
+      file: "FILE123",
+      limit: 2,
+      next: true,
+      sorts: ["cursor-1"],
+    });
+  });
+
+  it("caps limit at 100", async () => {
+    const fetchImpl = jsonFetch({ success: true, items: [], sorts: null, total: 0 });
+    await readBulkResults("FILE123", { limit: 500, deps: { fetchImpl, apiKey } });
+    const call = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    const body = JSON.parse((call[1] as RequestInit).body as string);
+    expect(body.limit).toBe(100);
+  });
+});
+
+describe("mapBulkItem", () => {
+  it("maps a terminal FOUND item with externalId/order/certainty", () => {
+    const item: RawItem = {
+      status: "FOUND",
+      order: 4,
+      results: { emails: [{ email: "a@x.com", certainty: "probable" }] },
+      userData: { externalId: "companies:9" },
+    };
+    expect(mapBulkItem(item)).toEqual({
+      externalId: "companies:9",
+      order: 4,
+      status: "probable",
+      terminal: true,
+      certainty: "probable",
+    });
+  });
+
+  it("marks a non-terminal item accordingly, still surfacing externalId/order", () => {
+    const item: RawItem = { status: "IN_PROGRESS", order: 1, userData: { externalId: "people:2" } };
+    expect(mapBulkItem(item)).toEqual({
+      externalId: "people:2",
+      order: 1,
+      status: null,
+      terminal: false,
+      certainty: null,
+    });
+  });
+
+  it("marks an error status as terminal with a null status (no throw)", () => {
+    const item: RawItem = { status: "INSUFFICIENT_FUNDS", userData: { externalId: "people:3" } };
+    expect(mapBulkItem(item)).toEqual({
+      externalId: "people:3",
+      order: null,
+      status: null,
+      terminal: true,
+      certainty: null,
+    });
   });
 });
 

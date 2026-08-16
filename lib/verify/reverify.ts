@@ -3,6 +3,9 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 import {
   submitEmailVerification,
   pollUntilTerminal,
+  submitBulkEmailVerification,
+  readBulkResults,
+  mapBulkItem,
   firstEmail,
   VERIFYING_STATUS,
   type VerifyDeps,
@@ -181,25 +184,25 @@ export async function reverifyRecord(
 // Bulk (current filtered view)
 // ---------------------------------------------------------------------------
 
-/** Submit concurrency for bulk reverify. The single-search endpoint allows
- * 10 calls/sec (research doc §6), so submitting isn't the bottleneck —
- * `pollUntilTerminal`'s reads are: the `bulk-single-searchs/read` route is
- * capped at 30 calls/min. Each concurrent poller reads roughly
- * (60000 / BULK_POLL_INTERVAL_MS) times/min, so
- * concurrency * (60000 / interval) must stay comfortably under 30. With
- * interval=5000ms that's concurrency * 12 reads/min — 2 pollers ≈ 24/min,
- * safely under the cap.
- *
- * This is the documented fallback from the task brief: a full webhook-driven
- * bulk rework (persisted per-job submission tracking, SSE progress fed by
- * DB writes instead of a single request's control flow) is a materially
- * larger change than "submit + poll with a smaller number and a bigger
- * gap" — see the tradeoff called out in the final report. Every row is
- * still submitted through the same submit+poll path as the single-record
- * fallback, just with lower concurrency and a wider poll interval to respect
- * the shared rate limit. */
-const BULK_VERIFY_CONCURRENCY = 2;
-const BULK_POLL_INTERVAL_MS = 5000;
+/** Page size for draining bulk results (the documented max — see
+ * lib/icypeas/verify.ts BULK_READ_MAX_LIMIT). */
+const BULK_READ_LIMIT = 100;
+
+/** Pacing between successive `readBulkResults` calls while draining. The
+ * read route is capped at 30 calls/min (research doc §6); 2100ms gives
+ * ~28.5 calls/min, a safe margin under the cap while still moving up to
+ * ~2850 rows/min through the drain loop (100 rows/read). This replaces the
+ * old BULK_VERIFY_CONCURRENCY=2 + 5000ms-poll-per-row approach, which
+ * effectively processed 2 rows every 5s (~24 rows/min) — the "1 at a time"
+ * complaint this rework fixes. */
+const BULK_READ_INTERVAL_MS = 2100;
+
+/** Overall drain deadline. Icypeas doesn't document bulk-job latency (see
+ * research doc §10), so this is a generous fixed budget rather than a
+ * per-row estimate — any rows still non-terminal when it's hit are left at
+ * `verifying` and counted as errors, same tradeoff as a single-record poll
+ * timeout. */
+const BULK_DRAIN_TIMEOUT_MS = 20 * 60_000;
 
 /** Cap the failed-email preview returned to the UI (mirrors Clay's preview). */
 const FAILED_PREVIEW = 20;
@@ -284,38 +287,17 @@ interface ReverifyEntity<TFilters> {
   resolveTargets: (filters: TFilters) => Promise<EmailTarget[]>;
 }
 
-/** Verify one target end-to-end: mark `verifying`, submit, poll to a
- * terminal result, write it. Used by the bulk loop below — see the module
- * comment on BULK_VERIFY_CONCURRENCY for why bulk polls instead of using the
- * webhook (a per-row webhook write happens out-of-band from this request
- * regardless of whether bulk *also* registers one, so registering a webhook
- * here would just mean racing the inline poll against the webhook receiver
- * for the same write — polling only, deliberately, keeps bulk's result
- * accounting inside this one request/SSE stream). */
-async function submitAndPoll(
-  table: VerifyTable,
-  target: EmailTarget,
-  deps: VerifyDeps
-): Promise<{ status: string; certainty: string | null }> {
-  await supabaseAdmin
-    .from(table)
-    .update({ email_status: VERIFYING_STATUS })
-    .eq("id", target.id);
-
-  const submission = await submitEmailVerification(target.email, { deps });
-  const result = await pollUntilTerminal(submission.id, {
-    deps,
-    email: target.email,
-    intervalMs: BULK_POLL_INTERVAL_MS,
-  });
-
-  const { error } = await supabaseAdmin
-    .from(table)
-    .update({ email_status: result.status, email_verified_at: new Date().toISOString() })
-    .eq("id", target.id);
-  if (error) throw error;
-
-  return { status: result.status, certainty: result.certainty };
+/** Batch-mark every target row `verifying` via chunked `.in()` updates
+ * (not one `.eq()` update per row — the DB-write half of the "far too slow"
+ * fix). */
+async function markAllVerifying(table: VerifyTable, ids: string[]): Promise<void> {
+  for (const idChunk of chunk(ids, 500)) {
+    const { error } = await supabaseAdmin
+      .from(table)
+      .update({ email_status: VERIFYING_STATUS })
+      .in("id", idChunk);
+    if (error) throw error;
+  }
 }
 
 async function runReverify<TFilters>(
@@ -343,25 +325,128 @@ async function runReverify<TFilters>(
 
   onProgress?.({ phase: "verifying", done: 0, total, verified: 0, errors: 0 });
 
-  for (const group of chunk(targets, BULK_VERIFY_CONCURRENCY)) {
-    const results = await Promise.allSettled(
-      group.map((target) => submitAndPoll(entity.table, target, deps))
-    );
+  // 1. Batch-mark every target row `verifying` up front.
+  await markAllVerifying(entity.table, targets.map((t) => t.id));
 
-    for (let i = 0; i < results.length; i++) {
-      done++;
-      const settled = results[i];
-      if (settled.status === "fulfilled") {
-        verified++;
-        const { status } = settled.value;
-        counts[status] = (counts[status] ?? 0) + 1;
-      } else {
-        errors++;
-        if (failed.length < FAILED_PREVIEW) failed.push(group[i].email);
+  // 2. Submit ALL targets in a handful of /api/bulk-search calls (5000
+  // rows/call), not one call per row. externalId = `${table}:${id}` is how
+  // results get correlated back to rows on the read side.
+  const externalIdToTarget = new Map<string, EmailTarget>();
+  for (const t of targets) externalIdToTarget.set(`${entity.table}:${t.id}`, t);
+
+  const rows = targets.map((t) => ({
+    email: t.email,
+    externalId: `${entity.table}:${t.id}`,
+  }));
+
+  let files: string[];
+  try {
+    ({ files } = await submitBulkEmailVerification(rows, deps));
+  } catch {
+    // Nothing was submitted — every row is left at `verifying` (same
+    // leave-as-is tradeoff as reverifyRecord's poll failure), and the whole
+    // run is reported as failed rather than throwing, since resolveTargets
+    // already succeeded and callers expect a ReverifyResult back.
+    onProgress?.({ phase: "done", done: 0, total, verified: 0, errors: total });
+    return {
+      total_matched: total,
+      verified: 0,
+      errors: total,
+      counts,
+      creditsRemaining,
+      failed: targets.slice(0, FAILED_PREVIEW).map((t) => t.email),
+    };
+  }
+
+  // 3. Drain results: page readBulkResults per file at BULK_READ_INTERVAL_MS
+  // cadence (well under the 30-reads/min cap), writing terminal rows in
+  // batched-by-status `.in()` updates instead of one write per row. Because
+  // Icypeas gives no "give me only what changed" signal, this re-sweeps each
+  // file from the start on every outer pass until every row is terminal or
+  // BULK_DRAIN_TIMEOUT_MS is hit — already-resolved externalIds are skipped
+  // instantly (`pending.get` miss) so re-sweeping only costs read calls, not
+  // DB writes.
+  const pending = new Map(externalIdToTarget);
+  const deadline = Date.now() + BULK_DRAIN_TIMEOUT_MS;
+  const verifiedAt = new Date().toISOString();
+
+  while (pending.size > 0 && Date.now() < deadline) {
+    for (const file of files) {
+      let next: boolean | undefined;
+      let sorts: unknown[] | undefined;
+      let firstPage = true;
+
+      while ((firstPage || sorts) && pending.size > 0) {
+        firstPage = false;
+
+        let page;
+        try {
+          page = await readBulkResults(file, { limit: BULK_READ_LIMIT, next, sorts, deps });
+        } catch {
+          // Transient read failure — stop paging this file for this sweep;
+          // the outer while-loop will retry it (or hit the deadline).
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, BULK_READ_INTERVAL_MS));
+
+        const idsByStatus = new Map<string, string[]>();
+
+        for (const item of page.items) {
+          const mapped = mapBulkItem(item);
+          const extId = mapped.externalId;
+          if (!extId) continue;
+          const target = pending.get(extId);
+          if (!target) continue; // already resolved this run, or not ours
+          if (!mapped.terminal) continue; // still verifying — leave pending
+
+          pending.delete(extId);
+          done++;
+
+          if (mapped.status) {
+            const ids = idsByStatus.get(mapped.status) ?? [];
+            ids.push(target.id);
+            idsByStatus.set(mapped.status, ids);
+            verified++;
+            counts[mapped.status] = (counts[mapped.status] ?? 0) + 1;
+          } else {
+            // ERROR_STATUSES (BAD_INPUT/INSUFFICIENT_FUNDS/ABORTED) — leave
+            // the row at `verifying`, matching reverifyRecord's contract.
+            errors++;
+            if (failed.length < FAILED_PREVIEW) failed.push(target.email);
+          }
+        }
+
+        for (const [status, ids] of idsByStatus) {
+          for (const idChunk of chunk(ids, 500)) {
+            const { error } = await supabaseAdmin
+              .from(entity.table)
+              .update({ email_status: status, email_verified_at: verifiedAt })
+              .in("id", idChunk);
+            if (error) throw error;
+          }
+        }
+
+        if (idsByStatus.size > 0 || page.items.length > 0) {
+          onProgress?.({ phase: "verifying", done, total, verified, errors });
+        }
+
+        next = true;
+        sorts = page.sorts ?? undefined;
       }
-    }
 
-    onProgress?.({ phase: "verifying", done, total, verified, errors });
+      if (pending.size === 0) break;
+    }
+  }
+
+  // 4. Anything still pending after the deadline timed out rather than
+  // erroring — count it the same way (left at `verifying`, reported as an
+  // error) since there's no verdict to write.
+  if (pending.size > 0) {
+    for (const target of pending.values()) {
+      errors++;
+      done++;
+      if (failed.length < FAILED_PREVIEW) failed.push(target.email);
+    }
   }
 
   onProgress?.({ phase: "done", done, total, verified, errors });

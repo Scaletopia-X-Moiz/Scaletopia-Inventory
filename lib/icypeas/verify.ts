@@ -387,6 +387,251 @@ export async function pollUntilTerminal(
 }
 
 // ---------------------------------------------------------------------------
+// Bulk submit
+// ---------------------------------------------------------------------------
+
+/** Max rows per POST /api/bulk-search call, per the docs (rate_limits page +
+ * https://api-doc.icypeas.com/find-emails/bulk-search/). */
+const BULK_MAX_ROWS_PER_CALL = 5000;
+
+/** /api/bulk-search is capped at 1 call/sec (rate_limits page) — when a run
+ * needs more than one chunk, space submits this far apart. Slightly over 1s
+ * for safety margin. */
+const BULK_SUBMIT_INTERVAL_MS = 1100;
+
+export interface BulkRow {
+  email: string;
+  /** Our tracking id, `${table}:${id}` (same convention as
+   * SubmitOptions.externalId). Passed as a parallel array
+   * (`custom.externalIds`), confirmed shape — see submitBulkEmailVerification
+   * doc comment. Icypeas echoes each row's externalId back per-item on read
+   * as `userData.externalId`, which is how results are correlated back to
+   * rows (not `order`/submit-index). */
+  externalId: string;
+}
+
+interface BulkSubmitAckResponse {
+  success?: boolean;
+  file?: string;
+  status?: string;
+  message?: string;
+  error?: string;
+  // TODO: confirm exact success-response field name against a live call —
+  // like /email-verification's ack, the bulk-search docs page renders its
+  // "Response" example in a hidden tab that didn't come through scraping.
+  // §3c of docs/reports/icypeas-api-research.md and the check-progress page
+  // both reference a bare `file` string field on the bulk-search ack, so
+  // that's what's read primarily; `data.file` is defended as a fallback.
+  data?: { file?: string };
+}
+
+function chunkRows<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/** Submit a batch of emails for verification via POST /api/bulk-search
+ * (`{ task: "email-verification", name, data: [[email], ...], custom:
+ * { externalIds: [...] } }`) — confirmed request shape, see
+ * https://api-doc.icypeas.com/find-emails/bulk-search/ "Email-Verification"
+ * and "Custom IDs" examples. `data` is an array of single-element rows (one
+ * email each); `custom.externalIds` is a PARALLEL array matching `data` by
+ * index, not a per-row embedded field — Icypeas echoes each one back on read
+ * as that item's `userData.externalId` (per the per-item webhook payload
+ * shape docs/reports/icypeas-api-research.md §3b already confirmed), which is
+ * how readBulkResults/mapBulkItem correlate results back to our rows.
+ *
+ * Chunks at BULK_MAX_ROWS_PER_CALL (5000, the documented max) and, when more
+ * than one chunk is needed, spaces submits ~1.1s apart to respect the
+ * 1-call/sec cap. Returns one file id per chunk submitted (almost always
+ * one). Throws on a missing key, network failure, or a non-success
+ * acknowledgement — same throw-means-nothing-submitted contract as
+ * submitEmailVerification. */
+export async function submitBulkEmailVerification(
+  rows: BulkRow[],
+  deps: VerifyDeps = {}
+): Promise<{ files: string[] }> {
+  const apiKey = apiKeyOrThrow(deps);
+  const fetchImpl = deps.fetchImpl ?? fetch;
+
+  const validRows = rows.filter((r) => r.email && r.email.trim());
+  if (validRows.length === 0) return { files: [] };
+
+  const chunks = chunkRows(validRows, BULK_MAX_ROWS_PER_CALL);
+  const files: string[] = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+    if (i > 0) {
+      await new Promise((resolve) => setTimeout(resolve, BULK_SUBMIT_INTERVAL_MS));
+    }
+
+    const rowChunk = chunks[i];
+    const body = {
+      task: "email-verification",
+      name: `Reverify ${new Date().toISOString()} (${i + 1}/${chunks.length})`,
+      data: rowChunk.map((r) => [r.email.trim()]),
+      custom: { externalIds: rowChunk.map((r) => r.externalId) },
+    };
+
+    const resp = await fetchImpl(`${API_BASE}/bulk-search`, {
+      method: "POST",
+      headers: {
+        Authorization: apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!resp.ok) {
+      throw new Error(`Icypeas bulk-search returned HTTP ${resp.status}`);
+    }
+
+    const data = (await resp.json()) as BulkSubmitAckResponse;
+    if (data.success === false || data.error) {
+      throw new Error(`Icypeas bulk-search: ${data.error ?? data.message ?? "submit failed"}`);
+    }
+
+    const file = data.file ?? data.data?.file;
+    if (!file) {
+      throw new Error("Icypeas bulk-search did not return a file id");
+    }
+    files.push(file);
+  }
+
+  return { files };
+}
+
+// ---------------------------------------------------------------------------
+// Bulk read (paged)
+// ---------------------------------------------------------------------------
+
+/** Default/max page size for POST /api/bulk-single-searchs/read in bulk
+ * mode — default 10, max 100, per
+ * https://api-doc.icypeas.com/fetch-results/search-item/. */
+const BULK_READ_MAX_LIMIT = 100;
+
+export interface ReadBulkOptions {
+  limit?: number;
+  /** Pagination flag from the docs: "true = next page | false = previous
+   * page". Omit on the first page. */
+  next?: boolean;
+  /** Opaque pagination state returned by the previous readBulkResults call
+   * (its `sorts`); pass straight through, paired with `next: true`, to
+   * advance. Omit on the first page.
+   * TODO: the docs describe `sorts` as "used for pagination... pass in
+   * subsequent requests" but don't show a live example of its shape or of
+   * the paired response envelope — confirmed field names (mode/file/limit/
+   * next/sorts) but not a full request/response round trip. Coded
+   * defensively: see readBulkResults' end-of-page fallback below. */
+  sorts?: unknown[];
+  deps?: VerifyDeps;
+}
+
+export interface ReadBulkPage {
+  items: RawItem[];
+  /** Pass back as `sorts` (with `next: true`) to fetch the next page; null
+   * once this page is treated as the last one for this sweep. */
+  sorts: unknown[] | null;
+  total: number | null;
+}
+
+/** Page through a bulk-search file's results via POST
+ * /api/bulk-single-searchs/read `{ mode: "bulk", file, limit, next, sorts }`
+ * — confirmed request shape (mode/file/limit) + pagination fields (next as a
+ * boolean flag, sorts as pagination state), see
+ * https://api-doc.icypeas.com/fetch-results/search-item/. Reuses the same
+ * envelope-unwrapping approach as fetchResult's unwrapItem for the item
+ * list, since the response envelope key wasn't captured verbatim (hidden
+ * tab, same gap noted throughout this module).
+ *
+ * End-of-data is determined defensively: a page with fewer items than
+ * requested (including an empty page) is treated as the last page for this
+ * sweep even if the response's `sorts` field is non-null, in case that field
+ * doesn't reliably signal completion on its own.
+ * TODO: confirm live against a real multi-page bulk file. */
+export async function readBulkResults(
+  file: string,
+  { limit = BULK_READ_MAX_LIMIT, next, sorts, deps = {} }: ReadBulkOptions = {}
+): Promise<ReadBulkPage> {
+  const apiKey = apiKeyOrThrow(deps);
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const effectiveLimit = Math.min(limit, BULK_READ_MAX_LIMIT);
+
+  const body: Record<string, unknown> = { mode: "bulk", file, limit: effectiveLimit };
+  if (next !== undefined) body.next = next;
+  if (sorts !== undefined) body.sorts = sorts;
+
+  const resp = await fetchImpl(`${API_BASE}/bulk-single-searchs/read`, {
+    method: "POST",
+    headers: {
+      Authorization: apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Icypeas bulk-single-searchs/read (bulk mode) returned HTTP ${resp.status}`);
+  }
+
+  const data = (await resp.json()) as ReadResponse & { sorts?: unknown[]; total?: number };
+
+  const items: RawItem[] = Array.isArray(data.items)
+    ? data.items
+    : Array.isArray(data.data)
+      ? (data.data as RawItem[])
+      : [];
+
+  const hasMore = items.length > 0 && items.length >= effectiveLimit;
+  const returnedSorts = Array.isArray(data.sorts) ? data.sorts : null;
+
+  return {
+    items,
+    sorts: hasMore ? returnedSorts : null,
+    total: typeof data.total === "number" ? data.total : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Bulk mapping
+// ---------------------------------------------------------------------------
+
+export interface MappedBulkItem {
+  /** userData.externalId echoed back by Icypeas — the primary correlation
+   * key back to our row (see BulkRow doc comment). Null if Icypeas didn't
+   * echo one back for this item (shouldn't happen given we always submit
+   * one, but defended anyway). */
+  externalId: string | null;
+  /** Submit-order index, kept as a fallback correlation key in case
+   * externalId echoing turns out to be unreliable live — not used by
+   * runReverify today, but available to callers. */
+  order: number | null;
+  /** One of EMAIL_STATUSES, or null if non-terminal or an error status. */
+  status: string | null;
+  terminal: boolean;
+  certainty: string | null;
+}
+
+/** Map a bulk-read RawItem to a per-row verdict, reusing mapCertainty (same
+ * status/certainty vocabulary and terminal/error handling as the single-item
+ * path) plus the userData.externalId/order correlation keys. Does not throw
+ * on ERROR_STATUSES the way mapCertaintyOrThrow does — bulk draining needs to
+ * keep going for the other rows in the file, so callers (runReverify) branch
+ * on `status === null && terminal === true` to treat a row as an
+ * error/leave-as-verifying case instead of aborting the whole run. */
+export function mapBulkItem(item: RawItem): MappedBulkItem {
+  const mapped = mapCertainty(item);
+  return {
+    externalId: item.userData?.externalId ?? null,
+    order: typeof item.order === "number" ? item.order : null,
+    status: mapped.status,
+    terminal: mapped.terminal,
+    certainty: mapped.certainty,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Webhook signature verification
 // ---------------------------------------------------------------------------
 
