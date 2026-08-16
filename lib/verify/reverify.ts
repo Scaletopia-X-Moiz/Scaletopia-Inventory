@@ -1,6 +1,12 @@
 import "server-only";
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import { verifyEmail, firstEmail, type VerifyDeps } from "@/lib/millionverifier/verify";
+import {
+  submitEmailVerification,
+  pollUntilTerminal,
+  firstEmail,
+  VERIFYING_STATUS,
+  type VerifyDeps,
+} from "@/lib/icypeas/verify";
 import {
   getAllFilteredPeople,
   invalidatePeopleListCache,
@@ -26,35 +32,67 @@ function invalidateListCache(table: VerifyTable): void {
   else invalidateCompaniesListCache();
 }
 
-/** How many real-time verifications to run at once. MillionVerifier's real-time
- * endpoint is a live SMTP probe per call, so this is deliberately far lower
- * than the Clay push concurrency — we're being polite to their API and the
- * destination mail servers, not saturating a webhook. */
-export const VERIFY_CONCURRENCY = 5;
+/** Builds the URL Icypeas should POST results to. Reuses NEXT_PUBLIC_SITE_URL
+ * (already set for invite links — see .env.example) rather than inventing a
+ * separate var, per the task brief's "reuse an existing site-URL env var if
+ * one exists". Returns null when unset, which is the expected local-dev
+ * state: Icypeas can't call back to a machine with no public URL, so
+ * reverifyRecord/runReverify fall back to polling instead of registering a
+ * webhook. ICYPEAS_WEBHOOK_URL is an optional override for an environment
+ * that wants a webhook path different from the app's own public URL (e.g. a
+ * separate tunnel/staging host) — checked first so it always wins when set. */
+function getWebhookUrl(): string | null {
+  const override = process.env.ICYPEAS_WEBHOOK_URL;
+  if (override) return override.replace(/\/$/, "") + "/api/internal/icypeas-webhook";
 
-/** Cap the failed-email preview returned to the UI (mirrors Clay's preview). */
-const FAILED_PREVIEW = 20;
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL;
+  if (!siteUrl) return null;
+  return siteUrl.replace(/\/$/, "") + "/api/internal/icypeas-webhook";
+}
 
 // ---------------------------------------------------------------------------
 // Single record
 // ---------------------------------------------------------------------------
 
 export type ReverifyOutcome =
+  // A webhook is configured: the job was submitted and the row was marked
+  // `verifying`, but no verdict exists yet — the webhook receiver
+  // (app/api/internal/icypeas-webhook) will write the real status when
+  // Icypeas calls back. The route/UI should show "verifying…" rather than a
+  // final result.
+  | { ok: true; pending: true; email: string; status: string }
+  // No webhook configured (local dev/testing): pollUntilTerminal already
+  // resolved and wrote the final status before returning.
   | {
       ok: true;
+      pending: false;
       email: string;
       status: string;
-      quality: string | null;
+      certainty: string | null;
       credits: number | null;
       verifiedAt: string;
     }
   | { ok: false; code: "not_found" | "no_email" | "verify_failed"; message: string };
 
-/** Reverify one record's email and persist the fresh status + verified-at
- * timestamp. Returns a tagged outcome so the route can map cleanly onto HTTP
- * codes without try/catch. `last_updated` is intentionally left alone —
- * reverifying is not a data edit, and bumping it would reshuffle the
- * last-updated-sorted lists every time someone clicks verify. */
+/** Reverify one record's email. Icypeas is asynchronous (submit -> webhook or
+ * poll, see lib/icypeas/verify.ts), so unlike the old MillionVerifier flow
+ * this can no longer always resolve a verdict in one round-trip:
+ *
+ * 1. Mark the row `email_status = 'verifying'` immediately, so the UI has an
+ *    honest in-flight state instead of showing the stale prior status while
+ *    we wait.
+ * 2. Submit the job with `externalId = "<table>:<id>"` (the webhook receiver
+ *    parses this to find the row) and, if a public webhook URL is
+ *    configured, `webhookUrl` too.
+ * 3. If a webhook URL was registered, return a `pending` outcome — the
+ *    webhook receiver will write the real result later.
+ * 4. If no webhook URL is configured (local dev has no public URL for
+ *    Icypeas to call back to), fall back to `pollUntilTerminal` and write
+ *    the resolved result inline, same as before.
+ *
+ * `last_updated` is intentionally left alone — reverifying is not a data
+ * edit, and bumping it would reshuffle the last-updated-sorted lists every
+ * time someone clicks verify. */
 export async function reverifyRecord(
   table: VerifyTable,
   id: string,
@@ -74,10 +112,44 @@ export async function reverifyRecord(
     return { ok: false, code: "no_email", message: "This record has no email to verify" };
   }
 
+  const { error: markError } = await supabaseAdmin
+    .from(table)
+    .update({ email_status: VERIFYING_STATUS })
+    .eq("id", id);
+  if (markError) throw markError;
+  invalidateListCache(table);
+
+  const externalId = `${table}:${id}`;
+  const webhookUrl = getWebhookUrl();
+
+  let submission;
+  try {
+    submission = await submitEmailVerification(email, {
+      externalId,
+      webhookUrl: webhookUrl ?? undefined,
+      deps,
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      code: "verify_failed",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  if (webhookUrl) {
+    return { ok: true, pending: true, email, status: VERIFYING_STATUS };
+  }
+
+  // No webhook configured — poll inline (local dev / safety net path).
   let result;
   try {
-    result = await verifyEmail(email, deps);
+    result = await pollUntilTerminal(submission.id, { deps, email });
   } catch (err) {
+    // The row is left at `verifying` here — there's no prior status to
+    // revert to that would be more correct, and a stuck "verifying" is
+    // visibly a "something's wrong, reverify again" signal rather than a
+    // silently-wrong verdict. Noted as a known tradeoff in the report.
     return {
       ok: false,
       code: "verify_failed",
@@ -96,9 +168,10 @@ export async function reverifyRecord(
 
   return {
     ok: true,
+    pending: false,
     email: result.email,
     status: result.status,
-    quality: result.quality,
+    certainty: result.certainty,
     credits: result.credits,
     verifiedAt,
   };
@@ -107,6 +180,29 @@ export async function reverifyRecord(
 // ---------------------------------------------------------------------------
 // Bulk (current filtered view)
 // ---------------------------------------------------------------------------
+
+/** Submit concurrency for bulk reverify. The single-search endpoint allows
+ * 10 calls/sec (research doc §6), so submitting isn't the bottleneck —
+ * `pollUntilTerminal`'s reads are: the `bulk-single-searchs/read` route is
+ * capped at 30 calls/min. Each concurrent poller reads roughly
+ * (60000 / BULK_POLL_INTERVAL_MS) times/min, so
+ * concurrency * (60000 / interval) must stay comfortably under 30. With
+ * interval=5000ms that's concurrency * 12 reads/min — 2 pollers ≈ 24/min,
+ * safely under the cap.
+ *
+ * This is the documented fallback from the task brief: a full webhook-driven
+ * bulk rework (persisted per-job submission tracking, SSE progress fed by
+ * DB writes instead of a single request's control flow) is a materially
+ * larger change than "submit + poll with a smaller number and a bigger
+ * gap" — see the tradeoff called out in the final report. Every row is
+ * still submitted through the same submit+poll path as the single-record
+ * fallback, just with lower concurrency and a wider poll interval to respect
+ * the shared rate limit. */
+const BULK_VERIFY_CONCURRENCY = 2;
+const BULK_POLL_INTERVAL_MS = 5000;
+
+/** Cap the failed-email preview returned to the UI (mirrors Clay's preview). */
+const FAILED_PREVIEW = 20;
 
 export interface ReverifyProgress {
   phase: "resolving" | "verifying" | "done";
@@ -118,13 +214,17 @@ export interface ReverifyProgress {
 
 export interface ReverifyResult {
   total_matched: number;
-  /** Rows that came back with a fresh status (any of ok/catch_all/…). */
+  /** Rows that came back with a fresh status (any of EMAIL_STATUSES). */
   verified: number;
-  /** Rows whose verification threw (network/credits) — status left unchanged. */
+  /** Rows whose verification threw (network/credits/timeout) — status left
+   * as `verifying` rather than reverted (see reverifyRecord's comment on the
+   * same tradeoff). */
   errors: number;
-  /** Count of resulting statuses across the run, e.g. { ok: 40, invalid: 3 }. */
+  /** Count of resulting statuses across the run, e.g. { ultra_sure: 40,
+   * undeliverable: 3 }. */
   counts: Record<string, number>;
-  /** Credits remaining after the run (last value the API reported), or null. */
+  /** Icypeas never returns remaining credits — always null. Kept on the
+   * shape so the SSE event/UI contract doesn't need to change. */
   creditsRemaining: number | null;
   /** Preview of emails that failed to verify, capped at FAILED_PREVIEW. */
   failed: string[];
@@ -184,6 +284,40 @@ interface ReverifyEntity<TFilters> {
   resolveTargets: (filters: TFilters) => Promise<EmailTarget[]>;
 }
 
+/** Verify one target end-to-end: mark `verifying`, submit, poll to a
+ * terminal result, write it. Used by the bulk loop below — see the module
+ * comment on BULK_VERIFY_CONCURRENCY for why bulk polls instead of using the
+ * webhook (a per-row webhook write happens out-of-band from this request
+ * regardless of whether bulk *also* registers one, so registering a webhook
+ * here would just mean racing the inline poll against the webhook receiver
+ * for the same write — polling only, deliberately, keeps bulk's result
+ * accounting inside this one request/SSE stream). */
+async function submitAndPoll(
+  table: VerifyTable,
+  target: EmailTarget,
+  deps: VerifyDeps
+): Promise<{ status: string; certainty: string | null }> {
+  await supabaseAdmin
+    .from(table)
+    .update({ email_status: VERIFYING_STATUS })
+    .eq("id", target.id);
+
+  const submission = await submitEmailVerification(target.email, { deps });
+  const result = await pollUntilTerminal(submission.id, {
+    deps,
+    email: target.email,
+    intervalMs: BULK_POLL_INTERVAL_MS,
+  });
+
+  const { error } = await supabaseAdmin
+    .from(table)
+    .update({ email_status: result.status, email_verified_at: new Date().toISOString() })
+    .eq("id", target.id);
+  if (error) throw error;
+
+  return { status: result.status, certainty: result.certainty };
+}
+
 async function runReverify<TFilters>(
   entity: ReverifyEntity<TFilters>,
   filters: TFilters,
@@ -195,7 +329,7 @@ async function runReverify<TFilters>(
   let verified = 0;
   let errors = 0;
   let done = 0;
-  let creditsRemaining: number | null = null;
+  const creditsRemaining: number | null = null; // Icypeas never reports this.
 
   onProgress?.({ phase: "resolving", done: 0, total: 0, verified: 0, errors: 0 });
 
@@ -209,17 +343,9 @@ async function runReverify<TFilters>(
 
   onProgress?.({ phase: "verifying", done: 0, total, verified: 0, errors: 0 });
 
-  for (const group of chunk(targets, VERIFY_CONCURRENCY)) {
+  for (const group of chunk(targets, BULK_VERIFY_CONCURRENCY)) {
     const results = await Promise.allSettled(
-      group.map(async (target) => {
-        const result = await verifyEmail(target.email, deps);
-        const { error } = await supabaseAdmin
-          .from(entity.table)
-          .update({ email_status: result.status, email_verified_at: new Date().toISOString() })
-          .eq("id", target.id);
-        if (error) throw error;
-        return { target, result };
-      })
+      group.map((target) => submitAndPoll(entity.table, target, deps))
     );
 
     for (let i = 0; i < results.length; i++) {
@@ -227,9 +353,8 @@ async function runReverify<TFilters>(
       const settled = results[i];
       if (settled.status === "fulfilled") {
         verified++;
-        const { status, credits } = settled.value.result;
+        const { status } = settled.value;
         counts[status] = (counts[status] ?? 0) + 1;
-        if (credits != null) creditsRemaining = credits;
       } else {
         errors++;
         if (failed.length < FAILED_PREVIEW) failed.push(group[i].email);

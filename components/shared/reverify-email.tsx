@@ -31,10 +31,23 @@ export function ReverifyEmail({
     try {
       const response = await fetch(endpoint, { method: "POST" });
       const data = await response.json().catch(() => null);
+      // 202 is a legitimate outcome, not a failure — Icypeas verification is
+      // async, and `!response.ok` only means an actual error.
       if (!response.ok) {
         throw new Error(data?.error ?? "Reverify failed");
       }
       setStatus(data.emailStatus);
+
+      // Icypeas is async (submit -> webhook, see lib/verify/reverify.ts): in
+      // production this call returns immediately with `pending: true` and no
+      // verdict yet — the row shows "verifying" until the webhook resolves it
+      // (a later page load/refresh picks up the final status). Local dev with
+      // no public webhook URL configured resolves inline as before.
+      if (data.pending) {
+        showToast("Email verification submitted — check back shortly.", "info");
+        return;
+      }
+
       setVerifiedAt(data.emailVerifiedAt ?? new Date().toISOString());
       const creditNote =
         typeof data.credits === "number"

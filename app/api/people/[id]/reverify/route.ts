@@ -36,15 +36,27 @@ export async function POST(
 
   await logActivity(
     "verify.reverify_one",
-    { target: "people", kind: "email", id },
+    { target: "people", kind: "email", id, pending: outcome.pending },
     user
   );
+
+  // No webhook configured (local dev) resolves inline and returns the final
+  // verdict; with a webhook configured this returns immediately with
+  // `pending: true` — the webhook receiver (app/api/internal/icypeas-webhook)
+  // writes the real result when Icypeas calls back.
+  if (outcome.pending) {
+    return Response.json(
+      { email: outcome.email, emailStatus: outcome.status, pending: true },
+      { status: 202 }
+    );
+  }
 
   return Response.json({
     email: outcome.email,
     emailStatus: outcome.status,
-    quality: outcome.quality,
+    certainty: outcome.certainty,
     credits: outcome.credits,
     emailVerifiedAt: outcome.verifiedAt,
+    pending: false,
   });
 }

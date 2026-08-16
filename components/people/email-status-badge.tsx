@@ -2,11 +2,25 @@ import { Tooltip } from "radix-ui";
 import { cn } from "@/lib/utils";
 
 const STATUS_LABEL: Record<string, string> = {
+  // Legacy MillionVerifier vocabulary — kept so historical rows (never
+  // migrated, per the Icypeas cutover decision) still render a real label
+  // instead of falling back to the raw db value.
   ok: "OK",
   catch_all: "Catch-all",
   invalid: "Invalid",
   unknown: "Unknown",
   disposable: "Disposable",
+  // Icypeas confidence-scale vocabulary (see lib/icypeas/verify.ts
+  // EMAIL_STATUSES). No catch_all/disposable equivalent exists — Icypeas
+  // can't produce either (research doc §5c).
+  ultra_sure: "Ultra sure",
+  very_sure: "Very sure",
+  probable: "Probable",
+  undeliverable: "Undeliverable",
+  not_found: "Not found",
+  // Transient marker written the moment a verification job is submitted,
+  // before webhook/poll resolves it.
+  verifying: "Verifying…",
 };
 
 function formatVerifiedAt(value: string | null): string {
@@ -49,6 +63,13 @@ export function EmailStatusBadge({
               status === "invalid" && "bg-danger/15 text-danger",
               status === "disposable" && "bg-danger/15 text-danger",
               status === "unknown" && "bg-rule/50 text-ink-soft",
+              // Icypeas vocabulary.
+              (status === "ultra_sure" || status === "very_sure") &&
+                "bg-success/15 text-success",
+              status === "probable" && "bg-warning/15 text-warning",
+              status === "undeliverable" && "bg-danger/15 text-danger",
+              status === "not_found" && "bg-rule/50 text-ink-soft",
+              status === "verifying" && "animate-pulse bg-rule/50 text-ink-mute",
               !status && "bg-rule/50 text-ink-mute"
             )}
           >
