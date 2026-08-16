@@ -141,6 +141,7 @@ describe("upsertLeadsBulk", () => {
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe(`${CREDENTIALS.workspaceId}/api/leads/create-or-update/multiple`);
     expect(JSON.parse(init.body)).toEqual({
+      existing_lead_behavior: "patch",
       leads: [
         {
           email: "ada@example.com",
@@ -148,12 +149,24 @@ describe("upsertLeadsBulk", () => {
           last_name: "Lovelace",
           company: "Acme",
           title: "Engineer",
-          existing_lead_behavior: "patch",
           custom_variables: [{ name: "industry", value: "IoT" }],
         },
       ],
     });
     expect(init.headers.Authorization).toBe("Bearer test-api-key");
+  });
+
+  it("sends existing_lead_behavior at the top level (not per-lead) when a lead requests a full-replace put", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, { data: [{ id: 1, email: "ada@example.com" }] })
+    );
+
+    await upsertLeadsBulk(CREDENTIALS, [{ ...LEAD, existingLeadBehavior: "put" }], { fetchImpl });
+
+    const [, init] = fetchImpl.mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.existing_lead_behavior).toBe("put");
+    expect(body.leads[0]).not.toHaveProperty("existing_lead_behavior");
   });
 
   it("throws a typed EmailBisonApiError on a non-transient failure", async () => {

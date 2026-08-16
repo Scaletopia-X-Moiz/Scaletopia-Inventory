@@ -229,7 +229,13 @@ function assertSuccessBody(json: unknown, action: string): void {
  * it's our own unverified guess at how to wire up the "Existing Lead
  * Behavior" (PATCH-vs-PUT) control Clay's UI surfaces, since the research
  * doc never pins down a body-field name for it. CONFIRMED WORKING via a live
- * patch-vs-put test, so left as-is. */
+ * patch-vs-put test — but it is a TOP-LEVEL property of the
+ * `/api/leads/create-or-update/multiple` request body (a sibling of
+ * `leads`), per the OpenAPI spec, not a per-lead field. `upsertLeadsBulk`
+ * sends it once, at the top level, for the whole batch. EmailBison defaults
+ * `existing_lead_behavior` to "put" (full replace — wipes fields/custom
+ * variables not included in the push) whenever it's absent, so it must
+ * never be omitted from the top-level body. */
 function toWireLead(lead: EmailBisonLeadPayload): Record<string, unknown> {
   const wire: Record<string, unknown> = {
     email: lead.email,
@@ -237,14 +243,16 @@ function toWireLead(lead: EmailBisonLeadPayload): Record<string, unknown> {
     last_name: lead.lastName,
     company: lead.companyName,
     title: lead.title,
-    existing_lead_behavior: lead.existingLeadBehavior,
   };
   // EmailBison treats an explicit `custom_variables: []` as "clear all
   // existing custom variables" on a patch (confirmed live: an empty-array
   // patch wiped previously-set qa_* vars), so a push with no custom
   // variables selected must omit the key entirely rather than send `[]` —
   // that's the only way "nothing to say about custom variables" and
-  // "explicitly clear them" stay distinguishable on the wire.
+  // "explicitly clear them" stay distinguishable on the wire. Under a
+  // proper top-level "patch" an omitted custom_variables key is kept as-is;
+  // omitting it here is also defense-in-depth against the "put" default if
+  // the top-level behavior field were ever missing.
   if (lead.customVariables.length > 0) {
     wire.custom_variables = lead.customVariables.map(({ name, value }) => ({ name, value }));
   }
@@ -275,7 +283,15 @@ export async function upsertLeadsBulk(
   deps: EmailBisonClientDeps = {}
 ): Promise<EmailBisonLeadResult[]> {
   const fetchImpl = deps.fetchImpl ?? fetch;
+  // `existing_lead_behavior` must be sent at the TOP LEVEL of the request
+  // body (a sibling of `leads`), per the `/multiple` endpoint's OpenAPI
+  // spec — it is not a per-lead field. When absent, EmailBison defaults it
+  // to "put" (full replace, wiping fields/custom variables not included in
+  // this push), which was the root cause of #144. All leads in a single
+  // push share the same behavior, so derive it from the first lead.
+  const existingLeadBehavior = leads[0]?.existingLeadBehavior ?? "patch";
   const { status, json } = await requestWithRetry(fetchImpl, credentials, "/api/leads/create-or-update/multiple", {
+    existing_lead_behavior: existingLeadBehavior,
     leads: leads.map(toWireLead),
   });
   assertOk(status, json, "lead upsert");
