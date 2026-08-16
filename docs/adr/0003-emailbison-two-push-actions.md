@@ -1,5 +1,11 @@
 # EmailBison push is two independent actions, not one combined button
 
+> **Superseded by [0005-company-native-emailbison-push.md](0005-company-native-emailbison-push.md)**
+> for the Companies-table resolution target: "Companies resolves to the linked
+> People" (below) is no longer true — a Companies-table EmailBison push now
+> pushes each Company as its own lead. The two-independent-actions decision
+> itself (this ADR's actual subject) is unaffected.
+
 ## Context
 
 GHL push is a single button: "Push to GHL" creates-or-updates the contact and
@@ -17,8 +23,9 @@ later once a sequence is ready.
 ## Decision
 
 EmailBison push is **two independent actions**, each its own button, placed on
-both the Companies and People tables (Companies resolves to the linked People,
-per the `Companies-table push` glossary entry):
+both the Companies and People tables (Companies originally resolved to the
+linked People, per the `Companies-table push` glossary entry — see the
+superseded-by note above, this is now company-native instead):
 
 - **"Add to EmailBison"** — create-or-update the lead (`POST
   /api/leads/create-or-update/multiple`, upsert by email). No campaign

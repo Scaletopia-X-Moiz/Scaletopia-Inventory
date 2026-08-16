@@ -23,6 +23,13 @@ export interface ResolveDefaultGhlFieldMappingArgs {
 export interface ResolveDefaultEmailBisonFieldMappingArgs {
   platform: "emailbison";
   records: PushRecordCompanyNameFields[];
+  /** Which table triggered this push (issue #55, company-native since
+   * docs/adr/0005-company-native-emailbison-push.md). A Company has no
+   * person name/title, so firstName/lastName/title default to "skip" rather
+   * than their own record column when `entity === "companies"`. Omitted (the
+   * default) reproduces today's People-table behavior — every existing
+   * caller that doesn't pass this keeps its exact prior defaults. */
+  entity?: "people" | "companies";
 }
 
 export interface ResolveDefaultGhlFieldMappingResult {
@@ -75,15 +82,20 @@ export function resolveDefaultFieldMapping(
     // its own record column, i.e. its own key — companyName is the one
     // exception, defaulting to the cleaned "brandName" column when any record
     // in the pushed set has one, else the raw "companyName" column, per
-    // resolveDefaultCompanyNameSource above.
+    // resolveDefaultCompanyNameSource above. For a company-native Companies
+    // push (docs/adr/0005-company-native-emailbison-push.md), firstName/
+    // lastName/title have no company-side source column — default those three
+    // to "skip" instead of pointing at a field the pushed record never
+    // populates.
+    const isCompaniesEntity = args.entity === "companies";
     return {
       platform: "emailbison",
       standardFields: {
         companyName: companyName === "brand_name" ? "brandName" : "companyName",
-        firstName: "firstName",
-        lastName: "lastName",
+        firstName: isCompaniesEntity ? "skip" : "firstName",
+        lastName: isCompaniesEntity ? "skip" : "lastName",
         email: "email",
-        title: "title",
+        title: isCompaniesEntity ? "skip" : "title",
       },
     };
   }

@@ -270,11 +270,11 @@ describe("push-jobs data access", () => {
     const personA = await insertPerson("Person A");
     const personB = await insertPerson("Person B");
 
-    await recordJobPeople(job.id, [
+    await recordJobPeople(job.id, "people", [
       { personId: personA, outcome: "succeeded" },
       { personId: personB, outcome: "failed" },
     ]);
-    await recordJobPeople(job.id, [{ personId: personB, outcome: "succeeded" }]);
+    await recordJobPeople(job.id, "people", [{ personId: personB, outcome: "succeeded" }]);
 
     const { data, error } = await supabaseAdmin
       .from("push_job_records")
@@ -292,6 +292,6 @@ describe("push-jobs data access", () => {
     const clientId = await insertClient(unique("Client"));
     const job = await createPushJob({ clientId, platform: "ghl", entity: "people", filters: {} });
 
-    await expect(recordJobPeople(job.id, [])).resolves.toBeUndefined();
+    await expect(recordJobPeople(job.id, "people", [])).resolves.toBeUndefined();
   });
 });

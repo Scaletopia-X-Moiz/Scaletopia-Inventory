@@ -95,7 +95,7 @@ describe("pushJobId filter", () => {
     await insertPerson("untagged-d", { company_id: companyId });
 
     const job = await createPushJob({ clientId, platform: "ghl", entity: "people", filters: {} });
-    await recordJobPeople(job.id, [
+    await recordJobPeople(job.id, "people", [
       { personId: succeededA, outcome: "succeeded" },
       { personId: succeededB, outcome: "succeeded" },
       { personId: failedC, outcome: "failed" },
@@ -124,7 +124,7 @@ describe("pushJobId filter", () => {
     await insertPerson("c-other", { company_id: otherCompany });
 
     const job = await createPushJob({ clientId, platform: "ghl", entity: "companies", filters: {} });
-    await recordJobPeople(job.id, [
+    await recordJobPeople(job.id, "people", [
       { personId: p1, outcome: "succeeded" },
       { personId: p2, outcome: "succeeded" },
       { personId: p3, outcome: "succeeded" },
@@ -141,7 +141,7 @@ describe("pushJobId filter", () => {
     const firstB = await insertPerson("stable-b");
 
     const firstJob = await createPushJob({ clientId, platform: "ghl", entity: "people", filters: {} });
-    await recordJobPeople(firstJob.id, [
+    await recordJobPeople(firstJob.id, "people", [
       { personId: firstA, outcome: "succeeded" },
       { personId: firstB, outcome: "succeeded" },
     ]);
@@ -149,7 +149,7 @@ describe("pushJobId filter", () => {
     // A second run to the SAME client tags a different person.
     const laterC = await insertPerson("stable-c");
     const secondJob = await createPushJob({ clientId, platform: "ghl", entity: "people", filters: {} });
-    await recordJobPeople(secondJob.id, [{ personId: laterC, outcome: "succeeded" }]);
+    await recordJobPeople(secondJob.id, "people", [{ personId: laterC, outcome: "succeeded" }]);
 
     const first = await getPeople({ pushJobId: firstJob.id }, 1, 100);
     expect(new Set(first.rows.map((r) => r.id))).toEqual(new Set([firstA, firstB]));
@@ -161,7 +161,7 @@ describe("pushJobId filter", () => {
     const drop = await insertPerson("intersect-drop", { job_title: "Software Engineer" });
 
     const job = await createPushJob({ clientId, platform: "ghl", entity: "people", filters: {} });
-    await recordJobPeople(job.id, [
+    await recordJobPeople(job.id, "people", [
       { personId: keep, outcome: "succeeded" },
       { personId: drop, outcome: "succeeded" },
     ]);

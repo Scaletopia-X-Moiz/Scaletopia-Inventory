@@ -289,8 +289,20 @@ async function processJobTick(job: PushJob, workerDeadline: number): Promise<boo
   const failures = [...job.failures, ...tick.failures].slice(-MAX_FAILURES_KEPT);
 
   // Per-record tagging — safe to re-write across ticks thanks to the
-  // (push_job_id, person_id) upsert key.
-  await recordJobPeople(job.id, [
+  // (push_job_id, person_id)/(push_job_id, company_id) upsert keys.
+  //
+  // `job.entity` alone ("people"/"companies", the trigger surface) is NOT the
+  // right signal here: a GHL push triggered from the Companies table still
+  // resolves internally to linked People (CONTEXT.md's "Companies-table push"
+  // glossary entry, unaffected by docs/adr/0005-company-native-emailbison-push.md)
+  // — its tick.succeededPersonIds/failedPersonIds are real person ids even
+  // though job.entity === "companies". Only a company-native EmailBison push
+  // (job.platform === "emailbison_companies", or "emailbison_campaign" with
+  // job.entity === "companies") actually returns company ids in those arrays.
+  const tickIdsAreCompanyIds =
+    job.platform === "emailbison_companies" ||
+    (job.platform === "emailbison_campaign" && job.entity === "companies");
+  await recordJobPeople(job.id, tickIdsAreCompanyIds ? "companies" : "people", [
     ...tick.succeededPersonIds.map((personId) => ({ personId, outcome: "succeeded" as const })),
     ...tick.failedPersonIds.map((personId) => ({ personId, outcome: "failed" as const })),
   ]);

@@ -68,10 +68,21 @@ EmailBison" first for anyone missing a `platform_pushes` row, so it never requir
 other action to have been run manually first.
 
 ### Companies-table push
-Triggering any push action (GHL or EmailBison) from the **Companies** table is not a
-distinct code path — it resolves to running the same People-table push action against
-every Person linked to the selected/filtered Company rows. There is no such thing as a
-"company-level lead"; EmailBison and GHL both operate on People.
+Triggering a **GHL** push action from the Companies table is not a distinct code
+path — it resolves to running the same People-table push action against every
+Person linked to the selected/filtered Company rows; there is no "company-level
+GHL contact".
+
+**EmailBison** is different since docs/adr/0005-company-native-emailbison-push.md
+(superseding an earlier "resolves to linked People" decision): a Companies-table
+EmailBison push (either "Add to EmailBison" or "Add to Campaign") pushes each
+matched **Company** as its own EmailBison lead — `company` = the company's own
+brand/company name, `email` = the company's own `companies.email` — with its own
+dedup (`platform_pushes.company_id`) and `companies.pushed_to_emailbison` flag,
+mirroring exactly how a Person is pushed. A Company with no email of its own is
+skipped, the same way an emailless Person is skipped. This is independent of
+whether the company's linked People have been pushed via the People-table
+EmailBison push.
 
 ### Empty (enrichment value)
 For filtering purposes, an enrichment value counts as empty when it is `null`,

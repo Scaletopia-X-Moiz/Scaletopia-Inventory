@@ -208,7 +208,7 @@ describe("push-worker dispatch + finish", () => {
     expect(typeof deps.deadline).toBe("number");
     expect(filters).toMatchObject({ niche: { include: ["widgets"] } });
 
-    expect(recordJobPeople).toHaveBeenCalledWith("job-1", [
+    expect(recordJobPeople).toHaveBeenCalledWith("job-1", "people", [
       { personId: "p1", outcome: "succeeded" },
       { personId: "p2", outcome: "succeeded" },
     ]);

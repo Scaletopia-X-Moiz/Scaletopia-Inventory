@@ -1,11 +1,8 @@
 import "server-only";
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import {
-  getPeopleForEmailBison,
-  getPeopleForEmailBisonByCompanyFilters,
-  type EmailBisonPushCandidate,
-} from "@/lib/data/people";
+import { getPeopleForEmailBison, type EmailBisonPushCandidate } from "@/lib/data/people";
 import type { PersonListFilters } from "@/lib/data/people";
+import { getCompaniesForEmailBison } from "@/lib/data/companies";
 import type { CompanyListFilters } from "@/lib/data/companies";
 import {
   upsertLeadsBulk,
@@ -59,10 +56,16 @@ export interface EmailBisonPushResult {
   /** Person ids that were successfully pushed this call — used by the
    * background worker (issue #120) to tag push_job_records. Reflects only
    * this call's candidates (see `offset`/`deadline` on RunEmailBisonPushDeps),
-   * not necessarily the whole job. */
+   * not necessarily the whole job. NOT renamed for the companies path
+   * (docs/adr/0005-company-native-emailbison-push.md): on a company-native
+   * push (runCompaniesAddToEmailBison/runCompaniesAddToCampaign) this field
+   * holds COMPANY ids, not person ids — kept as-is to avoid rippling the
+   * rename through the worker and every result-type consumer for no
+   * functional gain. */
   succeededPersonIds: string[];
   /** Person ids whose push failed this call — same per-call scope as
-   * succeededPersonIds. */
+   * succeededPersonIds (and the same "holds company ids on the companies
+   * path" caveat). */
   failedPersonIds: string[];
   /** Index into the deterministic candidate list (entity.loadRecords(filters))
    * to resume from on the next call — equal to total_matched once `done`. */
@@ -230,15 +233,25 @@ async function pushChunk(
 }
 
 /** Writes/upserts a platform_pushes row per successful upsert, keyed on
- * (person_id, client_id, platform) — a prior push row is overwritten with the
- * latest lead id rather than causing a conflict — then flips the person's
- * pushed_to_emailbison flag, same two-write pattern as lib/ghl/push-to-ghl.ts's
- * pushOne. A write failure downgrades that candidate from pushed to failed
- * without touching the others. */
+ * (idColumn, client_id, platform) — a prior push row is overwritten with the
+ * latest lead id rather than causing a conflict — then flips the entity's
+ * (people or companies) pushed_to_emailbison flag, same two-write pattern as
+ * lib/ghl/push-to-ghl.ts's pushOne. A write failure downgrades that candidate
+ * from pushed to failed without touching the others.
+ *
+ * `idColumn`/`targetTable` are what let this one function serve both entities
+ * (docs/adr/0005-company-native-emailbison-push.md): `idColumn` picks which
+ * platform_pushes FK column the candidate's id is written to
+ * (person_id/company_id), and `targetTable` picks which table's
+ * pushed_to_emailbison flag is flipped (people/companies) — both tables carry
+ * the identical pushed_to_emailbison/_at column pair, so the update shape
+ * itself needs no per-entity branching, just the table name. */
 async function writePushRows(
   outcomes: PushOutcome[],
   client: ClientRow,
-  actor: Pick<SessionUser, "id" | "email">
+  actor: Pick<SessionUser, "id" | "email">,
+  idColumn: "person_id" | "company_id",
+  targetTable: "people" | "companies"
 ): Promise<{ written: PushOutcome[]; failed: FailedRecord[]; createdIds: string[]; updatedIds: string[] }> {
   if (outcomes.length === 0) return { written: [], failed: [], createdIds: [], updatedIds: [] };
 
@@ -246,26 +259,28 @@ async function writePushRows(
   // returns {id, email} and can't tell us whether a lead was new or existing
   // (api-research.md leaves the response shape unconfirmed), so we classify
   // DB-side and uniformly across every push path — a record is "updated" if a
-  // platform_pushes row for (person_id, client_id, platform) already exists
+  // platform_pushes row for (idColumn, client_id, platform) already exists
   // BEFORE this batch's upsert writes it, else "created". Snapshot that set now,
   // ahead of the writes below.
   const { data: existingRows } = await supabaseAdmin
     .from("platform_pushes")
-    .select("person_id")
+    .select(idColumn)
     .eq("client_id", client.id)
     .eq("platform", PLATFORM)
     .in(
-      "person_id",
+      idColumn,
       outcomes.map((o) => o.candidate.id)
     );
-  const preExisting = new Set((existingRows ?? []).map((r) => r.person_id as string));
+  const preExisting = new Set(
+    (existingRows ?? []).map((r) => (r as Record<string, unknown>)[idColumn] as string)
+  );
 
   const pushedAt = new Date().toISOString();
   const settled = await Promise.allSettled(
     outcomes.map(async (outcome) => {
       const { error: pushError } = await supabaseAdmin.from("platform_pushes").upsert(
         {
-          person_id: outcome.candidate.id,
+          [idColumn]: outcome.candidate.id,
           client_id: client.id,
           platform: PLATFORM,
           platform_contact_id: outcome.leadId,
@@ -273,15 +288,15 @@ async function writePushRows(
           pushed_by_user_id: actor.id,
           pushed_by_email: actor.email,
         },
-        { onConflict: "person_id,client_id,platform" }
+        { onConflict: `${idColumn},client_id,platform` }
       );
       if (pushError) throw pushError;
 
-      const { error: personError } = await supabaseAdmin
-        .from("people")
+      const { error: entityError } = await supabaseAdmin
+        .from(targetTable)
         .update({ pushed_to_emailbison: true, pushed_to_emailbison_at: pushedAt })
         .eq("id", outcome.candidate.id);
-      if (personError) throw personError;
+      if (entityError) throw entityError;
 
       return outcome;
     })
@@ -314,6 +329,14 @@ async function writePushRows(
 interface EmailBisonEntity<TFilters> {
   /** Discriminates which trigger this run came from (people vs companies). */
   label: string;
+  /** Which platform_pushes FK column / entity table the write-back keys on —
+   * "person_id"/"people" for a People-table trigger, "company_id"/"companies"
+   * for a company-native Companies-table trigger
+   * (docs/adr/0005-company-native-emailbison-push.md). Threaded down into
+   * writePushRows/upsertCandidatesToWorkspace and the campaign-attach lookup/
+   * update queries so one orchestrator body serves both entities. */
+  idColumn: "person_id" | "company_id";
+  targetTable: "people" | "companies";
   /** Resolves the current filtered view into push candidates. */
   loadRecords: (filters: TFilters) => Promise<EmailBisonPushCandidate[]>;
 }
@@ -354,6 +377,8 @@ async function upsertCandidatesToWorkspace(
   existingLeadBehavior: "patch" | "put",
   fetchImpl: typeof fetch,
   standardFieldMapping: EmailBisonStandardFieldMapping | undefined,
+  idColumn: "person_id" | "company_id",
+  targetTable: "people" | "companies",
   onChunkGroupDone?: (done: number, pushed: number, errors: number) => void,
   deadline?: number
 ): Promise<WorkspaceUpsertOutcome> {
@@ -399,7 +424,9 @@ async function upsertCandidatesToWorkspace(
       const { written, failed: writeFailed, createdIds, updatedIds } = await writePushRows(
         outcome.value.pushed,
         client,
-        actor
+        actor,
+        idColumn,
+        targetTable
       );
       pushed += written.length;
       created += createdIds.length;
@@ -499,6 +526,8 @@ async function runEmailBisonAddToWorkspace<TFilters>(
       existingLeadBehavior,
       fetchImpl,
       standardFieldMapping,
+      entity.idColumn,
+      entity.targetTable,
       (chunkDone, chunkPushed, chunkErrors) =>
         onProgress?.({
           phase: "pushing",
@@ -526,7 +555,7 @@ export function runPeopleAddToEmailBison(
   deps: RunEmailBisonPushDeps = {}
 ): Promise<EmailBisonPushResult> {
   return runEmailBisonAddToWorkspace(
-    { label: "people", loadRecords: getPeopleForEmailBison },
+    { label: "people", idColumn: "person_id", targetTable: "people", loadRecords: getPeopleForEmailBison },
     filters,
     client,
     actor,
@@ -534,9 +563,11 @@ export function runPeopleAddToEmailBison(
   );
 }
 
-/** Add to EmailBison, triggered from the Companies table — resolves to every
- * Person linked to the matching Companies (there is no company-level
- * EmailBison object, ADR 0003). */
+/** Add to EmailBison, triggered from the Companies table — company-native
+ * (docs/adr/0005-company-native-emailbison-push.md, superseding ADR 0003's
+ * "no company-level EmailBison object" decision): each matching Company is
+ * pushed as its own lead (company name + the company's own email), keyed and
+ * deduped on `company_id` rather than resolving to its linked People. */
 export function runCompaniesAddToEmailBison(
   filters: CompanyListFilters,
   client: ClientRow,
@@ -544,7 +575,12 @@ export function runCompaniesAddToEmailBison(
   deps: RunEmailBisonPushDeps = {}
 ): Promise<EmailBisonPushResult> {
   return runEmailBisonAddToWorkspace(
-    { label: "companies", loadRecords: getPeopleForEmailBisonByCompanyFilters },
+    {
+      label: "companies",
+      idColumn: "company_id",
+      targetTable: "companies",
+      loadRecords: getCompaniesForEmailBison,
+    },
     filters,
     client,
     actor,
@@ -687,9 +723,13 @@ async function runEmailBisonAddToCampaign<TFilters>(
   const nextOffset = offset + candidates.length;
   const isDone = nextOffset >= total_matched;
 
-  // Chunked at CAMPAIGN_LOOKUP_CHUNK_SIZE so the `.in("person_id", …)` URL stays
+  // Chunked at CAMPAIGN_LOOKUP_CHUNK_SIZE so the `.in(idColumn, …)` URL stays
   // under PostgREST's length limit even for a full 2000-candidate tick; rows are
-  // merged and order doesn't matter (they feed a Set and a Map below).
+  // merged and order doesn't matter (they feed a Set and a Map below). Keyed on
+  // entity.idColumn ("person_id" for People, "company_id" for a company-native
+  // Companies push — docs/adr/0005-company-native-emailbison-push.md) rather
+  // than a hard-coded "person_id" so this lookup works for either entity.
+  const idColumn = entity.idColumn;
   const lookupChunks = chunk(
     candidates.map((c) => c.id),
     CAMPAIGN_LOOKUP_CHUNK_SIZE
@@ -698,26 +738,32 @@ async function runEmailBisonAddToCampaign<TFilters>(
     lookupChunks.map((ids) =>
       supabaseAdmin
         .from("platform_pushes")
-        .select("person_id,platform_contact_id")
+        .select(`${idColumn},platform_contact_id`)
         .eq("client_id", client.id)
         .eq("platform", PLATFORM)
-        .in("person_id", ids)
+        .in(idColumn, ids)
     )
   );
   const lookupError = lookupResults.find((r) => r.error)?.error;
   if (lookupError) throw lookupError;
   const existingRows = lookupResults.flatMap((r) => r.data ?? []);
 
+  // Named "PersonId" throughout for minimal churn even on the companies path,
+  // where it holds company ids (see EmailBisonPushResult.succeededPersonIds's
+  // doc comment for the same rationale).
   const leadIdByPersonId = new Map<string, string>();
   // Created vs updated (feedback item 2b), same DB-side heuristic as the
   // workspace push: a candidate that already had ANY platform_pushes row for
   // this (client, platform) before this run is "updated", the rest "created".
-  // `existingRows` is exactly that pre-existing set, so snapshot its person_ids
-  // here — before the attach step writes/updates rows below.
-  const preExistingPersonIds = new Set((existingRows ?? []).map((r) => r.person_id as string));
+  // `existingRows` is exactly that pre-existing set, so snapshot its ids here —
+  // before the attach step writes/updates rows below.
+  const preExistingPersonIds = new Set(
+    (existingRows ?? []).map((r) => (r as Record<string, unknown>)[idColumn] as string)
+  );
   for (const row of existingRows ?? []) {
-    if (row.platform_contact_id) {
-      leadIdByPersonId.set(row.person_id as string, row.platform_contact_id as string);
+    const rec = row as Record<string, unknown>;
+    if (rec.platform_contact_id) {
+      leadIdByPersonId.set(rec[idColumn] as string, rec.platform_contact_id as string);
     }
   }
 
@@ -751,6 +797,8 @@ async function runEmailBisonAddToCampaign<TFilters>(
       existingLeadBehavior,
       fetchImpl,
       standardFieldMapping,
+      entity.idColumn,
+      entity.targetTable,
       (done) => onProgress?.({ phase: "adding-to-workspace", done, total: needsUpsert.length, attached: 0, errors: 0 })
     );
     for (const [personId, leadId] of upsertOutcome.leadIdByPersonId) {
@@ -820,7 +868,7 @@ async function runEmailBisonAddToCampaign<TFilters>(
             })
             .eq("client_id", client.id)
             .eq("platform", PLATFORM)
-            .in("person_id", ids)
+            .in(idColumn, ids)
         )
       );
       const updateError = updateResults.find((r) => r.error)?.error;
@@ -872,7 +920,7 @@ export function runPeopleAddToCampaign(
   deps: RunEmailBisonCampaignPushDeps = {}
 ): Promise<EmailBisonCampaignPushResult> {
   return runEmailBisonAddToCampaign(
-    { label: "people", loadRecords: getPeopleForEmailBison },
+    { label: "people", idColumn: "person_id", targetTable: "people", loadRecords: getPeopleForEmailBison },
     filters,
     client,
     campaignId,
@@ -881,9 +929,11 @@ export function runPeopleAddToCampaign(
   );
 }
 
-/** Add to Campaign, triggered from the Companies table — resolves to every
- * Person linked to the matching Companies (there is no company-level
- * EmailBison object, ADR 0003). */
+/** Add to Campaign, triggered from the Companies table — company-native
+ * (docs/adr/0005-company-native-emailbison-push.md, superseding ADR 0003's
+ * "no company-level EmailBison object" decision): each matching Company is
+ * pushed as its own lead and attached to the campaign directly, keyed and
+ * deduped on `company_id` rather than resolving to its linked People. */
 export function runCompaniesAddToCampaign(
   filters: CompanyListFilters,
   client: ClientRow,
@@ -892,7 +942,12 @@ export function runCompaniesAddToCampaign(
   deps: RunEmailBisonCampaignPushDeps = {}
 ): Promise<EmailBisonCampaignPushResult> {
   return runEmailBisonAddToCampaign(
-    { label: "companies", loadRecords: getPeopleForEmailBisonByCompanyFilters },
+    {
+      label: "companies",
+      idColumn: "company_id",
+      targetTable: "companies",
+      loadRecords: getCompaniesForEmailBison,
+    },
     filters,
     client,
     campaignId,

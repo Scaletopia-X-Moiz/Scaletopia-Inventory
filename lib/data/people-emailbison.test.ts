@@ -1,16 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import {
-  getPeopleForEmailBison,
-  getPeopleForEmailBisonByCompanyFilters,
-} from "@/lib/data/people";
+import { getPeopleForEmailBison } from "@/lib/data/people";
 import { includeOnly } from "@/lib/data/include-exclude";
 
 const TEST_PREFIX = "__test-people-emailbison__";
-
-function testDomain(slug: string): string {
-  return `${TEST_PREFIX}${slug}.example.com`;
-}
 
 function testLinkedin(slug: string): string {
   return `https://linkedin.com/in/${TEST_PREFIX}${slug}`;
@@ -32,20 +25,6 @@ let counter = 0;
 function unique(label: string): string {
   counter++;
   return `${TEST_PREFIX}${label}-${counter}`;
-}
-
-async function insertCompany(niche: string, slug: string): Promise<string> {
-  const { data, error } = await supabaseAdmin
-    .from("companies")
-    .insert({
-      domain: testDomain(slug),
-      company_name: `EmailBison Test Co ${slug}`,
-      niche,
-    })
-    .select("id")
-    .single();
-  if (error) throw error;
-  return (data as { id: string }).id;
 }
 
 async function insertPerson(overrides: Record<string, unknown>) {
@@ -139,65 +118,8 @@ describe("getPeopleForEmailBison", () => {
   });
 });
 
-describe("getPeopleForEmailBisonByCompanyFilters", () => {
-  it("expands matching Companies to every linked Person, honoring current filters", async () => {
-    const niche = unique("niche");
-    const companyId = await insertCompany(niche, "with-people");
-
-    await insertPerson({
-      linkedin_url: testLinkedin(`linked-a-${niche}`),
-      full_name: "Linked Person A",
-      first_name: "Linked",
-      last_name: "A",
-      company_id: companyId,
-      company_name: "EmailBison Test Co with-people",
-      email: `${TEST_PREFIX}linked-a-${niche}@example.com`,
-      source: "clay",
-    });
-    await insertPerson({
-      linkedin_url: testLinkedin(`linked-b-${niche}`),
-      full_name: "Linked Person B",
-      first_name: "Linked",
-      last_name: "B",
-      company_id: companyId,
-      company_name: "EmailBison Test Co with-people",
-      email: `${TEST_PREFIX}linked-b-${niche}@example.com`,
-      source: "clay",
-    });
-    // A person with no company_id, matching nothing but sanity-checks that
-    // unlinked people never leak into a company-filter resolution.
-    await insertPerson({
-      linkedin_url: testLinkedin(`unlinked-${niche}`),
-      full_name: "Unlinked Person",
-      email: `${TEST_PREFIX}unlinked-${niche}@example.com`,
-      niche_tokens: [niche],
-      source: "clay",
-    });
-
-    const candidates = await getPeopleForEmailBisonByCompanyFilters({ niche: includeOnly([niche]) });
-
-    expect(candidates).toHaveLength(2);
-    const names = candidates.map((c) => c.displayName).sort();
-    expect(names).toEqual(["Linked Person A", "Linked Person B"]);
-    for (const candidate of candidates) {
-      expect(candidate.record.companyName).toBe("EmailBison Test Co with-people");
-    }
-  });
-
-  it("yields zero candidates, not an error, for a Company with no linked People", async () => {
-    const niche = unique("niche");
-    await insertCompany(niche, "no-people");
-
-    const candidates = await getPeopleForEmailBisonByCompanyFilters({ niche: includeOnly([niche]) });
-
-    expect(candidates).toEqual([]);
-  });
-
-  it("yields zero candidates when no Company matches the filter", async () => {
-    const niche = unique("niche-nomatch");
-
-    const candidates = await getPeopleForEmailBisonByCompanyFilters({ niche: includeOnly([niche]) });
-
-    expect(candidates).toEqual([]);
-  });
-});
+// getPeopleForEmailBisonByCompanyFilters (the old resolve-Companies-filters-
+// to-linked-People loader) and its coverage here were removed —
+// docs/adr/0005-company-native-emailbison-push.md: the Companies-table
+// EmailBison push is now company-native (getCompaniesForEmailBison in
+// lib/data/companies.ts), not a resolve-to-linked-People loader in this file.

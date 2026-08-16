@@ -275,6 +275,56 @@ export async function getPushJobPersonIds(
   return ids;
 }
 
+/** Every company_id tagged by a push job in `push_job_records`, optionally
+ * scoped to a single outcome (#123) — the direct counterpart of
+ * getPushJobPersonIds above, for a company-native EmailBison push
+ * (docs/adr/0005-company-native-emailbison-push.md) that tags
+ * `push_job_records.company_id` instead of `person_id`. `.not("company_id",
+ * "is", null)` excludes person-tagged rows (which have `company_id` null) so
+ * this never returns a spurious null entry for a people-only job. Paged
+ * manually rather than via fetchAllRows for the same reason as
+ * getPushJobPersonIds — `push_job_records` has no `id` column (its PK/unique
+ * indexes are composite) — and ordering by `company_id` pins the page
+ * boundaries the same way. */
+export async function getPushJobCompanyIds(
+  jobId: string,
+  outcome?: PushJobOutcome
+): Promise<string[]> {
+  const PAGE_SIZE = 1000;
+
+  let countQuery = supabaseAdmin
+    .from("push_job_records")
+    .select("company_id", { count: "exact", head: true })
+    .eq("push_job_id", jobId)
+    .not("company_id", "is", null);
+  if (outcome) countQuery = countQuery.eq("outcome", outcome);
+  const { count, error: countError } = await countQuery;
+  if (countError) throw countError;
+
+  const total = count ?? 0;
+  if (total === 0) return [];
+
+  const pageCount = Math.ceil(total / PAGE_SIZE);
+  const pages = await Promise.all(
+    Array.from({ length: pageCount }, (_, i) => {
+      let query = supabaseAdmin
+        .from("push_job_records")
+        .select("company_id")
+        .eq("push_job_id", jobId)
+        .not("company_id", "is", null);
+      if (outcome) query = query.eq("outcome", outcome);
+      return query.order("company_id", { ascending: true }).range(i * PAGE_SIZE, i * PAGE_SIZE + PAGE_SIZE - 1);
+    })
+  );
+
+  const ids: string[] = [];
+  for (const page of pages) {
+    if (page.error) throw page.error;
+    for (const row of (page.data ?? []) as { company_id: string }[]) ids.push(row.company_id);
+  }
+  return ids;
+}
+
 /** Atomically claims the next runnable job — the oldest `queued` job whose
  * client has no job already `running` — flipping it to `running`, or null if
  * nothing is runnable. Delegates to the `claim_next_runnable_job` Postgres
@@ -423,20 +473,35 @@ export async function listPushJobs(filters: PushJobFilters = {}, limit = 50, off
   };
 }
 
-/** Tags each pushed person with the job that pushed them, so People/
- * Companies can later filter to exactly one run's records. Upserts on the
- * (push_job_id, person_id) primary key so a resumed chunk can safely
- * re-report the same record. */
-export async function recordJobPeople(jobId: string, outcomes: RecordJobPersonOutcome[]): Promise<void> {
+/** Tags each pushed person (or, for a company-native EmailBison push, each
+ * pushed company — docs/adr/0005-company-native-emailbison-push.md) with the
+ * job that pushed them, so People/Companies can later filter to exactly one
+ * run's records. `entity` picks which FK column (`person_id`/`company_id`)
+ * carries the ids and which unique index the upsert conflicts on
+ * (push_job_records has separate `(push_job_id, person_id)` and
+ * `(push_job_id, company_id)` unique indexes — see
+ * lib/data/emailbison-company-push.sql — since a single composite primary key
+ * can't allow either column to be independently null). Upserts so a resumed
+ * chunk can safely re-report the same record.
+ *
+ * Kept the `RecordJobPersonOutcome`/`personId` naming (minimal-churn, mirrors
+ * EmailBisonPushResult.succeededPersonIds) even though `personId` holds a
+ * company id when `entity === "companies"`. */
+export async function recordJobPeople(
+  jobId: string,
+  entity: "people" | "companies",
+  outcomes: RecordJobPersonOutcome[]
+): Promise<void> {
   if (outcomes.length === 0) return;
 
+  const idColumn = entity === "companies" ? "company_id" : "person_id";
   const { error } = await supabaseAdmin.from("push_job_records").upsert(
     outcomes.map((o) => ({
       push_job_id: jobId,
-      person_id: o.personId,
+      [idColumn]: o.personId,
       outcome: o.outcome,
     })),
-    { onConflict: "push_job_id,person_id" }
+    { onConflict: entity === "companies" ? "push_job_id,company_id" : "push_job_id,person_id" }
   );
   if (error) throw error;
 }

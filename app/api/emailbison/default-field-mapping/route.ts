@@ -21,8 +21,10 @@ function isEntity(value: unknown): value is Entity {
  * push itself would use — resolved through the same filters, but selecting only
  * the two company-name columns the resolver reads instead of the full `*` row
  * (perf: avoids scanning every column of the entire filtered set). Companies-
- * table filters resolve to every linked Person (ADR 0003), same as the actual
- * push. */
+ * table filters resolve to the companies' OWN company_name/brand_name
+ * (docs/adr/0005-company-native-emailbison-push.md), same as the actual push —
+ * `entity` is also passed through so firstName/lastName/title default to
+ * "skip" for a company-native push. */
 export async function GET(request: NextRequest) {
   const user = await getUser();
   if (!user) {
@@ -44,6 +46,7 @@ export async function GET(request: NextRequest) {
   const { standardFields } = resolveDefaultFieldMapping({
     platform: "emailbison",
     records,
+    entity,
   });
 
   return Response.json({ standardFields });

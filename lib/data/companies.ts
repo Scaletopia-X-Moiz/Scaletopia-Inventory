@@ -7,6 +7,8 @@ import { EMPLOYEE_BUCKETS, employeeBucketOf } from "@/lib/data/employee-size";
 import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
 import { sortByLastUpdatedDesc } from "@/lib/data/sort";
 import type { ClayPushRecord } from "@/lib/clay/types";
+import type { EmailBisonPushCandidate } from "@/lib/data/people";
+import type { EmailBisonPushRecord } from "@/lib/emailbison/types";
 import type { IncludeExclude } from "@/lib/data/include-exclude";
 import type { ActiveVirtualColumn, VirtualFilterSet } from "@/lib/data/virtual-columns";
 import { isFilterSetActive } from "@/lib/data/virtual-columns";
@@ -16,7 +18,7 @@ import {
   type PushStatusCounts,
   type PushStatusFilter,
 } from "@/lib/data/push-status-filter";
-import { getPushJobPersonIds, type PushJobOutcome } from "@/lib/data/push-jobs";
+import { getPushJobPersonIds, getPushJobCompanyIds, type PushJobOutcome } from "@/lib/data/push-jobs";
 
 export type SingleSelectFilter = "any" | "not_empty" | "empty";
 
@@ -35,9 +37,12 @@ export interface CompanyListFilters {
   phoneType?: IncludeExclude;
   /** Restrict to companies a push run touched — the companies linked (via
    * people.company_id) to the people tagged in `push_job_records` for this job
-   * (#123). Same people→company link the Companies-triggered push uses in
-   * getPeopleForEmailBisonByCompanyFilters. Resolved to a company-id set
-   * (resolvePushJobCompanyIds); there's no company-level push record. */
+   * (#123). This is the People→company link a GHL Companies-triggered push
+   * still uses (CONTEXT.md's "Companies-table push" glossary entry) — the
+   * company-native EmailBison push (docs/adr/0005-company-native-emailbison-push.md)
+   * tags `push_job_records.company_id` directly instead, so its job runs don't
+   * need this people-link resolution. Resolved to a company-id set
+   * (resolvePushJobCompanyIds). */
   pushJobId?: string;
   /** Optional outcome sub-scope for pushJobId — restrict the underlying people
    * to only succeeded / only failed records before mapping to companies.
@@ -439,28 +444,42 @@ async function fetchVirtualFilterPage(
 /** Ids per `.in("id", ...)` chunk when mapping person ids → company ids below. */
 const PUSH_JOB_PERSON_ID_CHUNK_SIZE = 200;
 
-/** The distinct company ids that filters.pushJobId restricts to — the
- * companies linked (via people.company_id) to the people tagged in
- * `push_job_records` for that job — or null when no pushJobId is set. People
- * with no linked company are dropped; a job that touched only such people (or
- * an empty job) yields an empty set, not null. */
+/** The distinct company ids that filters.pushJobId restricts to — the UNION
+ * of (a) companies linked (via people.company_id) to the people tagged in
+ * `push_job_records` for that job (a GHL push, or a People-table EmailBison
+ * push, triggered from — or resolving through — the Companies table; see
+ * CONTEXT.md's "Companies-table push" glossary entry), and (b) companies
+ * tagged directly in `push_job_records.company_id` by a company-native
+ * EmailBison push (docs/adr/0005-company-native-emailbison-push.md) — or null
+ * when no pushJobId is set. A given job only ever tags one kind (people OR
+ * companies), so the union is correct without inspecting the job's platform:
+ * one of the two sources is simply empty. People with no linked company are
+ * dropped from source (a); a job that touched only such people, or an empty
+ * job, still yields an empty set (not null) once both sources are empty. */
 async function resolvePushJobCompanyIds(filters: CompanyListFilters): Promise<string[] | null> {
   if (!filters.pushJobId) return null;
-  const personIds = await getPushJobPersonIds(filters.pushJobId, filters.pushJobOutcome);
-  if (personIds.length === 0) return [];
 
-  const chunks = chunkIds(personIds, PUSH_JOB_PERSON_ID_CHUNK_SIZE);
-  const chunkResults = await Promise.all(
-    chunks.map((chunk) =>
-      fetchAllRows<{ company_id: string | null }>("people", "company_id", (query) =>
-        query.in("id", chunk)
+  const [personIds, directCompanyIds] = await Promise.all([
+    getPushJobPersonIds(filters.pushJobId, filters.pushJobOutcome),
+    getPushJobCompanyIds(filters.pushJobId, filters.pushJobOutcome),
+  ]);
+
+  const companyIds = new Set<string>(directCompanyIds);
+
+  if (personIds.length > 0) {
+    const chunks = chunkIds(personIds, PUSH_JOB_PERSON_ID_CHUNK_SIZE);
+    const chunkResults = await Promise.all(
+      chunks.map((chunk) =>
+        fetchAllRows<{ company_id: string | null }>("people", "company_id", (query) =>
+          query.in("id", chunk)
+        )
       )
-    )
-  );
-  const companyIds = new Set<string>();
-  for (const rows of chunkResults) {
-    for (const row of rows) if (row.company_id) companyIds.add(row.company_id);
+    );
+    for (const rows of chunkResults) {
+      for (const row of rows) if (row.company_id) companyIds.add(row.company_id);
+    }
   }
+
   return [...companyIds];
 }
 
@@ -657,55 +676,33 @@ export async function getAllFilteredCompanies(
   return sortByLastUpdatedDesc(await fetchFilteredRows(filters)).map(toListRow);
 }
 
-/** Ids per `.in("id", ...)` chunk for the branded-company existence check
- * below — same URL-length rationale as the other by-id chunk constants. */
-const BRAND_NAME_EXISTENCE_CHUNK_SIZE = 200;
-
 /** Existence check powering the EmailBison default-field-mapping preview
  * (app/api/emailbison/default-field-mapping/route.ts) for the Companies-table
  * trigger. Answers a single boolean: does the current Companies filter set
- * contain at least one company that (a) has >=1 linked person AND (b) carries a
- * non-null brand_name? That is the ONLY thing resolveDefaultFieldMapping reads
- * out of the resolved push set (`records.some(r => !!r.brandName)`), so we
- * never need to enumerate the linked people — a short-circuiting `.limit(1)`
- * query answers it in one round-trip instead of loading every linked person
- * across hundreds of chunked requests (the >1min stall this replaces).
+ * contain at least one company with a non-null OWN brand_name? That is the
+ * ONLY thing resolveDefaultFieldMapping reads out of the resolved push set
+ * (`records.some(r => !!r.brandName)`) — a short-circuiting `.limit(1)` query
+ * answers it in one round-trip instead of materializing the whole filtered
+ * set's {company_name, brand_name} rows.
  *
- * Semantics match the old getEmailBisonCompanyNameFieldsByCompanyFilters path:
- * it resolved every filtered company to its linked People and read each
- * person's OWN linked company brand_name (people.companies.brand_name). Since a
- * person's company IS the filtered company, "any linked person carries a
- * brand_name" ⇔ "a filtered company with >=1 linked person has a brand_name".
- * The `people!inner(id)` embed enforces the linked-person requirement (a
- * branded company with zero people contributed no rows — hence no brand_name —
- * in the old code, and must not flip this boolean either). */
-export async function filteredCompaniesHaveLinkedPersonWithBrandName(
-  filters: CompanyListFilters
-): Promise<boolean> {
+ * Company-native (superseding the old "resolves to linked People" semantics —
+ * docs/adr/0005-company-native-emailbison-push.md): the EmailBison push now
+ * pushes each Company as its own lead, so the brand_name signal this feeds is
+ * the COMPANY's own column, not a linked person's. There is no `people!inner`
+ * requirement anymore — a company with zero linked people can still push
+ * itself as a lead, so it must still count here if it has a brand_name. */
+export async function filteredCompaniesHaveOwnBrandName(filters: CompanyListFilters): Promise<boolean> {
   const restricted = await resolveRestrictedRows(filters);
   if (restricted !== null) {
     // Restricted dimensions (virtualFilters/pushJobId) already resolved to a
-    // bounded row set that carries brand_name (LIST_COLUMNS). Filter to the
-    // branded companies in memory, then confirm at least one has a linked
-    // person via a chunked existence check — the set is already small, so
-    // correctness over cleverness here.
-    const brandedIds = restricted.filter((row) => row.brand_name != null).map((row) => row.id);
-    if (brandedIds.length === 0) return false;
-    for (const chunk of chunkIds(brandedIds, BRAND_NAME_EXISTENCE_CHUNK_SIZE)) {
-      const { data, error } = await supabaseAdmin
-        .from("companies")
-        .select("id, people!inner(id)")
-        .in("id", chunk)
-        .limit(1);
-      if (error) throw error;
-      if ((data?.length ?? 0) > 0) return true;
-    }
-    return false;
+    // bounded row set that carries brand_name (LIST_COLUMNS) — just check it
+    // in memory, no further query needed.
+    return restricted.some((row) => row.brand_name != null);
   }
 
   // Hot path (no id-restricting dimension): one short-circuiting query.
   const { data, error } = await applyCompanyFilters(
-    supabaseAdmin.from("companies").select("id, people!inner(id)").not("brand_name", "is", null),
+    supabaseAdmin.from("companies").select("id").not("brand_name", "is", null),
     filters
   ).limit(1);
   if (error) throw error;
@@ -725,6 +722,12 @@ interface FullCompanyRow extends RawCompanyRow {
   keywords: string[] | null;
   technologies: string[] | null;
   custom_data: Record<string, unknown> | null;
+  /** Not previously selected/typed here (the list/export paths never needed
+   * it) — added for the EmailBison company-native push's createdAt/
+   * companyCreatedAt fields (getCompaniesForEmailBison below). Real column,
+   * confirmed present via people.ts's `companies(...)` embed (FULL_ROW_COLUMNS),
+   * which already selects it. */
+  created_at: string | null;
 }
 
 export interface CompanyExportRow {
@@ -910,6 +913,112 @@ export async function getCompaniesForClay(
     id: row.id,
     displayName: row.company_name,
     payload: toClayPayload(row),
+  }));
+}
+
+/** Shapes one company row into the EmailBisonPushRecord the payload builder
+ * (lib/emailbison/lead-payload.ts) needs — the company-native counterpart of
+ * people.ts's toEmailBisonPushRecord. A company has no person name/title, so
+ * firstName/lastName/title are always null; email/companyName/website etc.
+ * come straight off the company's OWN columns (not a linked person's), which
+ * is the whole point of this push resolving to the company itself instead of
+ * its linked people. Every field of EmailBisonPushRecord is populated
+ * (nulls where a company has no analog) so nothing is silently undefined —
+ * including the company* namespace, which is populated from THIS SAME row so
+ * a custom-variable/standard-field binding to e.g. "companyEmail" or
+ * "companyWebsiteUrl" still resolves for a company-native push exactly as it
+ * does for a person-native one. */
+function toEmailBisonPushRecordForCompany(row: FullCompanyRow): EmailBisonPushRecord {
+  return {
+    firstName: null,
+    lastName: null,
+    email: row.email,
+    phone: row.phone,
+    companyName: row.company_name,
+    brandName: row.brand_name,
+    title: null,
+    website: row.website_url,
+    // The company's own real columns, in the "bare" (person-shaped) slots —
+    // mirrors how a Person's own city/state/country populate these slots in
+    // toEmailBisonPushRecord.
+    city: row.city,
+    state: row.state,
+    country: row.country,
+    fullName: row.brand_name || row.company_name,
+    linkedinUrl: row.linkedin_url,
+    linkedinUsername: null,
+    phoneType: row.phone_type,
+    phoneStatus: row.phone_status,
+    emailStatus: row.email_status,
+    sourceId: null,
+    tags: row.tags,
+    emailVerifiedAt: row.email_verified_at,
+    phoneVerifiedAt: row.phone_verified_at,
+    lastUpdated: row.last_updated,
+    createdAt: row.created_at,
+    // company* namespace — populated from this SAME company row (not a
+    // linked-company embed, since the candidate already IS the company).
+    companyCity: row.city,
+    companyState: row.state,
+    companyCountry: row.country,
+    companyIndustry: row.industry,
+    companyEmployeeCount: row.employee_count,
+    companyWebsiteUrl: row.website_url,
+    companyLinkedinUrl: row.linkedin_url,
+    companyDomain: row.domain,
+    companyPhone: row.phone,
+    companyPhoneType: row.phone_type,
+    companyEmail: row.email,
+    companyEmailStatus: row.email_status,
+    companyNiche: row.niche,
+    companyQualityTier: row.quality_tier,
+    companyPhoneStatus: row.phone_status,
+    companyClient: row.client,
+    companyCreatedAt: row.created_at,
+    companyDescription: row.description,
+    companyDomainStatus: row.domain_status,
+    companyEmailVerifiedAt: row.email_verified_at,
+    companyFoundedYear: row.founded_year,
+    companyKeywords: row.keywords,
+    companyLastUpdated: row.last_updated,
+    companyMxProvider: row.mx_provider,
+    companyPhoneVerifiedAt: row.phone_verified_at,
+    // FullCompanyRow types `revenue` as `number | null` (pre-existing, unused
+    // by anything that needed the real shape until now), but the live column
+    // is text (e.g. "0-99999", "USD $6,000.00" — confirmed via the same
+    // ground-truth probe recorded on EmailBisonPushRecord.companyRevenue's
+    // doc comment). Stringify defensively so this compiles against the actual
+    // runtime string without widening FullCompanyRow.revenue's declared type
+    // (CompanyExportRow.revenue elsewhere still expects a number).
+    companyRevenue: row.revenue == null ? null : String(row.revenue),
+    companySecurityGateway: row.security_gateway,
+    companySource: row.source,
+    companyTags: row.tags,
+    companyTechnologies: row.technologies,
+  };
+}
+
+/** EmailBison push candidates for the Companies-table trigger, company-native
+ * (superseding ADR 0003's "resolves to linked People" decision — see
+ * docs/adr/0005-company-native-emailbison-push.md): each matched Company is
+ * pushed as its own lead, `id` is the COMPANY id, `email` is the company's
+ * OWN `companies.email`, and `companyName`/`brandName` come from the
+ * company's own columns rather than a linked person's. A company with no
+ * email of its own is still returned here (candidates aren't pre-filtered by
+ * email) — pushChunk (lib/emailbison/push-to-emailbison.ts) is what skips any
+ * candidate with no `record.email`, same as an emailless Person today.
+ * Ordering matches fetchFullFilteredCompanies (last_updated desc), the same
+ * deterministic order getCompaniesForClay/getAllFilteredCompanies use — the
+ * orchestrator's offset-resume (issue #120) depends on that determinism. */
+export async function getCompaniesForEmailBison(
+  filters: CompanyListFilters
+): Promise<EmailBisonPushCandidate[]> {
+  const rows = await fetchFullFilteredCompanies(filters);
+  return rows.map((row) => ({
+    id: row.id,
+    displayName: row.brand_name || row.company_name,
+    record: toEmailBisonPushRecordForCompany(row),
+    customData: row.custom_data,
   }));
 }
 

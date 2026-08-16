@@ -22,74 +22,47 @@ interface ActiveClient {
 type Status = "idle" | "open" | "pushing";
 type Step = "picker" | "options" | "confirm";
 
-/** A Person-record field bindable by a custom-variable row — every real
- * column of the resolved Person record (lib/emailbison/lead-payload.ts's
- * KNOWN_RECORD_FIELDS) is bindable here, not just the seven original standard
- * fields. Companies-table pushes resolve to the same Person records as
- * People-table pushes (per CONTEXT.md's "Companies-table push" entry), so the
- * same field set applies — there is no Company-level lead. Enrichment/virtual
+/** A Company-record field bindable by a custom-variable row — every real
+ * column of the resolved Company record (lib/emailbison/lead-payload.ts's
+ * KNOWN_RECORD_FIELDS) is bindable here. Company-native since
+ * docs/adr/0005-company-native-emailbison-push.md, superseding ADR 0003: a
+ * Companies-table push now pushes each Company as its own lead instead of
+ * resolving to its linked People, so this list is Company-specific — no
+ * firstName/lastName/title/phoneType/linkedinUsername (person-only fields the
+ * loader always nulls out for a Company candidate). Enrichment/virtual
  * columns are offered separately, from the `virtualColumns` prop.
  *
- * Ground-truth audit (2026-08-15) against the live `companies` (39 cols) and
- * `people` (36 cols) tables: excluded on purpose are `id`, FK-id columns that
- * duplicate an already-exposed human label (`country_id`/`industry_id`),
- * push-tracking bookkeeping (`pushed_to_clay`/`pushed_to_clay_at`), the raw
- * `custom_data` blob (its keys are already offered separately via the
- * enrichment-fields mechanism), and `source_tokens` (the raw tokenized array
- * — `companySource`'s plain string already covers it; `keywords`/
- * `technologies` have no such existing scalar substitute, so those ARE
- * included as JSON-stringified arrays). */
+ * getCompaniesForEmailBison (lib/data/companies.ts) populates both the
+ * "bare" record fields (email/phone/website/city/state/country/tags/...) and
+ * the `company*`-namespaced fields from the SAME company row, so a binding to
+ * either resolves — this list picks one canonical key per concept (the bare
+ * key where one exists, else the company*-namespaced one) rather than
+ * offering both as separate, identically-valued options. */
 const BINDABLE_RECORD_COLUMNS: { key: string; label: string }[] = [
-  { key: "firstName", label: "First name" },
-  { key: "lastName", label: "Last name" },
-  { key: "email", label: "Email" },
-  { key: "phone", label: "Phone" },
   { key: "companyName", label: "Company name (raw)" },
   { key: "brandName", label: "Cleaned brand name" },
-  { key: "title", label: "Title" },
+  { key: "email", label: "Email" },
+  { key: "phone", label: "Phone" },
   { key: "website", label: "Website (domain)" },
-  // The person's own remaining real columns — a Companies-side push still
-  // resolves to Person records, so these are bindable here too, not just on
-  // the People-table dropdown. "Person "-prefixed where the bare label would
-  // collide with a company* field below (city/state/country).
-  { key: "city", label: "Person city" },
-  { key: "state", label: "Person state" },
-  { key: "country", label: "Person country" },
-  { key: "fullName", label: "Full name" },
-  { key: "linkedinUrl", label: "LinkedIn URL" },
-  { key: "linkedinUsername", label: "LinkedIn username" },
+  { key: "city", label: "City" },
+  { key: "state", label: "State" },
+  { key: "country", label: "Country" },
+  { key: "tags", label: "Tags" },
+  { key: "emailStatus", label: "Email status" },
+  { key: "emailVerifiedAt", label: "Email verified at" },
   { key: "phoneType", label: "Phone type" },
   { key: "phoneStatus", label: "Phone status" },
-  { key: "emailStatus", label: "Email status" },
-  { key: "sourceId", label: "Source ID" },
-  { key: "tags", label: "Person tags" },
-  { key: "emailVerifiedAt", label: "Email verified at" },
   { key: "phoneVerifiedAt", label: "Phone verified at" },
-  { key: "lastUpdated", label: "Person last updated" },
-  { key: "createdAt", label: "Person created at" },
-  // Linked company's real columns (company* namespace). Every real company
-  // column is bindable here alongside enrichment/virtual columns — the
-  // Companies-side push resolves to linked Person records, which carry the
-  // company embed. company name / brand / website are already covered above.
-  { key: "companyCity", label: "City" },
-  { key: "companyState", label: "State" },
-  { key: "companyCountry", label: "Country" },
+  { key: "lastUpdated", label: "Last updated" },
+  { key: "createdAt", label: "Created at" },
+  // company*-namespaced fields with no bare equivalent.
+  { key: "companyDomain", label: "Domain" },
   { key: "companyIndustry", label: "Industry" },
   { key: "companyEmployeeCount", label: "Employees" },
-  { key: "companyWebsiteUrl", label: "Website URL" },
-  { key: "companyLinkedinUrl", label: "Company LinkedIn" },
-  { key: "companyDomain", label: "Domain" },
-  { key: "companyPhone", label: "Company phone" },
-  { key: "companyPhoneType", label: "Company phone type" },
-  { key: "companyPhoneStatus", label: "Company phone status" },
-  { key: "companyEmail", label: "Company email" },
-  { key: "companyEmailStatus", label: "Company email status" },
-  { key: "companyEmailVerifiedAt", label: "Company email verified at" },
-  { key: "companyPhoneVerifiedAt", label: "Company phone verified at" },
+  { key: "companyLinkedinUrl", label: "LinkedIn" },
   { key: "companyNiche", label: "Niche" },
   { key: "companyQualityTier", label: "Quality tier" },
   { key: "companyClient", label: "Client" },
-  { key: "companySource", label: "Source" },
   { key: "companyDescription", label: "Description" },
   { key: "companyFoundedYear", label: "Founded year" },
   { key: "companyRevenue", label: "Revenue" },
@@ -98,9 +71,7 @@ const BINDABLE_RECORD_COLUMNS: { key: string; label: string }[] = [
   { key: "companySecurityGateway", label: "Security gateway" },
   { key: "companyKeywords", label: "Keywords" },
   { key: "companyTechnologies", label: "Technologies" },
-  { key: "companyTags", label: "Tags" },
-  { key: "companyCreatedAt", label: "Created at" },
-  { key: "companyLastUpdated", label: "Last updated" },
+  { key: "companySource", label: "Source" },
 ];
 
 interface CustomVariableRow {
@@ -346,10 +317,11 @@ export function PushToEmailBisonButton({
           clientId: selectedClient.id,
           // The company count the user is looking at (the "Push {total}"
           // confirm). Persisted on the job so Push Activity can report
-          // "X companies selected → Y linked people sent" — a Companies push
-          // resolves to linked People (ADR 0003), so a company with no people
-          // contributes nothing, and this is the only way the summary can show
-          // the company-vs-people gap.
+          // "X companies selected → Y pushed" — a company with no email of its
+          // own is skipped (docs/adr/0005-company-native-emailbison-push.md),
+          // so job.total (the resolved candidate count) can be lower than this
+          // selected count, and this is the only way the summary can show
+          // that gap.
           sourceEntityTotal: total,
           existingLeadBehavior,
           customVariables: customVariablesForPush(),
@@ -417,9 +389,9 @@ export function PushToEmailBisonButton({
               Add to EmailBison — choose a client
             </AlertDialog.Title>
             <AlertDialog.Description className="mt-2 text-sm text-ink-soft">
-              Select which client&apos;s EmailBison workspace will receive every person linked to
-              the <strong className="text-ink">{total.toLocaleString("en-US")}</strong> companies
-              in the current view.
+              Select which client&apos;s EmailBison workspace will receive the{" "}
+              <strong className="text-ink">{total.toLocaleString("en-US")}</strong> companies in
+              the current view as leads.
             </AlertDialog.Description>
 
             <div className="mt-4 flex max-h-64 flex-col gap-1 overflow-y-auto">
@@ -494,7 +466,7 @@ export function PushToEmailBisonButton({
                 <div>
                   <p className="text-xs font-medium text-ink">Existing lead behavior</p>
                   <p className="mt-1 text-xs text-ink-mute">
-                    How to handle a person who already exists as a lead in this workspace.
+                    How to handle a company that already exists as a lead in this workspace.
                   </p>
                   <div className="mt-2 flex flex-col gap-1.5">
                     <label className="flex items-center gap-2 text-xs">
@@ -556,7 +528,7 @@ export function PushToEmailBisonButton({
                   </div>
                   <p className="mt-1 text-xs text-ink-mute">
                     Each variable name is sent with either a literal value or a value bound to a
-                    Person field/virtual column for each pushed person.
+                    Company field/virtual column for each pushed company.
                   </p>
 
                   {rows.length > 0 ? (
@@ -708,11 +680,10 @@ export function PushToEmailBisonButton({
               Push to {selectedClient?.name}?
             </AlertDialog.Title>
             <AlertDialog.Description className="mt-2 text-sm text-ink-soft">
-              Every person linked to the{" "}
-              <strong className="text-ink">{total.toLocaleString("en-US")}</strong>{" "}
-              companies in the current view will be created or updated as EmailBison leads. A
-              company with no linked people contributes nothing and won&apos;t error. No quality
-              filter is applied.
+              Every company in the current view (
+              <strong className="text-ink">{total.toLocaleString("en-US")}</strong> total) will be
+              created or updated as its own EmailBison lead, using the company&apos;s own name and
+              email. A company with no email of its own is skipped. No quality filter is applied.
             </AlertDialog.Description>
 
             <div className="mt-5 flex justify-end gap-2">
