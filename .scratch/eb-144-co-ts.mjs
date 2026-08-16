@@ -1,0 +1,10 @@
+import { config } from "dotenv"; config({ path: "D:/Scaletopia/Scaletopia-Inventory/.env.local" });
+import { createClient } from "@supabase/supabase-js";
+const admin=createClient(process.env.SUPABASE_URL,process.env.SUPABASE_SERVICE_ROLE_KEY,{auth:{persistSession:false}});
+const INTERNAL="a8dfe6bc-dd09-4146-b628-fc0eacce34f3", TAG="claude-qa-2026-08";
+const { data: cos } = await admin.from("companies").select("id").contains("source_tokens",[TAG]).eq("niche","qa-uncleaned");
+const ids=(cos??[]).map(c=>c.id);
+const { data: pp } = await admin.from("platform_pushes").select("company_id,pushed_at").eq("client_id",INTERNAL).eq("platform","emailbison").in("company_id",ids).order("pushed_at",{ascending:false});
+console.log(`qa-uncleaned company push rows: ${pp?.length}`);
+console.log(`newest: ${pp?.[0]?.pushed_at}`);
+console.log(`oldest: ${pp?.[pp.length-1]?.pushed_at}`);
