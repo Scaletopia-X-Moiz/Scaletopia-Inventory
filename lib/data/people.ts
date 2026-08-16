@@ -3,6 +3,7 @@ import { fetchAllRows } from "@/lib/data/fetch-all-rows";
 import { normalizeSourceTokens, sourceLabel } from "@/lib/data/source";
 import { countryLabel } from "@/lib/data/country";
 import { industryLabel } from "@/lib/data/industry";
+import { emailStatusLabel } from "@/lib/data/email-status";
 import { EMPLOYEE_BUCKETS, employeeBucketOf } from "@/lib/data/employee-size";
 import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
 import { sortByLastUpdatedDesc } from "@/lib/data/sort";
@@ -1126,7 +1127,7 @@ export async function getPersonFilterOptions(
       .sort(sortByCountDesc),
     employeeBuckets: EMPLOYEE_BUCKETS.map((b) => ({ id: b.id, label: b.label })),
     emailStatuses: result.emailStatuses
-      .map(({ id, count }) => ({ id, label: id, count }))
+      .map(({ id, count }) => ({ id, label: emailStatusLabel(id), count }))
       .sort(sortByCountDesc),
     phoneTypes: result.phoneTypes
       .map(({ id, count }) => ({ id, label: id, count }))

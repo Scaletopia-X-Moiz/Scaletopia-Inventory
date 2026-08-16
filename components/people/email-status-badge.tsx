@@ -1,27 +1,6 @@
 import { Tooltip } from "radix-ui";
 import { cn } from "@/lib/utils";
-
-const STATUS_LABEL: Record<string, string> = {
-  // Legacy MillionVerifier vocabulary — kept so historical rows (never
-  // migrated, per the Icypeas cutover decision) still render a real label
-  // instead of falling back to the raw db value.
-  ok: "OK",
-  catch_all: "Catch-all",
-  invalid: "Invalid",
-  unknown: "Unknown",
-  disposable: "Disposable",
-  // Icypeas confidence-scale vocabulary (see lib/icypeas/verify.ts
-  // EMAIL_STATUSES). No catch_all/disposable equivalent exists — Icypeas
-  // can't produce either (research doc §5c).
-  ultra_sure: "Ultra sure",
-  very_sure: "Very sure",
-  probable: "Probable",
-  undeliverable: "Undeliverable",
-  not_found: "Not found",
-  // Transient marker written the moment a verification job is submitted,
-  // before webhook/poll resolves it.
-  verifying: "Verifying…",
-};
+import { emailStatusLabel } from "@/lib/data/email-status";
 
 function formatVerifiedAt(value: string | null): string {
   if (!value) return "Never verified";
@@ -49,7 +28,7 @@ export function EmailStatusBadge({
 }) {
   if (!email) return null;
 
-  const label = status ? (STATUS_LABEL[status] ?? status) : "Not verified";
+  const label = status ? emailStatusLabel(status) : "Not verified";
 
   return (
     <Tooltip.Provider delayDuration={200}>
