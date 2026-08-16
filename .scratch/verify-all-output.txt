@@ -1,0 +1,342 @@
+############ C1 ############
+◇ injected env (38) from .env.local // tip: ⌁ auth for agents [www.vestauth.com]
+
+=== Scenario C1: Companies niche=qa-uncleaned (company-native + raw-name fallback + custom var) ===
+E (filter match count, = app "Push N"): 15
+  with email (pushable): 15   no email (should fail): 0
+A (platform_pushes rows for these ids, this client, since 2026-08-16T00:00:00Z): 15
+
+Missing (expected pushable but NOT in platform_pushes): 0
+Fetching 15 leads from EmailBison for per-item verification…
+
+---- RESULT ----
+  filter matched (E):        15
+  pushable (had email):      15
+  app pushed (A, w/ leadId): 15
+  verified in EmailBison:    15
+  MISSING (not pushed):      0
+  lead fetch failures:       0
+  email mismatches:          0
+  standard-field mismatches: 0
+  custom-var mismatches:     0
+
+  PASS ✅ — every pushable row landed and matches exactly.
+
+############ C2 ############
+◇ injected env (38) from .env.local // tip: ⌁ auth for agents [www.vestauth.com]
+
+=== Scenario C2: Companies niche=qa-orphan-nopeople (orphan companies push as leads) ===
+E (filter match count, = app "Push N"): 10
+  with email (pushable): 10   no email (should fail): 0
+A (platform_pushes rows for these ids, this client, since 2026-08-16T00:00:00Z): 10
+
+Missing (expected pushable but NOT in platform_pushes): 0
+Fetching 10 leads from EmailBison for per-item verification…
+
+---- RESULT ----
+  filter matched (E):        10
+  pushable (had email):      10
+  app pushed (A, w/ leadId): 10
+  verified in EmailBison:    10
+  MISSING (not pushed):      0
+  lead fetch failures:       0
+  email mismatches:          0
+  standard-field mismatches: 0
+  custom-var mismatches:     0
+
+  PASS ✅ — every pushable row landed and matches exactly.
+
+############ C3 ############
+◇ injected env (38) from .env.local // tip: ⌘ suppress logs { quiet: true }
+
+=== Scenario C3: Companies country=GB (country filter integrity + custom var) ===
+E (filter match count, = app "Push N"): 50
+  with email (pushable): 50   no email (should fail): 0
+A (platform_pushes rows for these ids, this client, since 2026-08-16T00:00:00Z): 50
+
+Missing (expected pushable but NOT in platform_pushes): 0
+Fetching 50 leads from EmailBison for per-item verification…
+
+---- RESULT ----
+  filter matched (E):        50
+  pushable (had email):      50
+  app pushed (A, w/ leadId): 50
+  verified in EmailBison:    50
+  MISSING (not pushed):      0
+  lead fetch failures:       0
+  email mismatches:          0
+  standard-field mismatches: 0
+  custom-var mismatches:     45
+  custom-var mismatches:
+    {"email":"hello@qa-co-0052.claude-qa.example","var":"qa_industry","expected":"marketing and advertising","got":"(missing)","leadId":"1170046"}
+    {"email":"hello@qa-co-0152.claude-qa.example","var":"qa_industry","expected":"health care","got":"(missing)","leadId":"1170090"}
+    {"email":"hello@qa-co-0302.claude-qa.example","var":"qa_industry","expected":"education","got":"(missing)","leadId":"1170080"}
+    {"email":"hello@qa-co-0102.claude-qa.example","var":"qa_industry","expected":"financial services","got":"(missing)","leadId":"1170093"}
+    {"email":"hello@qa-co-0352.claude-qa.example","var":"qa_industry","expected":"hospitality","got":"(missing)","leadId":"1169946"}
+    {"email":"hello@qa-co-0402.claude-qa.example","var":"qa_industry","expected":"manufacturing","got":"(missing)","leadId":"1170073"}
+    {"email":"hello@qa-co-0492.claude-qa.example","var":"qa_industry","expected":"construction","got":"(missing)","leadId":"1170067"}
+    {"email":"hello@qa-co-0452.claude-qa.example","var":"qa_industry","expected":"construction","got":"(missing)","leadId":"1170070"}
+
+  FAIL ❌ — see mismatches above.
+
+############ A5 ############
+◇ injected env (38) from .env.local // tip: ⌘ custom filepath { path: '/custom/path/.env' }
+Unknown scenario 'A5'. Options: C1, C2, C3, P1, P2, A4, G1, B3, B4, D1, D2
+
+############ A4 ############
+◇ injected env (38) from .env.local // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+
+=== Scenario A4: Companies niche=b2b-saas (literal static custom var + null-column drop) ===
+E (filter match count, = app "Push N"): 100
+  with email (pushable): 100   no email (should fail): 0
+A (platform_pushes rows for these ids, this client, since 2026-08-16T00:00:00Z): 100
+
+Missing (expected pushable but NOT in platform_pushes): 0
+Fetching 100 leads from EmailBison for per-item verification…
+
+---- RESULT ----
+  filter matched (E):        100
+  pushable (had email):      100
+  app pushed (A, w/ leadId): 100
+  verified in EmailBison:    100
+  MISSING (not pushed):      0
+  lead fetch failures:       0
+  email mismatches:          0
+  standard-field mismatches: 0
+  custom-var mismatches:     100
+  custom-var mismatches:
+    {"email":"hello@qa-co-0057.claude-qa.example","var":"qa_note","expected":"batchA4","got":"batch4a","leadId":"1170130"}
+    {"email":"hello@qa-co-0052.claude-qa.example","var":"qa_note","expected":"batchA4","got":"batch4a","leadId":"1170046"}
+    {"email":"hello@qa-co-0102.claude-qa.example","var":"qa_note","expected":"batchA4","got":"batch4a","leadId":"1170093"}
+    {"email":"hello@qa-co-0137.claude-qa.example","var":"qa_note","expected":"batchA4","got":"batch4a","leadId":"1170125"}
+    {"email":"hello@qa-co-0002.claude-qa.example","var":"qa_note","expected":"batchA4","got":"(missing)","leadId":"1170100"}
+    {"email":"hello@qa-co-0032.claude-qa.example","var":"qa_note","expected":"batchA4","got":"(missing)","leadId":"1170098"}
+    {"email":"hello@qa-co-0297.claude-qa.example","var":"qa_note","expected":"batchA4","got":"batch4a","leadId":"1170114"}
+    {"email":"hello@qa-co-0152.claude-qa.example","var":"qa_note","expected":"batchA4","got":"batch4a","leadId":"1170090"}
+
+  FAIL ❌ — see mismatches above.
+
+############ G1 ############
+◇ injected env (38) from .env.local // tip: ⌘ override existing { override: true }
+
+=== Scenario G1: Companies industry=software development (industry filter integrity + custom var) ===
+E (filter match count, = app "Push N"): 60
+  with email (pushable): 60   no email (should fail): 0
+A (platform_pushes rows for these ids, this client, since 2026-08-16T00:00:00Z): 60
+
+Missing (expected pushable but NOT in platform_pushes): 0
+Fetching 60 leads from EmailBison for per-item verification…
+
+---- RESULT ----
+  filter matched (E):        60
+  pushable (had email):      60
+  app pushed (A, w/ leadId): 60
+  verified in EmailBison:    60
+  MISSING (not pushed):      0
+  lead fetch failures:       0
+  email mismatches:          0
+  standard-field mismatches: 10
+  custom-var mismatches:     5
+  field mismatches:
+    {"email":"hello@qa-co-0045.claude-qa.example","field":"first","expected":"QA Company 0045","got":"qa_fn","leadId":"1170136"}
+    {"email":"hello@qa-co-0045.claude-qa.example","field":"last","expected":"company last name","got":"qa_ln","leadId":"1170136"}
+    {"email":"hello@qa-co-0005.claude-qa.example","field":"first","expected":"QA Company 0005","got":"qa_fn","leadId":"1170158"}
+    {"email":"hello@qa-co-0005.claude-qa.example","field":"last","expected":"company last name","got":"qa_ln","leadId":"1170158"}
+    {"email":"hello@qa-co-0025.claude-qa.example","field":"first","expected":"QA Company 0025","got":"qa_fn","leadId":"1170055"}
+    {"email":"hello@qa-co-0025.claude-qa.example","field":"last","expected":"company last name","got":"qa_ln","leadId":"1170055"}
+    {"email":"hello@qa-co-0015.claude-qa.example","field":"first","expected":"QA Company 0015","got":"qa_fn","leadId":"1170152"}
+    {"email":"hello@qa-co-0015.claude-qa.example","field":"last","expected":"company last name","got":"qa_ln","leadId":"1170152"}
+  custom-var mismatches:
+    {"email":"hello@qa-co-0045.claude-qa.example","var":"qa_industry","expected":"software development","got":"(missing)","leadId":"1170136"}
+    {"email":"hello@qa-co-0005.claude-qa.example","var":"qa_industry","expected":"software development","got":"(missing)","leadId":"1170158"}
+    {"email":"hello@qa-co-0025.claude-qa.example","var":"qa_industry","expected":"software development","got":"(missing)","leadId":"1170055"}
+    {"email":"hello@qa-co-0015.claude-qa.example","var":"qa_industry","expected":"software development","got":"(missing)","leadId":"1170152"}
+    {"email":"hello@qa-co-0035.claude-qa.example","var":"qa_industry","expected":"software development","got":"(missing)","leadId":"1170142"}
+
+  FAIL ❌ — see mismatches above.
+
+############ D1 ############
+◇ injected env (38) from .env.local // tip: ⌘ override existing { override: true }
+
+=== Scenario D1: Companies country=DE — Static value on First/Last name (patch) ===
+E (filter match count, = app "Push N"): 50
+  with email (pushable): 50   no email (should fail): 0
+A (platform_pushes rows for these ids, this client, since 2026-08-16T00:00:00Z): 50
+
+Missing (expected pushable but NOT in platform_pushes): 0
+Fetching 50 leads from EmailBison for per-item verification…
+
+---- RESULT ----
+  filter matched (E):        50
+  pushable (had email):      50
+  app pushed (A, w/ leadId): 50
+  verified in EmailBison:    50
+  MISSING (not pushed):      0
+  lead fetch failures:       0
+  email mismatches:          0
+  standard-field mismatches: 100
+  custom-var mismatches:     0
+  field mismatches:
+    {"email":"hello@qa-co-0295.claude-qa.example","field":"first","expected":"QA-FN","got":"qa_fn","leadId":"1169965"}
+    {"email":"hello@qa-co-0295.claude-qa.example","field":"last","expected":"QA-LN","got":"qa_ln","leadId":"1169965"}
+    {"email":"hello@qa-co-0235.claude-qa.example","field":"first","expected":"QA-FN","got":"qa_fn","leadId":"1169985"}
+    {"email":"hello@qa-co-0235.claude-qa.example","field":"last","expected":"QA-LN","got":"qa_ln","leadId":"1169985"}
+    {"email":"hello@qa-co-0495.claude-qa.example","field":"first","expected":"QA-FN","got":"qa_fn","leadId":"1170160"}
+    {"email":"hello@qa-co-0495.claude-qa.example","field":"last","expected":"QA-LN","got":"qa_ln","leadId":"1170160"}
+    {"email":"hello@qa-co-0055.claude-qa.example","field":"first","expected":"QA-FN","got":"qa_fn","leadId":"1170045"}
+    {"email":"hello@qa-co-0055.claude-qa.example","field":"last","expected":"QA-LN","got":"qa_ln","leadId":"1170045"}
+
+  FAIL ❌ — see mismatches above.
+
+############ D2 ############
+◇ injected env (38) from .env.local // tip: ◈ encrypted .env [www.dotenvx.com]
+
+=== Scenario D2: Companies country=DE — Full replace (put) with First/Last IGNORED → blanks them ===
+E (filter match count, = app "Push N"): 50
+  with email (pushable): 50   no email (should fail): 0
+A (platform_pushes rows for these ids, this client, since 2026-08-16T00:00:00Z): 50
+
+Missing (expected pushable but NOT in platform_pushes): 0
+Fetching 50 leads from EmailBison for per-item verification…
+
+---- RESULT ----
+  filter matched (E):        50
+  pushable (had email):      50
+  app pushed (A, w/ leadId): 50
+  verified in EmailBison:    50
+  MISSING (not pushed):      0
+  lead fetch failures:       0
+  email mismatches:          0
+  standard-field mismatches: 100
+  custom-var mismatches:     0
+  field mismatches:
+    {"email":"hello@qa-co-0235.claude-qa.example","field":"first","expected":"","got":"qa_fn","leadId":"1169985"}
+    {"email":"hello@qa-co-0235.claude-qa.example","field":"last","expected":"","got":"qa_ln","leadId":"1169985"}
+    {"email":"hello@qa-co-0495.claude-qa.example","field":"first","expected":"","got":"qa_fn","leadId":"1170160"}
+    {"email":"hello@qa-co-0495.claude-qa.example","field":"last","expected":"","got":"qa_ln","leadId":"1170160"}
+    {"email":"hello@qa-co-0055.claude-qa.example","field":"first","expected":"","got":"qa_fn","leadId":"1170045"}
+    {"email":"hello@qa-co-0055.claude-qa.example","field":"last","expected":"","got":"qa_ln","leadId":"1170045"}
+    {"email":"hello@qa-co-0455.claude-qa.example","field":"first","expected":"","got":"qa_fn","leadId":"1170163"}
+    {"email":"hello@qa-co-0455.claude-qa.example","field":"last","expected":"","got":"qa_ln","leadId":"1170163"}
+
+  FAIL ❌ — see mismatches above.
+
+############ P1 ############
+◇ injected env (38) from .env.local // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+
+=== Scenario P1: People niche=qa-uncleaned (4 custom vars + raw-name fallback) ===
+E (filter match count, = app "Push N"): 300
+  with email (pushable): 300   no email (should fail): 0
+A (platform_pushes rows for these ids, this client, since 2026-08-16T00:00:00Z): 300
+
+Missing (expected pushable but NOT in platform_pushes): 0
+Fetching 300 leads from EmailBison for per-item verification…
+
+---- RESULT ----
+  filter matched (E):        300
+  pushable (had email):      300
+  app pushed (A, w/ leadId): 300
+  verified in EmailBison:    300
+  MISSING (not pushed):      0
+  lead fetch failures:       0
+  email mismatches:          0
+  standard-field mismatches: 300
+  custom-var mismatches:     1200
+  field mismatches:
+    {"email":"qa-uncleaned-person0007@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167798"}
+    {"email":"qa-uncleaned-person0013@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167729"}
+    {"email":"qa-uncleaned-person0018@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167797"}
+    {"email":"qa-uncleaned-person0019@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167715"}
+    {"email":"qa-uncleaned-person0005@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167721"}
+    {"email":"qa-uncleaned-person0010@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167957"}
+    {"email":"qa-uncleaned-person0020@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167720"}
+    {"email":"qa-uncleaned-person0022@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167802"}
+  custom-var mismatches:
+    {"email":"qa-uncleaned-person0007@claude-qa.example","var":"qa_city","expected":"Denver","got":"(missing)","leadId":"1167798"}
+    {"email":"qa-uncleaned-person0007@claude-qa.example","var":"qa_state","expected":"CO","got":"(missing)","leadId":"1167798"}
+    {"email":"qa-uncleaned-person0007@claude-qa.example","var":"qa_company_domain","expected":"qa-uncleaned-co-0007.claude-qa.example","got":"(missing)","leadId":"1167798"}
+    {"email":"qa-uncleaned-person0007@claude-qa.example","var":"qa_employees","expected":"75","got":"(missing)","leadId":"1167798"}
+    {"email":"qa-uncleaned-person0013@claude-qa.example","var":"qa_city","expected":"Denver","got":"(missing)","leadId":"1167729"}
+    {"email":"qa-uncleaned-person0013@claude-qa.example","var":"qa_state","expected":"CO","got":"(missing)","leadId":"1167729"}
+    {"email":"qa-uncleaned-person0013@claude-qa.example","var":"qa_company_domain","expected":"qa-uncleaned-co-0013.claude-qa.example","got":"(missing)","leadId":"1167729"}
+    {"email":"qa-uncleaned-person0013@claude-qa.example","var":"qa_employees","expected":"75","got":"(missing)","leadId":"1167729"}
+
+  FAIL ❌ — see mismatches above.
+
+############ P2 ############
+◇ injected env (38) from .env.local // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+
+=== Scenario P2: People niche=qa-noemail (all no-email -> all must FAIL, nothing lands) ===
+E (filter match count, = app "Push N"): 100
+  with email (pushable): 0   no email (should fail): 100
+A (platform_pushes rows for these ids, this client, since 2026-08-16T00:00:00Z): 0
+
+RESULT: PASS ✅ — leads landed for a no-email slice: 0 (expected 0)
+  (Confirm in /push-activity that all 100 show a "no email on record" failure reason.)
+
+############ B3 ############
+◇ injected env (38) from .env.local // tip: ⌁ auth for agents [www.vestauth.com]
+
+=== Scenario B3: People country=CA (people country filter integrity + volume, defaults) ===
+E (filter match count, = app "Push N"): 1000
+  with email (pushable): 1000   no email (should fail): 0
+A (platform_pushes rows for these ids, this client, since 2026-08-16T00:00:00Z): 1000
+
+Missing (expected pushable but NOT in platform_pushes): 0
+Fetching 1000 leads from EmailBison for per-item verification…
+
+---- RESULT ----
+  filter matched (E):        1000
+  pushable (had email):      1000
+  app pushed (A, w/ leadId): 1000
+  verified in EmailBison:    1000
+  MISSING (not pushed):      0
+  lead fetch failures:       0
+  email mismatches:          0
+  standard-field mismatches: 1000
+  custom-var mismatches:     0
+  field mismatches:
+    {"email":"person02493@claude-qa.example","field":"title","expected":"VP Marketing","got":null,"leadId":"1167329"}
+    {"email":"person00033@claude-qa.example","field":"title","expected":"VP Marketing","got":null,"leadId":"1166114"}
+    {"email":"person00013@claude-qa.example","field":"title","expected":"VP Marketing","got":null,"leadId":"1166626"}
+    {"email":"person00813@claude-qa.example","field":"title","expected":"VP Marketing","got":null,"leadId":"1165903"}
+    {"email":"person05193@claude-qa.example","field":"title","expected":"VP Marketing","got":null,"leadId":"1166787"}
+    {"email":"person00293@claude-qa.example","field":"title","expected":"VP Marketing","got":null,"leadId":"1166532"}
+    {"email":"person00043@claude-qa.example","field":"title","expected":"VP Marketing","got":null,"leadId":"1165805"}
+    {"email":"person00063@claude-qa.example","field":"title","expected":"VP Marketing","got":null,"leadId":"1166627"}
+
+  FAIL ❌ — see mismatches above.
+
+############ B4 ############
+◇ injected env (38) from .env.local // tip: ◈ secrets for agents [www.dotenvx.com]
+
+=== Scenario B4: People niche=qa-noemail OR qa-uncleaned (mixed batch: 300 succeed + 100 fail) ===
+E (filter match count, = app "Push N"): 400
+  with email (pushable): 300   no email (should fail): 100
+A (platform_pushes rows for these ids, this client, since 2026-08-16T00:00:00Z): 300
+
+Missing (expected pushable but NOT in platform_pushes): 0
+Fetching 300 leads from EmailBison for per-item verification…
+
+---- RESULT ----
+  filter matched (E):        400
+  pushable (had email):      300
+  app pushed (A, w/ leadId): 300
+  verified in EmailBison:    300
+  MISSING (not pushed):      0
+  lead fetch failures:       0
+  email mismatches:          0
+  standard-field mismatches: 300
+  custom-var mismatches:     0
+  field mismatches:
+    {"email":"qa-uncleaned-person0013@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167729"}
+    {"email":"qa-uncleaned-person0007@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167798"}
+    {"email":"qa-uncleaned-person0010@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167957"}
+    {"email":"qa-uncleaned-person0018@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167797"}
+    {"email":"qa-uncleaned-person0005@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167721"}
+    {"email":"qa-uncleaned-person0019@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167715"}
+    {"email":"qa-uncleaned-person0020@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167720"}
+    {"email":"qa-uncleaned-person0022@claude-qa.example","field":"title","expected":"Founder","got":null,"leadId":"1167802"}
+
+  FAIL ❌ — see mismatches above.
+
