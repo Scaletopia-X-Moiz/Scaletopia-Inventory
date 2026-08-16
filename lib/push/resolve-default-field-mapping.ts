@@ -4,6 +4,7 @@ import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
 import { GHL_KNOWN_RECORD_FIELDS } from "@/lib/ghl/contact-payload";
 import type { EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
 import { fuzzyMatchColumn } from "@/lib/import/normalize";
+import { toLiteralSource } from "@/lib/push/standard-field-source";
 
 /** The subset of a pushed record resolveDefaultFieldMapping needs to decide
  * the company-name default — satisfied structurally by both GhlPushRecord
@@ -82,18 +83,29 @@ export function resolveDefaultFieldMapping(
     // its own record column, i.e. its own key — companyName is the one
     // exception, defaulting to the cleaned "brandName" column when any record
     // in the pushed set has one, else the raw "companyName" column, per
-    // resolveDefaultCompanyNameSource above. For a company-native Companies
-    // push (docs/adr/0005-company-native-emailbison-push.md), firstName/
-    // lastName/title have no company-side source column — default those three
-    // to "skip" instead of pointing at a field the pushed record never
-    // populates.
+    // resolveDefaultCompanyNameSource above.
+    //
+    // For a company-native Companies push
+    // (docs/adr/0005-company-native-emailbison-push.md), a Company has no
+    // person name/title, so the person-shaped fields get company-sensible
+    // defaults instead of "skip": companyName always prefers the cleaned
+    // brandName (a Company is the "person" here, so its display name should
+    // be the clean one), firstName falls back to the raw companyName so the
+    // lead still has a readable name if brandName is blank, lastName is a
+    // static "company last name" tag (EmailBison requires a non-empty last
+    // name; there's no natural company-side source for it), and title stays
+    // skipped (no company-side source).
     const isCompaniesEntity = args.entity === "companies";
     return {
       platform: "emailbison",
       standardFields: {
-        companyName: companyName === "brand_name" ? "brandName" : "companyName",
-        firstName: isCompaniesEntity ? "skip" : "firstName",
-        lastName: isCompaniesEntity ? "skip" : "lastName",
+        companyName: isCompaniesEntity
+          ? "brandName"
+          : companyName === "brand_name"
+            ? "brandName"
+            : "companyName",
+        firstName: isCompaniesEntity ? "companyName" : "firstName",
+        lastName: isCompaniesEntity ? toLiteralSource("company last name") : "lastName",
         email: "email",
         title: isCompaniesEntity ? "skip" : "title",
       },
