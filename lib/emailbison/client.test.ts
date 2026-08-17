@@ -298,6 +298,53 @@ describe("attachLeadsToCampaign", () => {
 
     expect(result).toEqual({ attached: [], failed: [{ leadId: "1", reason: "already in another sequence" }] });
   });
+
+  const BUNDLED_MESSAGE =
+    "No leads were added because they are either in other sequences, have previously bounced, or unsubscribed";
+
+  it("lists all possible causes and suggests parallel sending when parallel was OFF for this push", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(422, { data: { success: false, message: BUNDLED_MESSAGE } })
+    );
+
+    const result = await attachLeadsToCampaign(CREDENTIALS, "camp_1", ["1"], { parallel: false }, { fetchImpl });
+
+    expect(result.failed).toHaveLength(1);
+    const [{ reason }] = result.failed;
+    expect(reason).toContain("already active in another campaign");
+    expect(reason).toContain("bounced");
+    expect(reason).toContain("unsubscribed");
+    expect(reason).toContain("Allow parallel sending");
+    expect(reason).toContain(BUNDLED_MESSAGE);
+  });
+
+  it("does NOT suggest parallel sending and narrows to bounced/unsubscribed when parallel was already ON for this push", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(422, { data: { success: false, message: BUNDLED_MESSAGE } })
+    );
+
+    const result = await attachLeadsToCampaign(CREDENTIALS, "camp_1", ["1"], { parallel: true }, { fetchImpl });
+
+    expect(result.failed).toHaveLength(1);
+    const [{ reason }] = result.failed;
+    expect(reason).toContain("bounced");
+    expect(reason).toContain("unsubscribed");
+    expect(reason).not.toContain("Allow parallel sending");
+    expect(reason).toContain(BUNDLED_MESSAGE);
+  });
+
+  it.each([{ parallel: true }, { parallel: false }, {}])(
+    "returns a non-bundled message unchanged regardless of parallel (%j)",
+    async (options) => {
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValue(jsonResponse(422, { data: { success: false, message: "some other unrelated error" } }));
+
+      const result = await attachLeadsToCampaign(CREDENTIALS, "camp_1", ["1"], options, { fetchImpl });
+
+      expect(result.failed).toEqual([{ leadId: "1", reason: "some other unrelated error" }]);
+    }
+  );
 });
 
 describe("listCustomVariables", () => {

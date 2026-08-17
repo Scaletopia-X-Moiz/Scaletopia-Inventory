@@ -738,7 +738,7 @@ async function runEmailBisonAddToCampaign<TFilters>(
     lookupChunks.map((ids) =>
       supabaseAdmin
         .from("platform_pushes")
-        .select(`${idColumn},platform_contact_id`)
+        .select(`${idColumn},platform_contact_id,campaign_tag`)
         .eq("client_id", client.id)
         .eq("platform", PLATFORM)
         .in(idColumn, ids)
@@ -766,6 +766,25 @@ async function runEmailBisonAddToCampaign<TFilters>(
       leadIdByPersonId.set(rec[idColumn] as string, rec.platform_contact_id as string);
     }
   }
+
+  // Duplicate-attach heuristic (feedback: re-pushing the same leads to the
+  // same campaign should be a quiet no-op, not a reported failure).
+  // `campaign_tag` is repurposed to hold the campaign id a lead was last
+  // attached to (see the write-back below), so a candidate whose row already
+  // has campaign_tag === campaignId is already in this campaign — attaching
+  // it again would just get a generic rejection from EmailBison, which we'd
+  // otherwise count as a failure. LIMITATION: campaign_tag only records the
+  // MOST RECENT campaign a lead was attached to. A lead attached here and
+  // then later attached to a different campaign (e.g. parallel sending)
+  // would have this tag overwritten, so it wouldn't be caught by this check —
+  // it falls through to the attach step below and is (harmlessly) reported
+  // as a duplicate failure, exactly as it is today. This fix handles the
+  // common re-push-the-same-set case, not every possible duplicate.
+  const alreadyInThisCampaign = new Set(
+    (existingRows ?? [])
+      .filter((row) => (row as Record<string, unknown>).campaign_tag === campaignId)
+      .map((row) => (row as Record<string, unknown>)[idColumn] as string)
+  );
 
   // attachLeadsToCampaign never sends customVariables/standardFieldMapping —
   // it only attaches an existing lead id — so a candidate that already has a
@@ -811,8 +830,19 @@ async function runEmailBisonAddToCampaign<TFilters>(
   }
 
   const attachable = candidates.filter((c) => leadIdByPersonId.has(c.id));
+  // Candidates already attached to this exact campaign (per the heuristic
+  // above) don't need to hit the attach endpoint at all — they're pulled out
+  // here and counted as successes below instead of being re-sent.
+  const alreadyAttached = attachable.filter((c) => alreadyInThisCampaign.has(c.id));
+  const toAttach = attachable.filter((c) => !alreadyInThisCampaign.has(c.id));
 
-  if (attachable.length === 0) {
+  if (alreadyAttached.length > 0) {
+    console.log(
+      `EmailBison ${entity.label} add-to-campaign: ${alreadyAttached.length} candidate(s) already in campaign ${campaignId}, skipped re-attach`
+    );
+  }
+
+  if (toAttach.length === 0 && alreadyAttached.length === 0) {
     onProgress?.({ phase: "done", done: nextOffset, total: total_matched, attached: 0, errors });
     return {
       total_matched,
@@ -829,24 +859,44 @@ async function runEmailBisonAddToCampaign<TFilters>(
     };
   }
 
-  onProgress?.({ phase: "attaching", done: 0, total: attachable.length, attached: 0, errors });
+  if (toAttach.length === 0) {
+    // Nothing genuinely new to attach this tick, but there are already-in-
+    // campaign successes to record (skip the EmailBison call entirely).
+    const attached = alreadyAttached.length;
+    onProgress?.({ phase: "done", done: nextOffset, total: total_matched, attached, errors });
+    return {
+      total_matched,
+      attached,
+      created: 0,
+      updated: attached,
+      errors,
+      failed_people,
+      failed,
+      succeededPersonIds: alreadyAttached.map((c) => c.id),
+      failedPersonIds,
+      nextOffset,
+      done: isDone,
+    };
+  }
 
-  let attached = 0;
+  onProgress?.({ phase: "attaching", done: 0, total: toAttach.length, attached: 0, errors });
+
+  let attached = alreadyAttached.length;
   let created = 0;
-  let updated = 0;
-  const succeededPersonIds: string[] = [];
+  let updated = alreadyAttached.length;
+  const succeededPersonIds: string[] = [...alreadyAttached.map((c) => c.id)];
   try {
     const attachResult = await attachLeadsToCampaign(
       credentials,
       campaignId,
-      attachable.map((c) => leadIdByPersonId.get(c.id)!),
+      toAttach.map((c) => leadIdByPersonId.get(c.id)!),
       { parallel: deps.parallel },
       { fetchImpl }
     );
 
     const attachedLeadIds = new Set(attachResult.attached);
-    const attachedCandidates = attachable.filter((c) => attachedLeadIds.has(leadIdByPersonId.get(c.id)!));
-    const unattachedCandidates = attachable.filter((c) => !attachedLeadIds.has(leadIdByPersonId.get(c.id)!));
+    const attachedCandidates = toAttach.filter((c) => attachedLeadIds.has(leadIdByPersonId.get(c.id)!));
+    const unattachedCandidates = toAttach.filter((c) => !attachedLeadIds.has(leadIdByPersonId.get(c.id)!));
 
     if (attachedCandidates.length > 0) {
       const pushedAt = new Date().toISOString();
@@ -875,7 +925,7 @@ async function runEmailBisonAddToCampaign<TFilters>(
       if (updateError) throw updateError;
     }
 
-    attached = attachedCandidates.length;
+    attached += attachedCandidates.length;
     for (const c of attachedCandidates) {
       if (preExistingPersonIds.has(c.id)) updated++;
       else created++;
@@ -896,8 +946,8 @@ async function runEmailBisonAddToCampaign<TFilters>(
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    errors += attachable.length;
-    for (const c of attachable) {
+    errors += toAttach.length;
+    for (const c of toAttach) {
       const name = c.displayName || "unknown";
       failed_people.push(name);
       failed.push({ name, reason: message });

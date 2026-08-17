@@ -367,14 +367,27 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
  * the likely cause, not to distinguish which of the three actually applied. */
 const IN_OTHER_SEQUENCE_MESSAGE_PATTERN = /other sequences/i;
 
-/** Rewrites EmailBison's bundled rejection message into a clearer warning
- * when it matches the known "already in another sequence" phrasing, so the
- * common case (re-pushing a lead that's still active in a different
- * campaign in this workspace) reads as an explanation rather than a bare
- * error dump. Falls back to EmailBison's raw message for anything else. */
-function describeAttachFailure(message: string): string {
+/** Expands EmailBison's bundled rejection message into an honest explanation
+ * when it matches the known three-causes-in-one phrasing, instead of
+ * collapsing it to just the sequence-conflict cause. `parallel` is whatever
+ * "Allow parallel sending" setting this push actually used:
+ *  - When `parallel` was NOT already on, the sequence conflict is still a
+ *    live possible cause, so all three causes are listed and the message
+ *    points at "Allow parallel sending" as the fix for that one cause.
+ *  - When `parallel` WAS already on, EmailBison's own sequence-conflict rule
+ *    is already bypassed, so that cause is ruled out — the message says so
+ *    and narrows the remaining likely causes to bounced/unsubscribed, which
+ *    parallel sending cannot override, rather than re-suggesting a toggle
+ *    the caller already had on (issue: a parallel-on push with 756 failures
+ *    still told the user to enable it, which was useless and confusing).
+ * Falls back to EmailBison's raw message for anything that doesn't match the
+ * bundled pattern. */
+function describeAttachFailure(message: string, parallel?: boolean): string {
   if (IN_OTHER_SEQUENCE_MESSAGE_PATTERN.test(message)) {
-    return `This lead is already active in another campaign in this workspace, so EmailBison did not add it here (it also rejects leads that previously bounced or unsubscribed — EmailBison's message: "${message}"). Use "Allow parallel sending" to add it anyway.`;
+    if (parallel) {
+      return `EmailBison rejected this lead (EmailBison's message: "${message}"). Parallel sending was already enabled for this push, so it isn't a sequence conflict — the likely cause is that this lead previously bounced or unsubscribed, or it's already active in this campaign already, neither of which enabling parallel sending overrides.`;
+    }
+    return `EmailBison rejected this lead for one of a few possible reasons: it's already active in another campaign in this workspace, it's already active in this campaign already, it previously bounced, or it unsubscribed (EmailBison's message: "${message}"). If it's a sequence conflict, use "Allow parallel sending" to add it anyway — that won't help if it bounced, unsubscribed, or is already in this campaign.`;
   }
   return message;
 }
@@ -395,7 +408,10 @@ function describeAttachFailure(message: string): string {
  * parallel sending" toggle and maps to the wire field `allow_parallel_sending`
  * — confirmed live (OpenAPI spec + a live attach that produced true dual
  * `in_sequence` membership across two campaigns); the previous `parallel` key
- * was an unconfirmed guess and was silently ignored by EmailBison. */
+ * was an unconfirmed guess and was silently ignored by EmailBison. Also
+ * passed to describeAttachFailure so failure reasons reflect whether this
+ * push already had parallel sending on, instead of always suggesting a
+ * toggle the caller may have already enabled. */
 export async function attachLeadsToCampaign(
   credentials: EmailBisonCredentials,
   campaignId: string,
@@ -430,13 +446,13 @@ export async function attachLeadsToCampaign(
       const message = data && typeof data === "object" ? (data as Record<string, unknown>).message : undefined;
 
       if (status < 200 || status >= 300) {
-        const reason = typeof message === "string" ? describeAttachFailure(message) : `EmailBison campaign attach failed with status ${status}: ${JSON.stringify(json)}`;
+        const reason = typeof message === "string" ? describeAttachFailure(message, options.parallel) : `EmailBison campaign attach failed with status ${status}: ${JSON.stringify(json)}`;
         failed.push({ leadId, reason });
         return;
       }
 
       if (data && typeof data === "object" && (data as Record<string, unknown>).success === false) {
-        failed.push({ leadId, reason: typeof message === "string" ? describeAttachFailure(message) : "unknown error" });
+        failed.push({ leadId, reason: typeof message === "string" ? describeAttachFailure(message, options.parallel) : "unknown error" });
         return;
       }
 

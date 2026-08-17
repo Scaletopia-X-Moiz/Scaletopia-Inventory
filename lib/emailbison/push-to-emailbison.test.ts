@@ -874,6 +874,99 @@ describe("runPeopleAddToCampaign", () => {
     });
     expect(attachCalls).toEqual([]);
   });
+
+  it("counts a candidate already in this campaign as succeeded without re-attaching (feedback: re-push of the same set should be a quiet no-op)", async () => {
+    const niche = unique("campaign-dup-single");
+    await seedPeople(niche, [{ slug: "a" }]);
+    const client = await insertClient();
+    const attachCallsFirst: Array<{ leadIds: string[]; parallel: unknown }> = [];
+
+    // First push: attaches to the campaign, writing campaign_tag = CAMPAIGN_ID.
+    const first = await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, testActor, {
+      fetchImpl: okFetchWithCampaign(attachCallsFirst),
+    });
+    expect(first.attached).toBe(1);
+    expect(attachCallsFirst).toHaveLength(1);
+
+    // Second push of the same lead to the same campaign: attach-leads must
+    // NOT be called at all — the candidate is already in this campaign.
+    const attachSpy = vi.fn().mockImplementation(async () => {
+      throw new Error("attach-leads should not be called for a candidate already in this campaign");
+    });
+    const fetchImpl = vi.fn().mockImplementation(async (url: unknown, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith(`/api/campaigns/${CAMPAIGN_ID}/leads/attach-leads`)) {
+        return attachSpy();
+      }
+      return (okFetch() as unknown as (u: unknown, i?: RequestInit) => Promise<Response>)(url, init);
+    }) as unknown as typeof fetch;
+
+    const second = await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, testActor, {
+      fetchImpl,
+    });
+
+    expect(attachSpy).not.toHaveBeenCalled();
+    expect(second.total_matched).toBe(1);
+    expect(second.attached).toBe(1);
+    expect(second.updated).toBe(1);
+    expect(second.created).toBe(0);
+    expect(second.errors).toBe(0);
+    expect(second.failed).toHaveLength(0);
+    expect(second.failedPersonIds).toHaveLength(0);
+
+    const { data: person } = await supabaseAdmin
+      .from("people")
+      .select("id")
+      .eq("linkedin_url", testLinkedin(`${niche}-a`))
+      .single();
+    expect(second.succeededPersonIds).toEqual([person!.id as string]);
+  });
+
+  it("handles a mixed batch: attaches only the new candidate, counts the already-in-campaign one as succeeded", async () => {
+    const niche = unique("campaign-dup-mixed");
+    await seedPeople(niche, [{ slug: "a" }]);
+    const client = await insertClient();
+    const attachCallsFirst: Array<{ leadIds: string[]; parallel: unknown }> = [];
+
+    const first = await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, testActor, {
+      fetchImpl: okFetchWithCampaign(attachCallsFirst),
+    });
+    expect(first.attached).toBe(1);
+
+    // A second, brand-new person joins the same niche after the first push.
+    await seedPeople(niche, [{ slug: "b" }]);
+
+    const attachCallsSecond: Array<{ leadIds: string[]; parallel: unknown }> = [];
+    const second = await runPeopleAddToCampaign({ niche: includeOnly([niche]) }, client, CAMPAIGN_ID, testActor, {
+      fetchImpl: okFetchWithCampaign(attachCallsSecond),
+    });
+
+    expect(second.total_matched).toBe(2);
+    // 1 genuinely new attach ("b") + 1 already-in-campaign success ("a"), no failures.
+    expect(second.attached).toBe(2);
+    expect(second.created).toBe(1);
+    expect(second.updated).toBe(1);
+    expect(second.errors).toBe(0);
+    expect(second.failed).toHaveLength(0);
+    expect(second.failedPersonIds).toHaveLength(0);
+
+    // Only "b" (the genuinely new candidate) should have been sent to attach-leads.
+    const { data: personB } = await supabaseAdmin
+      .from("people")
+      .select("id")
+      .eq("linkedin_url", testLinkedin(`${niche}-b`))
+      .single();
+    const { data: pushRowB } = await supabaseAdmin
+      .from("platform_pushes")
+      .select("platform_contact_id")
+      .eq("person_id", personB!.id as string)
+      .single();
+
+    expect(attachCallsSecond).toHaveLength(1);
+    expect(attachCallsSecond[0].leadIds).toEqual([pushRowB!.platform_contact_id]);
+    expect(second.succeededPersonIds).toHaveLength(2);
+    expect(second.succeededPersonIds).toContain(personB!.id as string);
+  });
 });
 
 describe("runCompaniesAddToCampaign", () => {
