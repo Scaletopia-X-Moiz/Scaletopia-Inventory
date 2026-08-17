@@ -310,6 +310,16 @@ export function PushToEmailBisonCampaignButton({
   // from re-firing the field-mapping endpoints while they're loading.
   const [optionsLoading, setOptionsLoading] = useState(false);
 
+  // Pre-flight "already in another campaign" check on the confirm step —
+  // catches the gap reported live (351 leads silently failed, no warning
+  // until Push Activity refreshed minutes later): ask before pushing instead
+  // of only surfacing the rejection after the fact.
+  const [conflictStatus, setConflictStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [conflictResult, setConflictResult] = useState<{ totalMatched: number; conflicting: number } | null>(
+    null
+  );
+  const [conflictError, setConflictError] = useState<string | null>(null);
+
   const busy = status === "pushing";
   const selectedClient = clients?.find((c) => c.id === selectedClientId) ?? null;
   const selectedCampaign = campaigns?.find((c) => c.id === selectedCampaignId) ?? null;
@@ -352,6 +362,9 @@ export function PushToEmailBisonCampaignButton({
     setStandardFieldMapping(null);
     setStandardFieldMappingError(null);
     setOptionsLoading(false);
+    setConflictStatus("idle");
+    setConflictResult(null);
+    setConflictError(null);
   }
 
   async function handleClick() {
@@ -473,6 +486,32 @@ export function PushToEmailBisonCampaignButton({
 
   function handleContinueFromOptions() {
     setStep("confirm");
+    checkCampaignConflicts();
+  }
+
+  // Best-effort pre-flight check, kicked off as the confirm step opens: how
+  // many of the about-to-be-pushed people already look attached to a
+  // different campaign in this workspace (lib/emailbison/push-to-emailbison.ts's
+  // checkPeopleCampaignConflicts — a proxy off our own platform_pushes.campaign_tag,
+  // not a live EmailBison read). A fetch failure here just leaves the warning
+  // off; it never blocks the push itself.
+  async function checkCampaignConflicts() {
+    if (!selectedClient || !selectedCampaign) return;
+    setConflictStatus("loading");
+    setConflictError(null);
+    setConflictResult(null);
+    try {
+      const res = await fetch(
+        `/api/emailbison/campaign-conflict-check?entity=people&clientId=${selectedClient.id}&campaignId=${selectedCampaign.id}&${paramsStr}`
+      );
+      if (!res.ok) throw new Error("Failed to check for existing campaign membership");
+      const data = (await res.json()) as { totalMatched: number; conflicting: number };
+      setConflictResult(data);
+      setConflictStatus("done");
+    } catch (error) {
+      setConflictError((error as Error).message || "Failed to check for existing campaign membership.");
+      setConflictStatus("error");
+    }
   }
 
   function handleShowCreateCampaign() {
@@ -1369,6 +1408,31 @@ export function PushToEmailBisonCampaignButton({
               automatically. No quality filter is applied — this is exactly the currently
               filtered/selected set.
             </AlertDialog.Description>
+
+            {conflictStatus === "loading" ? (
+              <p className="mt-3 flex items-center gap-2 text-xs text-ink-soft">
+                <Loader2 size={12} className="animate-spin" />
+                Checking whether any of these are already in another campaign…
+              </p>
+            ) : conflictStatus === "error" ? (
+              <p className="mt-3 text-xs text-ink-mute">{conflictError}</p>
+            ) : conflictStatus === "done" && conflictResult && conflictResult.conflicting > 0 && !parallel ? (
+              <div className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-ink">
+                <strong>{conflictResult.conflicting.toLocaleString("en-US")}</strong> of{" "}
+                {conflictResult.totalMatched.toLocaleString("en-US")} already look active in a
+                different campaign in this workspace. EmailBison won&apos;t add them to{" "}
+                {selectedCampaign?.name} unless parallel sending is allowed for this push — want to
+                push them in anyway?
+                <label className="mt-2 flex cursor-pointer items-center gap-2 text-ink">
+                  <input
+                    type="checkbox"
+                    checked={parallel}
+                    onChange={(e) => setParallel(e.target.checked)}
+                  />
+                  Yes, allow parallel sending for this push
+                </label>
+              </div>
+            ) : null}
 
             <div className="mt-5 flex justify-end gap-2">
               <AlertDialog.Cancel asChild>

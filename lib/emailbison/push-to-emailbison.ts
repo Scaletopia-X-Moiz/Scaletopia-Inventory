@@ -955,3 +955,95 @@ export function runCompaniesAddToCampaign(
     deps
   );
 }
+
+export interface EmailBisonCampaignConflictCheck {
+  totalMatched: number;
+  /** Count of matched candidates whose most recent `platform_pushes` row for
+   * this client/platform already carries a DIFFERENT non-null `campaign_tag`
+   * — i.e. they were last successfully attached to some other campaign in
+   * this same workspace. EmailBison rejects attaching a lead that's still
+   * active in another campaign unless `allow_parallel_sending` is set
+   * (issue #106), so this is a best-effort proxy check ahead of the actual
+   * push: `campaign_tag` only reflects OUR last successful attach, not
+   * EmailBison's live membership (a lead detached/completed on EmailBison's
+   * side since then would still count here as a false-positive "conflict"). */
+  conflicting: number;
+}
+
+/** Pre-flight check for the "Add to Campaign" confirm step: how many of the
+ * about-to-be-pushed candidates already look like they're attached to a
+ * different campaign in this workspace, so the UI can warn and offer to
+ * enable parallel sending before the user hits Push, instead of only
+ * discovering the rejection after 351 leads fail (the reported gap this
+ * closes). Mirrors runEmailBisonAddToCampaign's own candidate resolution and
+ * platform_pushes lookup so this check reflects the exact same candidate
+ * set/columns the push itself would use. */
+async function checkEmailBisonCampaignConflicts<TFilters>(
+  entity: EmailBisonEntity<TFilters>,
+  filters: TFilters,
+  client: ClientRow,
+  campaignId: string
+): Promise<EmailBisonCampaignConflictCheck> {
+  const candidates = await entity.loadRecords(filters);
+  const totalMatched = candidates.length;
+  if (totalMatched === 0) return { totalMatched: 0, conflicting: 0 };
+
+  const idColumn = entity.idColumn;
+  const lookupChunks = chunk(
+    candidates.map((c) => c.id),
+    CAMPAIGN_LOOKUP_CHUNK_SIZE
+  );
+  const lookupResults = await Promise.all(
+    lookupChunks.map((ids) =>
+      supabaseAdmin
+        .from("platform_pushes")
+        .select(idColumn)
+        .eq("client_id", client.id)
+        .eq("platform", PLATFORM)
+        .not("campaign_tag", "is", null)
+        .neq("campaign_tag", campaignId)
+        .in(idColumn, ids)
+    )
+  );
+  const lookupError = lookupResults.find((r) => r.error)?.error;
+  if (lookupError) throw lookupError;
+
+  const conflictingIds = new Set(
+    lookupResults.flatMap((r) => (r.data ?? []).map((row) => (row as Record<string, unknown>)[idColumn] as string))
+  );
+
+  return { totalMatched, conflicting: conflictingIds.size };
+}
+
+/** Conflict check for the People "Add to Campaign" dialog. */
+export function checkPeopleCampaignConflicts(
+  filters: PersonListFilters,
+  client: ClientRow,
+  campaignId: string
+): Promise<EmailBisonCampaignConflictCheck> {
+  return checkEmailBisonCampaignConflicts(
+    { label: "people", idColumn: "person_id", targetTable: "people", loadRecords: getPeopleForEmailBison },
+    filters,
+    client,
+    campaignId
+  );
+}
+
+/** Conflict check for the Companies "Add to Campaign" dialog. */
+export function checkCompaniesCampaignConflicts(
+  filters: CompanyListFilters,
+  client: ClientRow,
+  campaignId: string
+): Promise<EmailBisonCampaignConflictCheck> {
+  return checkEmailBisonCampaignConflicts(
+    {
+      label: "companies",
+      idColumn: "company_id",
+      targetTable: "companies",
+      loadRecords: getCompaniesForEmailBison,
+    },
+    filters,
+    client,
+    campaignId
+  );
+}
