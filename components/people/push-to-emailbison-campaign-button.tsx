@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { AlertDialog } from "radix-ui";
-import { Loader2, Rocket, Plus, X } from "lucide-react";
+import { Loader2, Rocket, Plus, X, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/shared/toast";
 import { fetchActiveClients } from "@/lib/data/active-clients-client";
@@ -1405,7 +1405,7 @@ export function PushToEmailBisonCampaignButton({
               <strong className="text-ink">{total.toLocaleString("en-US")}</strong> people in the
               current view will be queued for this campaign on {selectedClient?.name}&apos;s
               EmailBison workspace. Anyone not already an EmailBison lead is added first,
-              automatically. No quality filter is applied — this is exactly the currently
+              automatically. No quality filter is applied, this is exactly the currently
               filtered/selected set.
             </AlertDialog.Description>
 
@@ -1416,21 +1416,28 @@ export function PushToEmailBisonCampaignButton({
               </p>
             ) : conflictStatus === "error" ? (
               <p className="mt-3 text-xs text-ink-mute">{conflictError}</p>
-            ) : conflictStatus === "done" && conflictResult && conflictResult.conflicting > 0 && !parallel ? (
+            ) : conflictStatus === "done" && conflictResult && conflictResult.conflicting > 0 ? (
               <div className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-ink">
                 <strong>{conflictResult.conflicting.toLocaleString("en-US")}</strong> of{" "}
                 {conflictResult.totalMatched.toLocaleString("en-US")} already look active in a
                 different campaign in this workspace. EmailBison won&apos;t add them to{" "}
-                {selectedCampaign?.name} unless parallel sending is allowed for this push — want to
-                push them in anyway?
-                <label className="mt-2 flex cursor-pointer items-center gap-2 text-ink">
-                  <input
-                    type="checkbox"
-                    checked={parallel}
-                    onChange={(e) => setParallel(e.target.checked)}
-                  />
-                  Yes, allow parallel sending for this push
-                </label>
+                {selectedCampaign?.name} unless parallel sending is allowed for this push. Push
+                them in anyway?
+                <button
+                  type="button"
+                  onClick={() => setParallel(!parallel)}
+                  className="mt-2 flex items-center gap-2 text-ink"
+                >
+                  <span
+                    className={cn(
+                      "flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-smooth",
+                      parallel ? "border-stamp bg-stamp text-white" : "border-rule"
+                    )}
+                  >
+                    {parallel ? <Check size={12} /> : null}
+                  </span>
+                  {parallel ? "Parallel sending allowed for this push" : "Yes, allow parallel sending for this push"}
+                </button>
               </div>
             ) : null}
 
