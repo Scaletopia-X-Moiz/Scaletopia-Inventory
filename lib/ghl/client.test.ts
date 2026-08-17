@@ -93,7 +93,7 @@ describe("pushContactToGhl", () => {
     expect(init.headers.Authorization).toBe("Bearer test-api-key");
   });
 
-  it("appends tags to the existing contact on a duplicate-contact 400", async () => {
+  it("syncs this push's fields onto the existing contact and appends tags on a duplicate-contact 400", async () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce(
@@ -102,27 +102,58 @@ describe("pushContactToGhl", () => {
           meta: { contactId: "existing_contact" },
         })
       )
+      .mockResolvedValueOnce(jsonResponse(200, { contact: { id: "existing_contact" } }))
       .mockResolvedValueOnce(jsonResponse(200, { tags: ["Acme - IoT | 1-10 | US | clay"] }));
 
     const result = await pushContactToGhl(
       CREDENTIALS,
-      { email: "dup@example.com", tags: ["Acme - IoT | 1-10 | US | clay"] },
+      {
+        email: "dup@example.com",
+        customFields: [{ id: "field_1", value: "ultra_sure" }],
+        tags: ["Acme - IoT | 1-10 | US | clay"],
+      },
       { fetchImpl }
     );
 
     expect(result).toEqual({ contactId: "existing_contact", deduped: true });
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    const [tagUrl, tagInit] = fetchImpl.mock.calls[1];
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+
+    const [updateUrl, updateInit] = fetchImpl.mock.calls[1];
+    expect(updateUrl).toBe(`${GHL_API_BASE}/contacts/existing_contact`);
+    expect(updateInit.method).toBe("PUT");
+    // Only the fields this push carries are sent — tags travel over the
+    // separate append-only tags endpoint, not this update, so an unrelated
+    // custom field a prior push set (e.g. a manually-added "Age") is never
+    // touched by this call.
+    expect(JSON.parse(updateInit.body)).toEqual({
+      email: "dup@example.com",
+      customFields: [{ id: "field_1", value: "ultra_sure" }],
+    });
+
+    const [tagUrl, tagInit] = fetchImpl.mock.calls[2];
     expect(tagUrl).toBe(`${GHL_API_BASE}/contacts/existing_contact/tags`);
     expect(JSON.parse(tagInit.body)).toEqual({ tags: ["Acme - IoT | 1-10 | US | clay"] });
   });
 
   it("does not call the tags endpoint when the duplicate contact payload has no tags", async () => {
-    const fetchImpl = vi.fn().mockResolvedValueOnce(
-      jsonResponse(400, { meta: { contactId: "existing_contact" } })
-    );
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(400, { meta: { contactId: "existing_contact" } }))
+      .mockResolvedValueOnce(jsonResponse(200, { contact: { id: "existing_contact" } }));
 
     const result = await pushContactToGhl(CREDENTIALS, { email: "dup@example.com" }, { fetchImpl });
+
+    expect(result).toEqual({ contactId: "existing_contact", deduped: true });
+    // 400 create + PUT update (email is a field to sync) — no third call
+    // since there are no tags to append.
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls[1][1].method).toBe("PUT");
+  });
+
+  it("does not call the update endpoint when the duplicate contact payload carries no fields to sync", async () => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(jsonResponse(400, { meta: { contactId: "existing_contact" } }));
+
+    const result = await pushContactToGhl(CREDENTIALS, {}, { fetchImpl });
 
     expect(result).toEqual({ contactId: "existing_contact", deduped: true });
     expect(fetchImpl).toHaveBeenCalledTimes(1);

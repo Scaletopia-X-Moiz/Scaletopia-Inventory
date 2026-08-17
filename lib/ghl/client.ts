@@ -90,7 +90,7 @@ interface RawResponse {
 async function requestWithMethodRetry(
   fetchImpl: typeof fetch,
   credentials: GhlCredentials,
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PUT",
   path: string,
   body?: Record<string, unknown>
 ): Promise<RawResponse> {
@@ -184,10 +184,55 @@ async function appendTagsToContact(
   }
 }
 
+/** Syncs this push's field values onto an already-existing GHL contact
+ * (the duplicate-contact 400 path). Only the fields this call's payload
+ * actually carries are sent — `pushOne` (lib/ghl/push-to-ghl.ts) already
+ * omits anything unresolved via `?? undefined`, and JSON.stringify drops
+ * undefined keys entirely, so a field this push has no value for is simply
+ * absent from the request rather than sent as null/empty. GHL's contact
+ * update applies each `customFields` entry by its `id` and leaves every
+ * other existing custom field on the contact untouched — the same
+ * this-push-only-touches-what-it-sends semantics EmailBison's "patch" upsert
+ * already gives (lib/emailbison/push-to-emailbison.ts), so a second push that
+ * only carries a new email verification status can't blow away an unrelated
+ * custom field (e.g. "Age") a prior push set. Tags are excluded here — they
+ * go through appendTagsToContact instead, which additively appends rather
+ * than replacing the contact's tag list. */
+async function updateExistingContact(
+  fetchImpl: typeof fetch,
+  credentials: GhlCredentials,
+  contactId: string,
+  payload: GhlContactPayload
+): Promise<void> {
+  const { tags: _tags, ...fields } = payload;
+  const hasFields =
+    fields.firstName !== undefined ||
+    fields.lastName !== undefined ||
+    fields.email !== undefined ||
+    fields.phone !== undefined ||
+    fields.companyName !== undefined ||
+    fields.city !== undefined ||
+    fields.country !== undefined ||
+    (fields.customFields !== undefined && fields.customFields.length > 0);
+  if (!hasFields) return;
+
+  const { status, json } = await requestWithMethodRetry(
+    fetchImpl,
+    credentials,
+    "PUT",
+    `/contacts/${contactId}`,
+    fields
+  );
+  if (status < 200 || status >= 300) {
+    throw new GhlApiError(`GHL contact update failed with status ${status}: ${JSON.stringify(json)}`, status);
+  }
+}
+
 /** Creates a contact in GHL for the given client credentials. A 400 response
  * carrying `meta.contactId` — GHL's signal that a contact with this
- * email/phone already exists — is treated as a soft success: the payload's
- * tags are appended to the existing contact instead of surfacing an error. */
+ * email/phone already exists — is treated as a soft success: this push's
+ * fields are synced onto the existing contact (updateExistingContact) and its
+ * tags appended (appendTagsToContact), instead of surfacing an error. */
 export async function pushContactToGhl(
   credentials: GhlCredentials,
   payload: GhlContactPayload,
@@ -211,6 +256,7 @@ export async function pushContactToGhl(
   if (status === 400) {
     const duplicateContactId = extractDuplicateContactId(json);
     if (duplicateContactId) {
+      await updateExistingContact(fetchImpl, credentials, duplicateContactId, payload);
       await appendTagsToContact(fetchImpl, credentials, duplicateContactId, payload.tags ?? []);
       return { contactId: duplicateContactId, deduped: true };
     }
