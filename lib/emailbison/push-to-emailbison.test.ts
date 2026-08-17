@@ -592,7 +592,7 @@ function okFetchWithCampaign(attachCalls: Array<{ leadIds: string[]; parallel: u
     const u = String(url);
     if (u.endsWith(`/api/campaigns/${CAMPAIGN_ID}/leads/attach-leads`)) {
       const body = JSON.parse((init?.body as string) ?? "{}");
-      attachCalls.push({ leadIds: body.lead_ids, parallel: body.parallel });
+      attachCalls.push({ leadIds: body.lead_ids, parallel: body.allow_parallel_sending });
       return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
     }
     return (base as unknown as (u: unknown, i?: RequestInit) => Promise<Response>)(url, init);
@@ -670,7 +670,7 @@ describe("runPeopleAddToCampaign", () => {
       const u = String(url);
       if (u.endsWith(`/api/campaigns/${CAMPAIGN_ID}/leads/attach-leads`)) {
         const body = JSON.parse((init?.body as string) ?? "{}");
-        attachCalls.push({ leadIds: body.lead_ids, parallel: body.parallel });
+        attachCalls.push({ leadIds: body.lead_ids, parallel: body.allow_parallel_sending });
         return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
       }
       return upsertFetchSpy();
@@ -719,7 +719,7 @@ describe("runPeopleAddToCampaign", () => {
       const u = String(url);
       if (u.endsWith(`/api/campaigns/${CAMPAIGN_ID}/leads/attach-leads`)) {
         const body = JSON.parse((init?.body as string) ?? "{}");
-        attachCalls.push({ leadIds: body.lead_ids, parallel: body.parallel });
+        attachCalls.push({ leadIds: body.lead_ids, parallel: body.allow_parallel_sending });
         return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
       }
       if (u.endsWith("/api/custom-variables") && init?.method === "POST") {

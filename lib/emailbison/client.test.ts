@@ -249,8 +249,8 @@ describe("attachLeadsToCampaign", () => {
     const calls = fetchImpl.mock.calls.map(([url, init]) => [url, JSON.parse(init.body)]);
     expect(calls).toEqual(
       expect.arrayContaining([
-        [`${CREDENTIALS.workspaceId}/api/campaigns/camp_1/leads/attach-leads`, { lead_ids: ["1"], parallel: true }],
-        [`${CREDENTIALS.workspaceId}/api/campaigns/camp_1/leads/attach-leads`, { lead_ids: ["2"], parallel: true }],
+        [`${CREDENTIALS.workspaceId}/api/campaigns/camp_1/leads/attach-leads`, { lead_ids: ["1"], allow_parallel_sending: true }],
+        [`${CREDENTIALS.workspaceId}/api/campaigns/camp_1/leads/attach-leads`, { lead_ids: ["2"], allow_parallel_sending: true }],
       ])
     );
   });
@@ -284,7 +284,7 @@ describe("attachLeadsToCampaign", () => {
     expect(result.failed).toEqual([
       {
         leadId: "2",
-        reason: expect.stringContaining("422"),
+        reason: expect.stringContaining("already active in another campaign in this workspace"),
       },
     ]);
   });

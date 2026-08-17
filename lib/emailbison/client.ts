@@ -359,6 +359,26 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
+/** EmailBison's stock rejection text for the two-sequences-at-once rule
+ * (`POST /api/campaigns/{id}/leads/attach-leads`, no `allow_parallel_sending`)
+ * — confirmed live, verbatim: "No leads were added because they are either
+ * in other sequences, have previously bounced, or unsubscribed." Bundles
+ * three distinct causes into one message, so this can only be used to *flag*
+ * the likely cause, not to distinguish which of the three actually applied. */
+const IN_OTHER_SEQUENCE_MESSAGE_PATTERN = /other sequences/i;
+
+/** Rewrites EmailBison's bundled rejection message into a clearer warning
+ * when it matches the known "already in another sequence" phrasing, so the
+ * common case (re-pushing a lead that's still active in a different
+ * campaign in this workspace) reads as an explanation rather than a bare
+ * error dump. Falls back to EmailBison's raw message for anything else. */
+function describeAttachFailure(message: string): string {
+  if (IN_OTHER_SEQUENCE_MESSAGE_PATTERN.test(message)) {
+    return `This lead is already active in another campaign in this workspace, so EmailBison did not add it here (it also rejects leads that previously bounced or unsubscribed — EmailBison's message: "${message}"). Use "Allow parallel sending" to add it anyway.`;
+  }
+  return message;
+}
+
 /** Attaches leads to a campaign by their EmailBison lead ids
  * (`POST /api/campaigns/{campaign_id}/leads/attach-leads`) — async on
  * EmailBison's side (up to ~5 minutes to sync), so callers should present a
@@ -372,8 +392,10 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
  * ATTACH_CONCURRENCY in flight) instead of one request per batch, and
  * reports which lead ids actually attached vs. failed, rather than trusting
  * a single status code for the whole set. `parallel` mirrors Clay's "Allow
- * parallel sending" toggle; wire field name is a best-effort guess pending a
- * live-token check. */
+ * parallel sending" toggle and maps to the wire field `allow_parallel_sending`
+ * — confirmed live (OpenAPI spec + a live attach that produced true dual
+ * `in_sequence` membership across two campaigns); the previous `parallel` key
+ * was an unconfirmed guess and was silently ignored by EmailBison. */
 export async function attachLeadsToCampaign(
   credentials: EmailBisonCredentials,
   campaignId: string,
@@ -390,7 +412,7 @@ export async function attachLeadsToCampaign(
       group.map((leadId) =>
         requestWithRetry(fetchImpl, credentials, `/api/campaigns/${campaignId}/leads/attach-leads`, {
           lead_ids: [leadId],
-          ...(options.parallel !== undefined ? { parallel: options.parallel } : {}),
+          ...(options.parallel !== undefined ? { allow_parallel_sending: options.parallel } : {}),
         })
       )
     );
@@ -404,15 +426,17 @@ export async function attachLeadsToCampaign(
       }
 
       const { status, json } = result.value;
+      const data = json && typeof json === "object" ? (json as Record<string, unknown>).data : null;
+      const message = data && typeof data === "object" ? (data as Record<string, unknown>).message : undefined;
+
       if (status < 200 || status >= 300) {
-        failed.push({ leadId, reason: `EmailBison campaign attach failed with status ${status}: ${JSON.stringify(json)}` });
+        const reason = typeof message === "string" ? describeAttachFailure(message) : `EmailBison campaign attach failed with status ${status}: ${JSON.stringify(json)}`;
+        failed.push({ leadId, reason });
         return;
       }
 
-      const data = json && typeof json === "object" ? (json as Record<string, unknown>).data : null;
       if (data && typeof data === "object" && (data as Record<string, unknown>).success === false) {
-        const message = (data as Record<string, unknown>).message;
-        failed.push({ leadId, reason: typeof message === "string" ? message : "unknown error" });
+        failed.push({ leadId, reason: typeof message === "string" ? describeAttachFailure(message) : "unknown error" });
         return;
       }
 
