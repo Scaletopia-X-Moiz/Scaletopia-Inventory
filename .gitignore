@@ -30,3 +30,9 @@ env.local
 # supabase CLI link state (local machine only)
 /supabase/
 .vercel
+
+# scratch scripts / one-off debug & verify runs (local only)
+/.scratch/
+
+# large local spreadsheet exports (kept out of git)
+/*.numbers
