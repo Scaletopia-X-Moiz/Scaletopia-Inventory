@@ -360,13 +360,36 @@ export async function claimNextRunnableJob(maxConcurrent?: number | null): Promi
  * The worker calls this once at the start of every invocation so a stranded
  * job (which permanently blocks its client's queue, and in bulk exhausts the
  * global concurrency cap for all clients) is auto-recovered within ~one cron
- * minute of its lease lapsing (ticket #137). */
-export async function resetStaleRunningJobs(staleSeconds = 600): Promise<number> {
+ * minute of its lease lapsing (ticket #137).
+ *
+ * Default lowered 600 → 120: a healthy tick now heartbeats its lease every
+ * ~20s via touchJobLease (worker `onProgress`), so the reaper no longer has to
+ * wait out a whole tick's worth of silence before it can safely tell a live
+ * job from a dead one. This is what makes a stalled push recover in ~2 min
+ * instead of ~10. */
+export async function resetStaleRunningJobs(staleSeconds = 120): Promise<number> {
   const { data, error } = await supabaseAdmin.rpc("reset_stale_running_jobs", {
     stale_seconds: staleSeconds,
   });
   if (error) throw error;
   return ((data ?? []) as unknown[]).length;
+}
+
+/** Renews only a running job's lease (`started_at`) without touching any
+ * progress counter — the mid-tick heartbeat the worker fires from a push
+ * core's `onProgress` callback. `started_at` doubles as the stale-job reaper's
+ * liveness signal (resetStaleRunningJobs): a single tick can push for the full
+ * TICK_BUDGET without otherwise writing the row, so without this heartbeat the
+ * reaper's stale window must exceed a whole tick. Touching the lease every few
+ * seconds during the push lets that window drop to ~2 min, so a job stranded
+ * by a dropped self-chain recovers ~5x faster. Deliberately writes nothing but
+ * `started_at`, so it can never clobber a concurrently-advancing counter. */
+export async function touchJobLease(id: string): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from("push_jobs")
+    .update({ started_at: new Date().toISOString() })
+    .eq("id", id);
+  if (error) throw error;
 }
 
 /** Updates the live progress counters a running job reports mid-run. */

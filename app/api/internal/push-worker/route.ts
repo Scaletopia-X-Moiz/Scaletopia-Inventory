@@ -4,6 +4,7 @@ import {
   resetStaleRunningJobs,
   getPushJob,
   updateJobProgress,
+  touchJobLease,
   finishJob,
   recordJobPeople,
   type PushJob,
@@ -124,6 +125,33 @@ function errorMessage(err: unknown): string {
   return str;
 }
 
+/** Builds the mid-tick lease heartbeat handed to each push core as
+ * `onProgress`. A push core fires onProgress once per concurrency group, which
+ * can be many times a second on a large batch — so this throttles the actual
+ * DB write to at most once per `minIntervalMs` and never overlaps two writes.
+ * Fire-and-forget: a failed heartbeat is logged, never thrown, so it can't
+ * abort the push. Renewing `started_at` this often is what lets the reaper's
+ * stale window sit at ~2 min without ever mistaking a live tick for a dead one
+ * (see touchJobLease / resetStaleRunningJobs). Ignores its progress argument —
+ * a bare `() => void` is assignable to every core's typed onProgress. */
+function makeJobHeartbeat(jobId: string, minIntervalMs = 20_000): () => void {
+  let lastAt = 0;
+  let inFlight = false;
+  return () => {
+    const now = Date.now();
+    if (inFlight || now - lastAt < minIntervalMs) return;
+    lastAt = now;
+    inFlight = true;
+    touchJobLease(jobId)
+      .catch((err) => {
+        console.error(`[push-worker] lease heartbeat failed (jobId=${jobId}): ${errorMessage(err)}`);
+      })
+      .finally(() => {
+        inFlight = false;
+      });
+  };
+}
+
 interface TickOutcome {
   total: number;
   nextOffset: number;
@@ -154,10 +182,15 @@ async function runTick(
 
   const options = job.options ?? {};
 
+  // Heartbeat the job's lease from each core's onProgress so a live multi-tick
+  // push keeps `started_at` fresh (see makeJobHeartbeat / resetStaleRunningJobs).
+  const heartbeat = makeJobHeartbeat(job.id);
+
   if (job.platform === "ghl") {
     const result = await runPeopleGhlPush(job.filters as unknown as PersonListFilters, client, actor, {
       offset,
       deadline,
+      onProgress: heartbeat,
       // normalizeGhlFieldMapping (ticket #142) upgrades a job queued before
       // the #142 deploy (legacy {virtualColumnKey, ghlFieldId} entries)
       // instead of the blind cast silently misreading it.
@@ -186,6 +219,7 @@ async function runTick(
     const deps = {
       offset,
       deadline,
+      onProgress: heartbeat,
       existingLeadBehavior: options.existingLeadBehavior as "patch" | "put" | undefined,
       customVariables: options.customVariables as EmailBisonCustomVariableEntry[] | undefined,
       standardFieldMapping: options.standardFieldMapping as EmailBisonStandardFieldMapping | undefined,
@@ -211,6 +245,7 @@ async function runTick(
     const deps = {
       offset,
       deadline,
+      onProgress: heartbeat,
       existingLeadBehavior: options.existingLeadBehavior as "patch" | "put" | undefined,
       customVariables: options.customVariables as EmailBisonCustomVariableEntry[] | undefined,
       standardFieldMapping: options.standardFieldMapping as EmailBisonStandardFieldMapping | undefined,
