@@ -41,11 +41,11 @@ describe("requestWithRetry", () => {
       const fetchImpl = vi
         .fn()
         .mockResolvedValueOnce(jsonResponse(502, { message: "bad gateway" }))
-        .mockResolvedValueOnce(jsonResponse(400, { meta: { contactId: "c1" } }));
+        .mockResolvedValueOnce(jsonResponse(422, { message: "bad request" }));
 
-      const result = await requestWithRetry(fetchImpl, CREDENTIALS, "/contacts/", { email: "a@b.com" });
+      const result = await requestWithRetry(fetchImpl, CREDENTIALS, "/contacts/upsert", { email: "a@b.com" });
 
-      expect(result).toEqual({ status: 400, json: { meta: { contactId: "c1" } } });
+      expect(result).toEqual({ status: 422, json: { message: "bad request" } });
       expect(fetchImpl).toHaveBeenCalledTimes(2);
       expect(delays).toHaveLength(1);
     } finally {
@@ -61,7 +61,7 @@ describe("requestWithRetry", () => {
         .mockRejectedValueOnce(new Error("network down"))
         .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
 
-      const result = await requestWithRetry(fetchImpl, CREDENTIALS, "/contacts/", {});
+      const result = await requestWithRetry(fetchImpl, CREDENTIALS, "/contacts/upsert", {});
 
       expect(result).toEqual({ status: 200, json: { ok: true } });
       expect(delays).toHaveLength(1);
@@ -72,8 +72,10 @@ describe("requestWithRetry", () => {
 });
 
 describe("pushContactToGhl", () => {
-  it("returns the new contact id on successful creation", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, { contact: { id: "contact_1" } }));
+  it("upserts and returns the new contact id when GHL reports a fresh create", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(201, { new: true, contact: { id: "contact_1" } }));
 
     const result = await pushContactToGhl(
       CREDENTIALS,
@@ -84,8 +86,8 @@ describe("pushContactToGhl", () => {
     expect(result).toEqual({ contactId: "contact_1", deduped: false });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0];
-    expect(url).toBe(`${GHL_API_BASE}/contacts/`);
-    expect(JSON.parse(init.body)).toMatchObject({
+    expect(url).toBe(`${GHL_API_BASE}/contacts/upsert`);
+    expect(JSON.parse(init.body)).toEqual({
       firstName: "Ada",
       email: "ada@example.com",
       locationId: "loc_123",
@@ -93,70 +95,75 @@ describe("pushContactToGhl", () => {
     expect(init.headers.Authorization).toBe("Bearer test-api-key");
   });
 
-  it("syncs this push's fields onto the existing contact and appends tags on a duplicate-contact 400", async () => {
+  it("does not send tags in the upsert body — they travel over the separate append-only tags call", async () => {
     const fetchImpl = vi
       .fn()
-      .mockResolvedValueOnce(
-        jsonResponse(400, {
-          message: "duplicate contact",
-          meta: { contactId: "existing_contact" },
-        })
-      )
-      .mockResolvedValueOnce(jsonResponse(200, { contact: { id: "existing_contact" } }))
+      .mockResolvedValueOnce(jsonResponse(201, { new: true, contact: { id: "contact_1" } }))
       .mockResolvedValueOnce(jsonResponse(200, { tags: ["Acme - IoT | 1-10 | US | clay"] }));
 
-    const result = await pushContactToGhl(
+    await pushContactToGhl(
       CREDENTIALS,
       {
-        email: "dup@example.com",
+        email: "ada@example.com",
         customFields: [{ id: "field_1", value: "ultra_sure" }],
         tags: ["Acme - IoT | 1-10 | US | clay"],
       },
       { fetchImpl }
     );
 
-    expect(result).toEqual({ contactId: "existing_contact", deduped: true });
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
-
-    const [updateUrl, updateInit] = fetchImpl.mock.calls[1];
-    expect(updateUrl).toBe(`${GHL_API_BASE}/contacts/existing_contact`);
-    expect(updateInit.method).toBe("PUT");
-    // Only the fields this push carries are sent — tags travel over the
-    // separate append-only tags endpoint, not this update, so an unrelated
-    // custom field a prior push set (e.g. a manually-added "Age") is never
-    // touched by this call.
-    expect(JSON.parse(updateInit.body)).toEqual({
-      email: "dup@example.com",
+    const [upsertUrl, upsertInit] = fetchImpl.mock.calls[0];
+    expect(upsertUrl).toBe(`${GHL_API_BASE}/contacts/upsert`);
+    // Tags are excluded here (see CRITICAL comment on pushContactToGhl) — a
+    // repeat upsert with tags in-body was live-verified to REPLACE, not
+    // append, the contact's tag list.
+    expect(JSON.parse(upsertInit.body)).toEqual({
+      email: "ada@example.com",
       customFields: [{ id: "field_1", value: "ultra_sure" }],
+      locationId: "loc_123",
     });
 
-    const [tagUrl, tagInit] = fetchImpl.mock.calls[2];
-    expect(tagUrl).toBe(`${GHL_API_BASE}/contacts/existing_contact/tags`);
+    const [tagUrl, tagInit] = fetchImpl.mock.calls[1];
+    expect(tagUrl).toBe(`${GHL_API_BASE}/contacts/contact_1/tags`);
     expect(JSON.parse(tagInit.body)).toEqual({ tags: ["Acme - IoT | 1-10 | US | clay"] });
   });
 
-  it("does not call the tags endpoint when the duplicate contact payload has no tags", async () => {
+  it("reports deduped: true when GHL's upsert matches an existing contact", async () => {
     const fetchImpl = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse(400, { meta: { contactId: "existing_contact" } }))
-      .mockResolvedValueOnce(jsonResponse(200, { contact: { id: "existing_contact" } }));
+      .mockResolvedValue(jsonResponse(200, { new: false, contact: { id: "existing_contact" } }));
 
     const result = await pushContactToGhl(CREDENTIALS, { email: "dup@example.com" }, { fetchImpl });
 
     expect(result).toEqual({ contactId: "existing_contact", deduped: true });
-    // 400 create + PUT update (email is a field to sync) — no third call
-    // since there are no tags to append.
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(fetchImpl.mock.calls[1][1].method).toBe("PUT");
+    // No tags on this payload — the append call is skipped entirely.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it("does not call the update endpoint when the duplicate contact payload carries no fields to sync", async () => {
-    const fetchImpl = vi.fn().mockResolvedValueOnce(jsonResponse(400, { meta: { contactId: "existing_contact" } }));
+  it("appends tags to an existing (deduped) contact, not just a freshly-created one", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, { new: false, contact: { id: "existing_contact" } }))
+      .mockResolvedValueOnce(jsonResponse(200, { tags: ["ghl-a", "ghl-b"] }));
 
-    const result = await pushContactToGhl(CREDENTIALS, {}, { fetchImpl });
+    const result = await pushContactToGhl(
+      CREDENTIALS,
+      { email: "dup@example.com", tags: ["ghl-b"] },
+      { fetchImpl }
+    );
 
     expect(result).toEqual({ contactId: "existing_contact", deduped: true });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const [tagUrl, tagInit] = fetchImpl.mock.calls[1];
+    expect(tagUrl).toBe(`${GHL_API_BASE}/contacts/existing_contact/tags`);
+    expect(JSON.parse(tagInit.body)).toEqual({ tags: ["ghl-b"] });
+  });
+
+  it("treats a response with no recognizable `new` flag as not deduped", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, { contact: { id: "contact_1" } }));
+
+    const result = await pushContactToGhl(CREDENTIALS, { email: "ada@example.com" }, { fetchImpl });
+
+    expect(result).toEqual({ contactId: "contact_1", deduped: false });
   });
 
   it("retries transient 5xx failures and succeeds once the response recovers", async () => {
@@ -165,7 +172,7 @@ describe("pushContactToGhl", () => {
       const fetchImpl = vi
         .fn()
         .mockResolvedValueOnce(jsonResponse(503, { message: "unavailable" }))
-        .mockResolvedValueOnce(jsonResponse(201, { contact: { id: "contact_2" } }));
+        .mockResolvedValueOnce(jsonResponse(201, { new: true, contact: { id: "contact_2" } }));
 
       const result = await pushContactToGhl(CREDENTIALS, { email: "retry@example.com" }, { fetchImpl });
 
@@ -183,7 +190,7 @@ describe("pushContactToGhl", () => {
       const fetchImpl = vi
         .fn()
         .mockResolvedValueOnce(jsonResponse(429, { message: "rate limited" }, { "Retry-After": "9999" }))
-        .mockResolvedValueOnce(jsonResponse(201, { contact: { id: "contact_3" } }));
+        .mockResolvedValueOnce(jsonResponse(201, { new: true, contact: { id: "contact_3" } }));
 
       await pushContactToGhl(CREDENTIALS, { email: "ratelimited@example.com" }, { fetchImpl });
 
@@ -208,7 +215,7 @@ describe("pushContactToGhl", () => {
     }
   });
 
-  it("surfaces non-transient, non-duplicate failures as errors without retrying", async () => {
+  it("surfaces non-transient upsert failures as errors without retrying", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(401, { message: "invalid api key" }));
 
     await expect(
@@ -217,18 +224,18 @@ describe("pushContactToGhl", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it("surfaces a 400 without meta.contactId as an error", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(400, { message: "invalid payload" }));
+  it("surfaces a malformed 2xx upsert response (no contact id) as an error", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { new: true }));
 
     await expect(
       pushContactToGhl(CREDENTIALS, { email: "bad-payload@example.com" }, { fetchImpl })
     ).rejects.toThrow(GhlApiError);
   });
 
-  it("throws GhlApiError when the tag-append call fails for a duplicate contact", async () => {
+  it("throws GhlApiError when the tag-append call fails after a successful upsert", async () => {
     const fetchImpl = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse(400, { meta: { contactId: "existing_contact" } }))
+      .mockResolvedValueOnce(jsonResponse(200, { new: false, contact: { id: "existing_contact" } }))
       .mockResolvedValue(jsonResponse(422, { message: "bad tags" }));
 
     await expect(

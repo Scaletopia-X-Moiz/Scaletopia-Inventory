@@ -35,9 +35,12 @@ export interface GhlContactPayload {
 
 export interface PushContactResult {
   contactId: string;
-  /** True when GHL reported this as a duplicate contact and the payload's
-   * tags were appended to the existing contact instead of a new one being
-   * created. */
+  /** True when the upsert matched an already-existing GHL contact (response
+   * `new: false`) rather than creating a fresh one — any tags this push
+   * carries were appended to that existing contact's tag list, not sent
+   * in-body. False both for a genuine create (`new: true`) and for the rare
+   * case GHL's response didn't include a recognizable `new` flag (see
+   * extractNewFlag). */
   deduped: boolean;
 }
 
@@ -150,14 +153,6 @@ export async function requestGetWithRetry(
   return requestWithMethodRetry(fetchImpl, credentials, "GET", path);
 }
 
-function extractDuplicateContactId(json: unknown): string | null {
-  if (!json || typeof json !== "object") return null;
-  const meta = (json as Record<string, unknown>).meta;
-  if (!meta || typeof meta !== "object") return null;
-  const contactId = (meta as Record<string, unknown>).contactId;
-  return typeof contactId === "string" ? contactId : null;
-}
-
 function extractContactId(json: unknown): string | null {
   if (!json || typeof json !== "object") return null;
   const record = json as Record<string, unknown>;
@@ -167,6 +162,20 @@ function extractContactId(json: unknown): string | null {
     if (typeof id === "string") return id;
   }
   return typeof record.id === "string" ? record.id : null;
+}
+
+/** Reads GHL's `new` flag off an upsert response (`{new: boolean, contact:
+ * {...}}`, live-verified against the Internal test location 2026-08-18 —
+ * `new: true` on first create, `new: false` on a dedupe match against an
+ * existing contact). Absent/non-boolean (a response shape we haven't seen
+ * live) is treated as "not deduped" — the same default a plain create would
+ * have produced before this endpoint existed, so an unrecognized shape errs
+ * toward the pre-upsert behavior rather than silently marking normal creates
+ * as dedupes. */
+function extractNewFlag(json: unknown): boolean | null {
+  if (!json || typeof json !== "object") return null;
+  const value = (json as Record<string, unknown>).new;
+  return typeof value === "boolean" ? value : null;
 }
 
 async function appendTagsToContact(
@@ -184,83 +193,66 @@ async function appendTagsToContact(
   }
 }
 
-/** Syncs this push's field values onto an already-existing GHL contact
- * (the duplicate-contact 400 path). Only the fields this call's payload
+/** Creates-or-updates a contact in GHL in a single call via `POST
+ * /contacts/upsert`, replacing the old create-then-on-400-update path (3
+ * calls for an already-existing contact: POST /contacts/ → 400 duplicate →
+ * PUT /contacts/{id} → POST tags). Only the fields this call's payload
  * actually carries are sent — `pushOne` (lib/ghl/push-to-ghl.ts) already
  * omits anything unresolved via `?? undefined`, and JSON.stringify drops
  * undefined keys entirely, so a field this push has no value for is simply
- * absent from the request rather than sent as null/empty. GHL's contact
- * update applies each `customFields` entry by its `id` and leaves every
- * other existing custom field on the contact untouched — the same
- * this-push-only-touches-what-it-sends semantics EmailBison's "patch" upsert
- * already gives (lib/emailbison/push-to-emailbison.ts), so a second push that
- * only carries a new email verification status can't blow away an unrelated
- * custom field (e.g. "Age") a prior push set. Tags are excluded here — they
- * go through appendTagsToContact instead, which additively appends rather
- * than replacing the contact's tag list. */
-async function updateExistingContact(
-  fetchImpl: typeof fetch,
-  credentials: GhlCredentials,
-  contactId: string,
-  payload: GhlContactPayload
-): Promise<void> {
-  const { tags: _tags, ...fields } = payload;
-  const hasFields =
-    fields.firstName !== undefined ||
-    fields.lastName !== undefined ||
-    fields.email !== undefined ||
-    fields.phone !== undefined ||
-    fields.companyName !== undefined ||
-    fields.city !== undefined ||
-    fields.country !== undefined ||
-    (fields.customFields !== undefined && fields.customFields.length > 0);
-  if (!hasFields) return;
-
-  const { status, json } = await requestWithMethodRetry(
-    fetchImpl,
-    credentials,
-    "PUT",
-    `/contacts/${contactId}`,
-    fields
-  );
-  if (status < 200 || status >= 300) {
-    throw new GhlApiError(`GHL contact update failed with status ${status}: ${JSON.stringify(json)}`, status);
-  }
-}
-
-/** Creates a contact in GHL for the given client credentials. A 400 response
- * carrying `meta.contactId` — GHL's signal that a contact with this
- * email/phone already exists — is treated as a soft success: this push's
- * fields are synced onto the existing contact (updateExistingContact) and its
- * tags appended (appendTagsToContact), instead of surfacing an error. */
+ * absent from the request rather than sent as null/empty. GHL applies each
+ * `customFields` entry by its `id` and leaves every other existing custom
+ * field on the contact untouched, mirroring EmailBison's "patch" upsert
+ * (lib/emailbison/push-to-emailbison.ts).
+ *
+ * CRITICAL — tags are deliberately excluded from the upsert body and sent
+ * over the separate append-only `/contacts/{id}/tags` call instead. Live
+ * probe against the Internal test location (2026-08-18, `.qa-tmp/` scripts,
+ * not committed) confirmed `POST /contacts/upsert` **replaces** a contact's
+ * tag list on a repeat call rather than appending to it (re-upserting the
+ * same phone with `tags: ["b"]` after an earlier upsert with `tags: ["a"]`
+ * left the contact with only `["b"]`) — the opposite of the old
+ * create-then-tags-endpoint path's additive behavior. Sending tags inline
+ * here would silently wipe a contact's existing tags on every re-push, so
+ * this keeps the additive `appendTagsToContact` call for any push that
+ * carries a tag: 1 GHL call when there's no tag, 2 when there is (both new
+ * and existing contacts) — down from 3 for an existing contact with a tag
+ * (was 1 for a brand-new contact with a tag before this change; that's the
+ * accepted cost of not being able to trust tags to append in-body).
+ *
+ * `deduped` is read off the upsert response's `new` flag (also
+ * live-confirmed: `true` on create, `false` on a dedupe match) via
+ * extractNewFlag — see that function's doc for the fallback when the flag is
+ * missing. Dedupe matching itself is entirely GHL's own server-side logic
+ * (observed keying off phone on the Internal location, not email); this
+ * client doesn't influence which field it matches on. */
 export async function pushContactToGhl(
   credentials: GhlCredentials,
   payload: GhlContactPayload,
   deps: GhlClientDeps = {}
 ): Promise<PushContactResult> {
   const fetchImpl = deps.fetchImpl ?? fetch;
+  const { tags, ...fields } = payload;
 
-  const { status, json } = await requestWithRetry(fetchImpl, credentials, "/contacts/", {
-    ...payload,
+  const { status, json } = await requestWithRetry(fetchImpl, credentials, "/contacts/upsert", {
+    ...fields,
     locationId: credentials.locationId,
   });
 
-  if (status >= 200 && status < 300) {
-    const contactId = extractContactId(json);
-    if (!contactId) {
-      throw new GhlApiError("GHL contact creation succeeded but returned no contact id");
-    }
-    return { contactId, deduped: false };
+  if (status < 200 || status >= 300) {
+    throw new GhlApiError(`GHL contact upsert failed with status ${status}: ${JSON.stringify(json)}`, status);
   }
 
-  if (status === 400) {
-    const duplicateContactId = extractDuplicateContactId(json);
-    if (duplicateContactId) {
-      await updateExistingContact(fetchImpl, credentials, duplicateContactId, payload);
-      await appendTagsToContact(fetchImpl, credentials, duplicateContactId, payload.tags ?? []);
-      return { contactId: duplicateContactId, deduped: true };
-    }
+  const contactId = extractContactId(json);
+  if (!contactId) {
+    throw new GhlApiError("GHL contact upsert succeeded but returned no contact id");
   }
 
-  throw new GhlApiError(`GHL contact creation failed with status ${status}: ${JSON.stringify(json)}`, status);
+  const deduped = extractNewFlag(json) === false;
+
+  if (tags && tags.length > 0) {
+    await appendTagsToContact(fetchImpl, credentials, contactId, tags);
+  }
+
+  return { contactId, deduped };
 }

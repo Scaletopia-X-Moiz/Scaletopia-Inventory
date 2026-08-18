@@ -312,7 +312,11 @@ describe("runPeopleGhlPush", () => {
       customTagSuffix: "leadership",
     });
 
-    expect(bodies[0].tags).toEqual(["leadership"]);
+    // Tags travel over the separate append-only tags call (bodies[1]), not
+    // the upsert body (bodies[0]) — see the CRITICAL comment on
+    // pushContactToGhl (lib/ghl/client.ts) for why.
+    expect(bodies[0].tags).toBeUndefined();
+    expect(bodies[1]).toEqual({ tags: ["leadership"] });
 
     const { data: person } = await supabaseAdmin
       .from("people")
@@ -343,7 +347,11 @@ describe("runPeopleGhlPush", () => {
 
     await runPeopleGhlPush({ niche: includeOnly([niche]) }, client, testActor, { fetchImpl });
 
-    expect(bodies[0].tags).toEqual([]);
+    // Empty tags never make it into the upsert body at all (destructured out
+    // in pushContactToGhl), and an empty-tags payload skips the append call
+    // entirely — only the upsert call happens.
+    expect(bodies[0].tags).toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
 
     const { data: person } = await supabaseAdmin
       .from("people")

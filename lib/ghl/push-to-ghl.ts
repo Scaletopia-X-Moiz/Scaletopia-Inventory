@@ -8,7 +8,13 @@ import type { ClientRow } from "@/lib/data/clients";
 import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
 import type { SessionUser } from "@/lib/auth/dal";
 
-export const GHL_PUSH_CONCURRENCY = 8;
+/** GHL's v2 API caps a location at 100 requests / 10s (~10 req/s). With the
+ * upsert-based client (lib/ghl/client.ts) now spending 1-2 calls per contact
+ * (down from up to 3), 8-wide concurrency risked bursting past that ceiling
+ * and eating 429 backoff time instead of saving it; 5 keeps steady-state
+ * throughput comfortably under the burst limit even when every contact in a
+ * batch carries a tag (2 calls each). */
+export const GHL_PUSH_CONCURRENCY = 5;
 const PLATFORM = "ghl";
 
 /** Only these phone_type values are eligible for a GHL push — landlines (and
