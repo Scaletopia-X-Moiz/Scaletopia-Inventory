@@ -362,12 +362,16 @@ export async function claimNextRunnableJob(maxConcurrent?: number | null): Promi
  * global concurrency cap for all clients) is auto-recovered within ~one cron
  * minute of its lease lapsing (ticket #137).
  *
- * Default lowered 600 → 120: a healthy tick now heartbeats its lease every
+ * Default lowered 600 → 60: a healthy tick now heartbeats its lease every
  * ~20s via touchJobLease (worker `onProgress`), so the reaper no longer has to
  * wait out a whole tick's worth of silence before it can safely tell a live
- * job from a dead one. This is what makes a stalled push recover in ~2 min
- * instead of ~10. */
-export async function resetStaleRunningJobs(staleSeconds = 120): Promise<number> {
+ * job from a dead one. 60s is the practical floor — Vercel Cron fires the
+ * worker at most once a minute, so recovery can't beat ~one cron tick anyway.
+ * This makes a stalled push recover in ~1–2 min instead of ~10. The only
+ * window not covered by the heartbeat is the initial candidate resolve (before
+ * the first push chunk); for the filtered pushes this tool issues that's a few
+ * seconds, comfortably inside 60s. */
+export async function resetStaleRunningJobs(staleSeconds = 60): Promise<number> {
   const { data, error } = await supabaseAdmin.rpc("reset_stale_running_jobs", {
     stale_seconds: staleSeconds,
   });
