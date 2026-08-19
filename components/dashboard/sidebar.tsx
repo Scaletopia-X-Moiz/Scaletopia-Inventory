@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { motion } from "framer-motion";
-import { Activity, ArrowRightLeft, Building2, ChevronRight, KeyRound, LogOut, PieChart, Radio, Ticket, Upload, UserCog, Users } from "lucide-react";
+import { Activity, ArrowRightLeft, Building2, ChevronRight, HelpCircle, KeyRound, LogOut, PieChart, Radio, Ticket, Upload, UserCog, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ScaletopiaLogo } from "@/components/shared/scaletopia-logo";
 import { useSession } from "@/components/dashboard/session-context";
@@ -30,6 +30,11 @@ const ADMIN_ITEMS = [
   { href: "/activity", label: "Activity", icon: Activity },
   { href: "/team", label: "Team", icon: UserCog },
   { href: "/clients", label: "Clients", icon: KeyRound },
+];
+
+// Visible to every authenticated role — documentation and walkthrough videos.
+const HELP_ITEMS = [
+  { href: "/help", label: "Help", icon: HelpCircle },
 ];
 
 function isActive(pathname: string, href: string) {
@@ -177,6 +182,23 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
           </nav>
         </div>
       )}
+
+      <div className="px-3 pt-3">
+        <p className="px-3 py-1 text-xs text-ink-mute">Help</p>
+        <nav className="mt-1 flex flex-col gap-0.5">
+          {HELP_ITEMS.map((item) => (
+            <NavItem
+              key={item.label}
+              label={item.label}
+              icon={item.icon}
+              href={item.href}
+              active={isActive(pathname, item.href)}
+              caret
+              onClick={onNavigate}
+            />
+          ))}
+        </nav>
+      </div>
 
       {session && (
         <div className="mt-auto border-t border-rule px-3 py-3">
