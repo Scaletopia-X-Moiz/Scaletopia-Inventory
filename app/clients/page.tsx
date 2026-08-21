@@ -5,7 +5,7 @@ import { listClients } from "@/lib/data/clients";
 import { ClientsView } from "./clients-view";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Clients · Scaletopia Inventory" };
+export const metadata = { title: "Clients · Scaletopia Databank" };
 
 export default async function ClientsPage() {
   await requireAdminOrDev();

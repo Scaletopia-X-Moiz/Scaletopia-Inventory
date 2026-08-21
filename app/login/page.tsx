@@ -3,7 +3,7 @@ import { ScaletopiaLogo } from "@/components/shared/scaletopia-logo";
 import { getUser } from "@/lib/auth/dal";
 import { LoginForm } from "./login-form";
 
-export const metadata = { title: "Sign in · Scaletopia Inventory" };
+export const metadata = { title: "Sign in · Scaletopia Databank" };
 
 export default async function LoginPage() {
   if (await getUser()) redirect("/");

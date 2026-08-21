@@ -5,7 +5,7 @@ import { listPushHistory } from "@/lib/data/push-history";
 import { PushHistoryView } from "./push-history-view";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Push History · Scaletopia Inventory" };
+export const metadata = { title: "Push History · Scaletopia Databank" };
 
 const PAGE_SIZE = 50;
 

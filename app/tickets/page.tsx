@@ -7,7 +7,7 @@ import { TicketsList } from "@/components/tickets/tickets-list";
 import { CreateTicketDialog } from "@/components/tickets/create-ticket-dialog";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Tickets · Scaletopia Inventory" };
+export const metadata = { title: "Tickets · Scaletopia Databank" };
 
 function parseTab(value: string | undefined): TicketTab {
   return value === "done" || value === "all" ? value : "open";

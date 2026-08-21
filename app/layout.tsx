@@ -19,7 +19,7 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Scaletopia Inventory",
+  title: "Scaletopia Databank",
   description: "Internal data visibility for Scaletopia's company and people store.",
 };
 

@@ -5,7 +5,7 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 import { TeamView, type Member } from "./team-view";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Team · Scaletopia Inventory" };
+export const metadata = { title: "Team · Scaletopia Databank" };
 
 export default async function TeamPage() {
   const admin = await requireAdminOrDev();

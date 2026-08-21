@@ -5,7 +5,7 @@ import { listPushJobs } from "@/lib/data/push-jobs";
 import { PushActivityView } from "./push-activity-view";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Push Activity · Scaletopia Inventory" };
+export const metadata = { title: "Push Activity · Scaletopia Databank" };
 
 const PAGE_SIZE = 50;
 

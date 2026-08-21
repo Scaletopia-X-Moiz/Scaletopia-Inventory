@@ -5,7 +5,7 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 import { ActivityView, type ActivityRow } from "./activity-view";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Activity · Scaletopia Inventory" };
+export const metadata = { title: "Activity · Scaletopia Databank" };
 
 export default async function ActivityPage() {
   await requireAdminOrDev();

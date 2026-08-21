@@ -2,7 +2,7 @@ import { AppShell } from "@/components/dashboard/app-shell";
 import { Topbar } from "@/components/dashboard/topbar";
 import { HelpView } from "./help-view";
 
-export const metadata = { title: "Help · Scaletopia Inventory" };
+export const metadata = { title: "Help · Scaletopia Databank" };
 
 export default function HelpPage() {
   return (
