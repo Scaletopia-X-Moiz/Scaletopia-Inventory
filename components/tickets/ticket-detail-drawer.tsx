@@ -1,20 +1,31 @@
 "use client";
 
-import { useActionState, useEffect, useState } from "react";
+import { useActionState, useCallback, useEffect, useState } from "react";
 import { Dialog } from "radix-ui";
 import { Loader2, Trash2, X } from "lucide-react";
 import { timeAgo } from "@/lib/utils";
 import type { Role } from "@/lib/auth/dal";
 import type { TicketRow } from "@/lib/data/tickets";
+import type { TicketAttachmentRow } from "@/lib/data/ticket-attachments";
+import { PRIORITY_LABEL, PRIORITY_OPTIONS } from "@/lib/tickets/priority";
 import { CategoryBadge } from "@/components/tickets/category-badge";
+import { PriorityBadge } from "@/components/tickets/priority-badge";
 import { StatusBadge } from "@/components/tickets/status-badge";
+import { AttachmentList } from "@/components/tickets/attachment-list";
+import { AttachmentPicker } from "@/components/tickets/attachment-picker";
+import { VoiceRecorder } from "@/components/tickets/voice-recorder";
+import type { UploadedAttachment } from "@/lib/tickets/attachment-upload";
 import {
+  attachTicketNoteFileAction,
   deleteTicketAction,
+  getTicketAttachmentsAction,
   updateTicketContentAction,
   updateTicketNoteAction,
   updateTicketStatusAction,
   type ActionState,
 } from "@/app/tickets/actions";
+
+type TicketAttachments = { report: TicketAttachmentRow[]; note: TicketAttachmentRow[] };
 
 const fieldClass =
   "w-full rounded-lg border border-rule bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-stamp";
@@ -38,6 +49,16 @@ function ContentEditor({ ticket }: { ticket: TicketRow }) {
           <option value="bug">Bug</option>
           <option value="feature_request">Feature request</option>
           <option value="improvement">Improvement</option>
+        </select>
+      </div>
+      <div>
+        <label className="mb-1 block text-xs font-medium text-ink-soft">Priority</label>
+        <select name="priority" defaultValue={ticket.priority} className={fieldClass}>
+          {PRIORITY_OPTIONS.map((option) => (
+            <option key={option} value={option}>
+              {PRIORITY_LABEL[option]}
+            </option>
+          ))}
         </select>
       </div>
       <div>
@@ -94,35 +115,106 @@ function StatusEditor({ ticket }: { ticket: TicketRow }) {
   );
 }
 
-function NoteEditor({ ticket }: { ticket: TicketRow }) {
+/** Uploads-and-immediately-attaches image/voice-note files to a ticket's
+ * note. `value` is always kept empty on purpose — AttachmentPicker /
+ * VoiceRecorder are used here purely as one-shot upload widgets, since each
+ * finished upload is persisted via attachTicketNoteFileAction right away
+ * rather than batched into the note form. The saved list itself renders
+ * below via AttachmentList, driven by the drawer's fetched attachments. */
+function NoteAttachmentsEditor({
+  ticketId,
+  onAttached,
+}: {
+  ticketId: number;
+  onAttached: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function persist(item: UploadedAttachment) {
+    setBusy(true);
+    setError(null);
+    const formData = new FormData();
+    formData.set("id", String(ticketId));
+    formData.set("storagePath", item.storagePath);
+    formData.set("kind", item.kind);
+    formData.set("mimeType", item.mimeType);
+    formData.set("sizeBytes", String(item.sizeBytes));
+    if (item.durationMs) formData.set("durationMs", String(item.durationMs));
+    if (item.originalName) formData.set("originalName", item.originalName);
+
+    const result = await attachTicketNoteFileAction(undefined, formData);
+    setBusy(false);
+    if (result?.error) {
+      setError(result.error);
+      return;
+    }
+    onAttached();
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <AttachmentPicker
+        value={[]}
+        onAdd={(item) => void persist(item)}
+        onRemove={() => {}}
+        ticketId={ticketId}
+        disabled={busy}
+      />
+      <VoiceRecorder
+        value={[]}
+        onAdd={(item) => void persist(item)}
+        onRemove={() => {}}
+        ticketId={ticketId}
+        disabled={busy}
+      />
+      {error && <p className="text-xs text-danger">{error}</p>}
+    </div>
+  );
+}
+
+function NoteEditor({
+  ticket,
+  attachments,
+  onAttachmentsChanged,
+}: {
+  ticket: TicketRow;
+  attachments: TicketAttachmentRow[];
+  onAttachmentsChanged: () => void;
+}) {
   const [state, action, pending] = useActionState<ActionState | undefined, FormData>(
     updateTicketNoteAction,
     undefined
   );
 
   return (
-    <form action={action} className="flex flex-col gap-2">
-      <input type="hidden" name="id" value={ticket.id} />
-      <label className="text-xs font-medium text-ink-soft">Note</label>
-      <textarea
-        name="note"
-        defaultValue={ticket.currentNote ?? ""}
-        rows={3}
-        placeholder="Add context, progress, or a resolution note for the reporter…"
-        className={`${fieldClass} resize-none`}
-      />
-      {state?.error && <p className="text-xs text-danger">{state.error}</p>}
-      <div className="flex justify-end">
-        <button
-          type="submit"
-          disabled={pending}
-          className="flex items-center gap-2 rounded-lg border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-hover disabled:opacity-60"
-        >
-          {pending ? <Loader2 size={13} className="animate-spin" /> : null}
-          Save note
-        </button>
-      </div>
-    </form>
+    <div className="flex flex-col gap-3">
+      <form action={action} className="flex flex-col gap-2">
+        <input type="hidden" name="id" value={ticket.id} />
+        <label className="text-xs font-medium text-ink-soft">Note</label>
+        <textarea
+          name="note"
+          defaultValue={ticket.currentNote ?? ""}
+          rows={3}
+          placeholder="Add context, progress, or a resolution note for the reporter…"
+          className={`${fieldClass} resize-none`}
+        />
+        {state?.error && <p className="text-xs text-danger">{state.error}</p>}
+        <div className="flex justify-end">
+          <button
+            type="submit"
+            disabled={pending}
+            className="flex items-center gap-2 rounded-lg border border-rule px-3 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-hover disabled:opacity-60"
+          >
+            {pending ? <Loader2 size={13} className="animate-spin" /> : null}
+            Save note
+          </button>
+        </div>
+      </form>
+
+      <AttachmentList attachments={attachments} ticketId={ticket.id} canRemove onChanged={onAttachmentsChanged} />
+      <NoteAttachmentsEditor ticketId={ticket.id} onAttached={onAttachmentsChanged} />
+    </div>
   );
 }
 
@@ -165,6 +257,23 @@ export function TicketDetailDrawer({ ticket, viewerRole, viewerId, children }: T
   const canChangeStatus = viewerRole === "dev";
   const isOwnTicket = ticket.createdBy === viewerId;
 
+  const [attachments, setAttachments] = useState<TicketAttachments | null>(null);
+  const [attachmentsError, setAttachmentsError] = useState<string | null>(null);
+
+  const refetchAttachments = useCallback(async () => {
+    const result = await getTicketAttachmentsAction(ticket.id);
+    if ("error" in result) {
+      setAttachmentsError(result.error);
+      return;
+    }
+    setAttachmentsError(null);
+    setAttachments(result);
+  }, [ticket.id]);
+
+  useEffect(() => {
+    if (open) void refetchAttachments();
+  }, [open, refetchAttachments]);
+
   return (
     <Dialog.Root open={open} onOpenChange={setOpen}>
       <Dialog.Trigger asChild>{children}</Dialog.Trigger>
@@ -177,6 +286,7 @@ export function TicketDetailDrawer({ ticket, viewerRole, viewerId, children }: T
                 Ticket #{ticket.id}
               </Dialog.Title>
               <Dialog.Description className="mt-0.5 flex items-center gap-1.5 text-xs text-ink-soft">
+                <PriorityBadge priority={ticket.priority} />
                 <CategoryBadge category={ticket.category} />
                 <StatusBadge status={ticket.status} />
               </Dialog.Description>
@@ -193,11 +303,27 @@ export function TicketDetailDrawer({ ticket, viewerRole, viewerId, children }: T
           </div>
 
           <div className="flex-1 overflow-y-auto px-5 py-4">
+            {attachmentsError && <p className="mb-3 text-xs text-danger">{attachmentsError}</p>}
             {canManage ? (
               <div className="flex flex-col gap-5">
                 <ContentEditor ticket={ticket} />
+                {attachments && attachments.report.length > 0 && (
+                  <div>
+                    <p className="mb-1 text-xs font-medium text-ink-soft">Report attachments</p>
+                    <AttachmentList
+                      attachments={attachments.report}
+                      ticketId={ticket.id}
+                      canRemove={isOwnTicket || canManage}
+                      onChanged={refetchAttachments}
+                    />
+                  </div>
+                )}
                 {canChangeStatus && <StatusEditor ticket={ticket} />}
-                <NoteEditor ticket={ticket} />
+                <NoteEditor
+                  ticket={ticket}
+                  attachments={attachments?.note ?? []}
+                  onAttachmentsChanged={refetchAttachments}
+                />
                 <div className="text-xs text-ink-mute">
                   Reported by {ticket.createdByEmail ?? "unknown"} · {timeAgo(ticket.createdAt)}
                 </div>
@@ -212,6 +338,17 @@ export function TicketDetailDrawer({ ticket, viewerRole, viewerId, children }: T
                   <p className="mb-1 text-xs font-medium text-ink-soft">Description</p>
                   <p className="whitespace-pre-wrap text-sm text-ink">{ticket.description}</p>
                 </div>
+                {attachments && attachments.report.length > 0 && (
+                  <div>
+                    <p className="mb-1 text-xs font-medium text-ink-soft">Attachments</p>
+                    <AttachmentList
+                      attachments={attachments.report}
+                      ticketId={ticket.id}
+                      canRemove={isOwnTicket}
+                      onChanged={refetchAttachments}
+                    />
+                  </div>
+                )}
                 <div>
                   <p className="mb-1 text-xs font-medium text-ink-soft">Note</p>
                   {ticket.currentNote ? (
@@ -224,6 +361,11 @@ export function TicketDetailDrawer({ ticket, viewerRole, viewerId, children }: T
                     </>
                   ) : (
                     <p className="text-sm text-ink-soft">No note yet.</p>
+                  )}
+                  {attachments && attachments.note.length > 0 && (
+                    <div className="mt-2">
+                      <AttachmentList attachments={attachments.note} ticketId={ticket.id} />
+                    </div>
                   )}
                 </div>
                 <div className="text-xs text-ink-mute">

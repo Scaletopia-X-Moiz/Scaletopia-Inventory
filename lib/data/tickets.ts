@@ -1,9 +1,11 @@
 import "server-only";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import type { Role } from "@/lib/auth/dal";
+import type { TicketPriority } from "@/lib/tickets/priority";
 
 export type TicketCategory = "bug" | "feature_request" | "improvement";
 export type TicketStatus = "open" | "in_progress" | "done";
+export type { TicketPriority };
 export type TicketTab = "open" | "done" | "all";
 
 export interface TicketListFilters {
@@ -16,6 +18,7 @@ export interface TicketRow {
   description: string;
   category: TicketCategory;
   status: TicketStatus;
+  priority: TicketPriority;
   createdBy: string;
   createdByEmail: string | null;
   currentNote: string | null;
@@ -32,6 +35,7 @@ interface RawTicketRow {
   description: string;
   category: TicketCategory;
   status: TicketStatus;
+  priority: TicketPriority;
   created_by: string;
   current_note: string | null;
   note_updated_by: string | null;
@@ -43,7 +47,7 @@ interface RawTicketRow {
 }
 
 const TICKET_COLUMNS =
-  "id,title,description,category,status,created_by,current_note,note_updated_by,note_updated_at,created_at,updated_at," +
+  "id,title,description,category,status,priority,created_by,current_note,note_updated_by,note_updated_at,created_at,updated_at," +
   "creator:profiles!tickets_created_by_fkey(email),note_author:profiles!tickets_note_updated_by_fkey(email)";
 
 function firstOf<T>(value: T | T[] | null): T | null {
@@ -58,6 +62,7 @@ function toTicketRow(raw: RawTicketRow): TicketRow {
     description: raw.description,
     category: raw.category,
     status: raw.status,
+    priority: raw.priority,
     createdBy: raw.created_by,
     createdByEmail: firstOf(raw.creator)?.email ?? null,
     currentNote: raw.current_note,
@@ -128,6 +133,7 @@ export interface CreateTicketInput {
   title: string;
   description: string;
   category: TicketCategory;
+  priority: TicketPriority;
   createdBy: string;
 }
 
@@ -138,6 +144,7 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketRow>
       title: input.title,
       description: input.description,
       category: input.category,
+      priority: input.priority,
       created_by: input.createdBy,
     })
     .select(TICKET_COLUMNS)
@@ -151,6 +158,7 @@ export interface UpdateTicketContentInput {
   title?: string;
   description?: string;
   category?: TicketCategory;
+  priority?: TicketPriority;
 }
 
 export async function updateTicketContent(

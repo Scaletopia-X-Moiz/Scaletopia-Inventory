@@ -1,24 +1,89 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState } from "react";
+import { useActionState, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Dialog } from "radix-ui";
 import { Loader2, Plus, X } from "lucide-react";
 import { createTicketAction, type ActionState } from "@/app/tickets/actions";
+import { AttachmentPicker } from "@/components/tickets/attachment-picker";
+import { VoiceRecorder } from "@/components/tickets/voice-recorder";
+import { PRIORITY_LABEL, PRIORITY_OPTIONS } from "@/lib/tickets/priority";
+import type { UploadedAttachment } from "@/lib/tickets/attachment-upload";
 
 export function CreateTicketDialog() {
   const [open, setOpen] = useState(false);
+  const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
+  const [imageBusy, setImageBusy] = useState(false);
+  const [voiceBusy, setVoiceBusy] = useState(false);
+  const [stopSignal, setStopSignal] = useState(0);
+  const [awaitingSubmit, setAwaitingSubmit] = useState(false);
   const [state, action, pending] = useActionState<ActionState | undefined, FormData>(
     createTicketAction,
     undefined
   );
   const formRef = useRef<HTMLFormElement>(null);
+  // Late upload/onChange callbacks from a session that already closed (or
+  // just got reset on success) must not repopulate attachments — see the
+  // open/close effects below.
+  const acceptRef = useRef(true);
+
+  const busy = imageBusy || voiceBusy;
 
   useEffect(() => {
     if (state?.success) {
+      acceptRef.current = false;
       formRef.current?.reset();
+      setAttachments([]);
       setOpen(false);
     }
   }, [state]);
+
+  // Always start a session with a clean slate — attachments are parent
+  // state that would otherwise survive across opens (the dialog content
+  // unmounts on close, but this component doesn't).
+  useEffect(() => {
+    if (open) {
+      acceptRef.current = true;
+      setAttachments([]);
+      setAwaitingSubmit(false);
+      formRef.current?.reset();
+    } else {
+      acceptRef.current = false;
+    }
+  }, [open]);
+
+  // Once every in-flight upload/recording has settled, actually submit —
+  // this re-enters handleSubmit, which now sees busy === false.
+  useEffect(() => {
+    if (awaitingSubmit && !busy) {
+      setAwaitingSubmit(false);
+      formRef.current?.requestSubmit();
+    }
+  }, [awaitingSubmit, busy]);
+
+  // Children emit add/remove *intentions*; the parent owns the list and
+  // applies them with functional updates. This is deliberate: the old
+  // "child sends the full next list" contract captured `value` in a stale
+  // closure at upload/record start, so a second attachment added while the
+  // first was still settling would overwrite the first (e.g. recording a
+  // voice note wiped an image dropped moments earlier). Functional updates
+  // are immune to that race.
+  const addAttachment = useCallback((item: UploadedAttachment) => {
+    // Ignore late arrivals from a session that already reset/closed.
+    if (!acceptRef.current) return;
+    setAttachments((prev) => [...prev, item]);
+  }, []);
+
+  const removeAttachment = useCallback((storagePath: string) => {
+    setAttachments((prev) => prev.filter((a) => a.storagePath !== storagePath));
+  }, []);
+
+  function handleSubmit(e: FormEvent<HTMLFormElement>) {
+    if (busy) {
+      e.preventDefault();
+      setAwaitingSubmit(true);
+      setStopSignal((n) => n + 1);
+    }
+  }
 
   return (
     <Dialog.Root open={open} onOpenChange={setOpen}>
@@ -52,7 +117,7 @@ export function CreateTicketDialog() {
             </Dialog.Close>
           </div>
 
-          <form ref={formRef} action={action} className="flex flex-col gap-3">
+          <form ref={formRef} action={action} onSubmit={handleSubmit} className="flex flex-col gap-3">
             <div>
               <label htmlFor="ticket-title" className="mb-1 block text-xs font-medium text-ink-soft">
                 Title
@@ -86,6 +151,25 @@ export function CreateTicketDialog() {
             </div>
 
             <div>
+              <label htmlFor="ticket-priority" className="mb-1 block text-xs font-medium text-ink-soft">
+                Priority
+              </label>
+              <select
+                id="ticket-priority"
+                name="priority"
+                required
+                defaultValue="medium"
+                className="w-full rounded-lg border border-rule bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-stamp"
+              >
+                {PRIORITY_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {PRIORITY_LABEL[option]}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
               <label htmlFor="ticket-description" className="mb-1 block text-xs font-medium text-ink-soft">
                 Description
               </label>
@@ -98,6 +182,44 @@ export function CreateTicketDialog() {
                 className="w-full resize-none rounded-lg border border-rule bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-stamp"
               />
             </div>
+
+            <div>
+              <label className="mb-1 block text-xs font-medium text-ink-soft">
+                Attachments <span className="font-normal text-ink-mute">(optional)</span>
+              </label>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <AttachmentPicker
+                  value={attachments}
+                  onAdd={addAttachment}
+                  onRemove={removeAttachment}
+                  disabled={pending}
+                  onBusyChange={setImageBusy}
+                />
+                <VoiceRecorder
+                  value={attachments}
+                  onAdd={addAttachment}
+                  onRemove={removeAttachment}
+                  disabled={pending}
+                  onBusyChange={setVoiceBusy}
+                  stopSignal={stopSignal}
+                />
+              </div>
+            </div>
+            <input
+              type="hidden"
+              name="attachments"
+              value={JSON.stringify(
+                attachments.map((item) => ({
+                  storagePath: item.storagePath,
+                  kind: item.kind,
+                  mimeType: item.mimeType,
+                  sizeBytes: item.sizeBytes,
+                  durationMs: item.durationMs,
+                  originalName: item.originalName,
+                }))
+              )}
+              readOnly
+            />
 
             {state?.error && <p className="text-xs text-danger">{state.error}</p>}
 
@@ -112,11 +234,11 @@ export function CreateTicketDialog() {
               </Dialog.Close>
               <button
                 type="submit"
-                disabled={pending}
+                disabled={pending || awaitingSubmit}
                 className="flex items-center justify-center gap-2 rounded-lg bg-stamp px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60"
               >
-                {pending ? <Loader2 size={15} className="animate-spin" /> : null}
-                Create ticket
+                {pending || awaitingSubmit ? <Loader2 size={15} className="animate-spin" /> : null}
+                {awaitingSubmit ? "Finishing…" : "Create ticket"}
               </button>
             </div>
           </form>

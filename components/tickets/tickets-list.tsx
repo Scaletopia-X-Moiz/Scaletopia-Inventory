@@ -4,6 +4,7 @@ import { timeAgo } from "@/lib/utils";
 import type { Role } from "@/lib/auth/dal";
 import type { TicketRow } from "@/lib/data/tickets";
 import { CategoryBadge } from "@/components/tickets/category-badge";
+import { PriorityBadge } from "@/components/tickets/priority-badge";
 import { StatusBadge } from "@/components/tickets/status-badge";
 import { TicketDetailDrawer } from "@/components/tickets/ticket-detail-drawer";
 
@@ -40,6 +41,7 @@ export function TicketsList({
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
+                <PriorityBadge priority={ticket.priority} />
                 <CategoryBadge category={ticket.category} />
                 <StatusBadge status={ticket.status} />
               </div>

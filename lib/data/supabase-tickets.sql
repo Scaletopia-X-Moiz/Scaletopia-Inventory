@@ -31,6 +31,8 @@ create table if not exists public.tickets (
   description      text not null,
   category         text not null check (category in ('bug', 'feature_request', 'improvement')),
   status           text not null default 'open' check (status in ('open', 'in_progress', 'done')),
+  priority         text not null default 'medium'
+                     check (priority in ('urgent', 'high', 'medium', 'low', 'nice_to_have')),
   created_by       uuid not null references public.profiles (id),
   current_note     text,
   note_updated_by  uuid references public.profiles (id),
@@ -40,6 +42,7 @@ create table if not exists public.tickets (
 );
 
 create index if not exists tickets_status_idx on public.tickets (status);
+create index if not exists tickets_priority_idx on public.tickets (priority);
 create index if not exists tickets_created_by_idx on public.tickets (created_by);
 
 alter table public.tickets enable row level security;
