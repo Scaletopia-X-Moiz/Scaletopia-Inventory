@@ -65,60 +65,12 @@ function ProgressBar({ processed, total }: { processed: number; total: number })
   );
 }
 
-/** The company count the user selected for a Companies push, as stashed on the
- * job's options at enqueue time (route.ts). null for People pushes, or for
- * company jobs enqueued before this field existed. */
-function companySourceTotal(job: PushJobListRow): number | null {
-  if (job.entity !== "companies") return null;
-  const value = job.options?.sourceEntityTotal;
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-/** A Companies push targets the People linked to the matched companies (ADR
- * 0003) — there is no company-level lead. So a company with no linked people
- * contributes nothing, and a filter matching only such companies pushes 0
- * despite selecting many companies. This spells that gap out explicitly —
- * "X companies selected → Y linked people sent" — so a 0/low result reads as
- * "these companies had no people", not "the push is broken". Only rendered for
- * Companies jobs that carry the stored company count. */
-function CompanyResolutionNote({ job }: { job: PushJobListRow }) {
-  const companies = companySourceTotal(job);
-  if (companies === null) return null;
-
-  // `job.total` is the resolved People count (what actually reached EmailBison
-  // as leads); `companies` is what the user selected on the Companies table.
-  const people = job.total;
-  const fmt = (n: number) => n.toLocaleString("en-US");
-
-  return (
-    <p className="rounded-md bg-hover/60 px-2.5 py-1.5 text-xs text-ink-soft">
-      {people === 0 ? (
-        <>
-          <strong className="text-ink">Companies push:</strong> {fmt(companies)}{" "}
-          {companies === 1 ? "company was" : "companies were"} selected, but{" "}
-          {companies === 1 ? "it had" : "none had"} any linked people —{" "}
-          <strong className="text-ink">0</strong> leads were sent to EmailBison. EmailBison leads
-          are people, so companies with no linked people contribute nothing.
-        </>
-      ) : (
-        <>
-          <strong className="text-ink">Companies push:</strong> {fmt(companies)}{" "}
-          {companies === 1 ? "company" : "companies"} selected → resolved to{" "}
-          <strong className="text-ink">{fmt(people)}</strong> linked{" "}
-          {people === 1 ? "person" : "people"} sent as leads.
-        </>
-      )}
-    </p>
-  );
-}
-
 /** Terminal-job breakdown — total selected / created-or-updated / failed, with
  * the first few failure reasons, matching the old in-dialog "Push complete"
  * step from push-to-emailbison-button.tsx. */
 function CompletionSummary({ job }: { job: PushJobListRow }) {
   return (
     <div className="flex flex-col gap-1.5 text-xs text-ink-soft">
-      <CompanyResolutionNote job={job} />
       <div className="flex flex-wrap gap-x-4 gap-y-1">
         <span>
           Total selected: <strong className="text-ink">{job.total.toLocaleString("en-US")}</strong>

@@ -240,7 +240,12 @@ export async function getPushJobSummary(id: string): Promise<PushJobSummary | nu
  * manually rather than via fetchAllRows because `push_job_records` has no `id`
  * column (its PK is composite), so a large run's >1000 records still come back
  * whole. Ordering by `person_id` pins the page boundaries (fetchAllRows's
- * rationale) since the set is unioned, not sliced. */
+ * rationale) since the set is unioned, not sliced. `.not("person_id", "is",
+ * null)` excludes company-tagged rows (which have `person_id` null) from a
+ * company-native EmailBison push (docs/adr/0005-company-native-emailbison-push.md);
+ * without it, a company push's rows come back as null person_ids that then hit
+ * `.in("id", [null, ...])` against `people` and throw a uuid parse error —
+ * the mirror of getPushJobCompanyIds's own null guard. */
 export async function getPushJobPersonIds(
   jobId: string,
   outcome?: PushJobOutcome
@@ -250,7 +255,8 @@ export async function getPushJobPersonIds(
   let countQuery = supabaseAdmin
     .from("push_job_records")
     .select("person_id", { count: "exact", head: true })
-    .eq("push_job_id", jobId);
+    .eq("push_job_id", jobId)
+    .not("person_id", "is", null);
   if (outcome) countQuery = countQuery.eq("outcome", outcome);
   const { count, error: countError } = await countQuery;
   if (countError) throw countError;
@@ -261,7 +267,11 @@ export async function getPushJobPersonIds(
   const pageCount = Math.ceil(total / PAGE_SIZE);
   const pages = await Promise.all(
     Array.from({ length: pageCount }, (_, i) => {
-      let query = supabaseAdmin.from("push_job_records").select("person_id").eq("push_job_id", jobId);
+      let query = supabaseAdmin
+        .from("push_job_records")
+        .select("person_id")
+        .eq("push_job_id", jobId)
+        .not("person_id", "is", null);
       if (outcome) query = query.eq("outcome", outcome);
       return query.order("person_id", { ascending: true }).range(i * PAGE_SIZE, i * PAGE_SIZE + PAGE_SIZE - 1);
     })

@@ -135,6 +135,39 @@ describe("pushJobId filter", () => {
     expect(companies.total).toBe(1);
   });
 
+  it("restricts Companies to the job's directly-tagged companies (company-native push)", async () => {
+    // A company-native EmailBison push (ADR 0005) tags
+    // `push_job_records.company_id` and leaves `person_id` null. Regression: the
+    // Companies `pushJobId` filter used to feed those null person_ids into
+    // `.in("id", [null, ...])` against people and throw a uuid parse error,
+    // 503-ing the /companies/results route (the "View Companies" deep link).
+    const clientId = await insertClient();
+    const pushedA = await insertCompany("native-a");
+    const pushedB = await insertCompany("native-b");
+    // A company on the same client the job never touched — must not appear.
+    await insertCompany("native-untouched");
+
+    const job = await createPushJob({ clientId, platform: "emailbison", entity: "companies", filters: {} });
+    await recordJobPeople(job.id, "companies", [
+      { personId: pushedA, outcome: "succeeded" },
+      { personId: pushedB, outcome: "failed" },
+    ]);
+
+    const companies = await getCompanies({ pushJobId: job.id }, 1, 100);
+    expect(new Set(companies.rows.map((r) => r.id))).toEqual(new Set([pushedA, pushedB]));
+    expect(companies.total).toBe(2);
+
+    // The success sub-scope narrows to just the succeeded company.
+    const succeeded = await getCompanies({ pushJobId: job.id, pushJobOutcome: "succeeded" }, 1, 100);
+    expect(new Set(succeeded.rows.map((r) => r.id))).toEqual(new Set([pushedA]));
+
+    // The People deep link for a company-native push resolves to nothing rather
+    // than erroring on the null person_ids.
+    const people = await getPeople({ pushJobId: job.id }, 1, 100);
+    expect(people.total).toBe(0);
+    expect(people.rows).toEqual([]);
+  });
+
   it("stays stable after a later push to the same client tags different people", async () => {
     const clientId = await insertClient();
     const firstA = await insertPerson("stable-a");

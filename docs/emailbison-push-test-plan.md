@@ -1,256 +1,268 @@
-# EmailBison Push — Live Manual Test Plan (elaborated)
+# EmailBison Push — Live Manual Test Plan (first-run, real data)
 
 Base site: **https://inventory.scaletopia.io**
-Seed data (live): **10,400 people + 525 companies**, all tagged
-`source_tokens = "claude-qa-2026-08"`, emails/domains end `@claude-qa.example`.
+
+> **This supersedes the old seed-based version.** The `claude-qa-2026-08` seed was
+> cleaned up 2026-08-17, so every link below targets **real production data**
+> with counts measured live on 2026-08-17. Pushing these creates **real leads in
+> your EmailBison workspace** — use a client/workspace you're OK polluting, and
+> plan cleanup.
+
+## Read this first — three facts the old plan got wrong
+
+1. **There are 5 native standard fields, not 7:** **Company name, First name,
+   Last name, Email, Title**. **Phone and Website are NOT native** — they only
+   reach EmailBison as *custom variables* bound to the phone/website columns.
+   (`lib/emailbison/client.ts` `toWireLead` sends `email, first_name, last_name,
+   company, title` + `custom_variables`.)
+2. **Company push is company-native (ADR 0005 reversed 0003):** each matched
+   company is pushed as *its own lead* (email = the company's own email, company
+   = its own name, first = raw name, last = literal `"company last name"`, title
+   skipped). It no longer resolves to linked people. The only skip reason is a
+   company with **no email of its own**.
+3. **Push Activity's company completion note still says "…resolved to Y linked
+   people…"** — that copy is stale under company-native push. Treat it as a
+   **known suspected bug** to confirm, not as expected behavior (test EB-C2).
 
 ## The push dialog (what the settings mean)
 
-Every plain push (**Add to EmailBison**, ✉ icon) has 3 steps:
-1. **Client** — pick one with EmailBison creds (use the SAME one every run).
-2. **Options**, three parts:
-   - **Existing lead behavior:** **Partial update (patch)** = only sends the
-     fields you mapped, leaves others alone. **Full replace (put)** = blanks any
-     field you did NOT send. *Default = Partial.*
-   - **Standard field mapping** — 7 EmailBison destination fields
-     (**Company name, First name, Last name, Email, Phone, Title, Website**).
-     Each has a **Source** dropdown: a record column, a **Static value** (type
-     literal text), or **Skip**.
-   - **Custom variables** — add rows: **Name** (the EmailBison variable) +
-     **Source** (Static value / Column) + value.
-3. **Confirm** — the **Push {N}** button. **{N} must match the Expected count.**
+Plain push (**Add to EmailBison**, ✉) — 3 steps:
+1. **Client** — pick one with EmailBison creds. **Use the SAME client for every
+   test below** (dedupe/created-vs-updated only make sense within one workspace).
+2. **Options:**
+   - **Existing lead behavior:** **Partial update (patch)** = only sends mapped
+     fields, leaves the rest alone (default). **Full replace (put)** = blanks any
+     native field you did NOT send.
+   - **Standard field mapping** — the 5 native fields. Each **Source** = a record
+     column / **Static value** (literal text) / **— ignore —** (skip).
+   - **Custom variables** — add rows: **Name** + **Source** (Column / Static
+     value) + value.
+3. **Confirm** — the **Push {N}** button. **{N} must equal the Expected count.**
 
-Campaign push (**Add to EmailBison Campaign**, 🚀 icon) adds a **Campaign** step
+Campaign push (**Add to EmailBison Campaign**, 🚀) inserts a **Campaign** step
 (pick/create) and a **launch** step.
 
 ## Safety
-- Every link contains `source=claude-qa-2026-08` → only test data. Keep it.
-- No row-selection: a push sends ALL filter-matched rows. **If Push {N} ≠
-  Expected, STOP.**
-- Track results in **/push-activity** (queued, not instant), then EmailBison.
 
-## Cleanup when done
-`node .scratch/seed-qa-people.mjs --cleanup`
+- **No row-selection: a push sends ALL filter-matched rows**, regardless of which
+  page is visible. The count shown on the page = what will be pushed (before the
+  no-email skip). **If Push {N} ≠ Expected, STOP and don't confirm.**
+- Track results in **/push-activity** (queued, not instant), then verify in
+  EmailBison itself.
+- Log your observed **Push {N}** in the results table at the bottom — the
+  verification subagent reads it.
 
 ---
 
-# PEOPLE scenarios (`/people`)
+# SEQUENCE 1 — People: field mapping, custom vars, created/updated
 
-## S1 — All new columns populate + Created→Updated
-**Guards `6726848` (new bindable columns), `c8f7bdc` (created/updated split).**
-Symptom if broken: new column is in the dropdown but arrives empty; or re-push
-counts everything as "created" again.
+**All of Sequence 1 uses ONE slice so the re-push tests chain cleanly.**
+**Link:** https://inventory.scaletopia.io/people?country=AU&email=not_empty
+**Expected: 15 people** (all have an email; all linked to companies with **null
+brand_name** → raw-name fallback). Button: **Add to EmailBison** (✉).
 
-**Link:** https://inventory.scaletopia.io/people?source=claude-qa-2026-08&industry=software%20development
-**Expected: 1000 people. Button: Add to EmailBison.**
-
-Set in the dialog:
+### EB-1 — First push: defaults + custom vars + Created count
+Guards default field resolution, brand→raw fallback, column custom vars,
+array/number stringification, created-count heuristic.
 - Existing lead behavior: **Partial update**.
-- Standard fields: leave defaults (Company name ← brandName, First/Last/Email/
-  Phone/Title/Website ← their own columns).
-- Custom variables — add these 4 rows (Source = **Column**):
+- Standard fields: **leave all 5 at defaults**.
+- Custom variables — add 5 rows, **Source = Column**:
   - `qa_city` ← **City**
   - `qa_state` ← **State**
-  - `qa_company_domain` ← **Domain** (company domain)
-  - `qa_employees` ← **Employees** (company employee count)
-- Push (1000).
+  - `qa_domain` ← **Domain** (company domain)
+  - `qa_employees` ← **Employees** (company employee count — a number)
+  - `qa_tags` ← **Tags** (an array column)
+- **Push (15).**
+- Verify in EmailBison: 15 leads created; open 3 →
+  - **Company = the raw `company_name`** (fallback fired; **no blank company**),
+  - all 5 custom vars present & non-empty,
+  - `qa_employees` is a numeric string, `qa_tags` is a **JSON array string**
+    (`["a","b"]`), not `[object Object]`.
+- Push Activity: **Created 15 / Updated 0 / 0 failed**.
 
-Check in EmailBison:
-1. 1000 leads created.
-2. Open any 3 leads → all four custom variables present & non-empty:
-   `qa_city` is a real city (Austin/London/…), `qa_state` matches it,
-   `qa_company_domain` ends `.claude-qa.example`, `qa_employees` is a number.
-3. Push Activity: **Created 1000 / Updated 0**.
-4. **Re-push the exact same link, same settings** → Push Activity now shows
-   **Created 0 / Updated 1000** (no duplicate leads in EmailBison).
+### EB-2 — Re-push identical → Created→Updated, no duplicates
+Guards the created/updated DB heuristic and email-upsert dedupe.
+- Same link, **same settings as EB-1**. **Push (15).**
+- Push Activity: **Created 0 / Updated 15.** EmailBison lead count **unchanged**
+  (no duplicate leads).
 
-## S2 — Static value on a standard field
-**Guards `037a49a` (static value must not be treated as a column).**
-Symptom if broken: Title arrives blank or with a literal column key.
+### EB-3 — Re-push with ZERO custom vars → vars must NOT be wiped
+Guards the `custom_variables` omit-on-empty rule (explicit `[]` would clear all).
+- Same link. Partial update. Standard defaults. **Remove all custom-var rows.**
+  **Push (15).**
+- Verify in EmailBison: the `qa_*` variables from EB-1 are **still present** on
+  the leads (they were left alone, not blanked).
 
-**Link:** https://inventory.scaletopia.io/people?source=claude-qa-2026-08&industry=software%20development&country=GB
-**Expected: 100 people. Button: Add to EmailBison.**
+### EB-4 — Static value on a standard field (+ blank edge)
+Guards the literal-source decode path.
+- Same link. Partial update. **Title → Source = Static value → `QA-STATIC-TITLE`.**
+  Others default. **Push (15).**
+- Verify: all 15 have **Title = `QA-STATIC-TITLE`**; First/Last/Email/Company
+  still show real per-lead values.
+- **EB-4b (edge):** re-push, Title → Static value **left blank** → Title should
+  be **empty**, no error, and **no** `literal:` marker string.
 
-Set:
-- Existing lead behavior: **Partial update**.
-- Standard fields: **Title → Source = Static value → type `QA-STATIC-TITLE`**.
-  Leave the other 6 at defaults.
-- No custom variables.
-- Push (100).
-
-Check in EmailBison:
-1. All 100 leads have **Title = `QA-STATIC-TITLE`** (identical on every one).
-2. First/Last/Email/Company still show the leads' real values (only Title was
-   overridden).
-
-**S2b (edge):** repeat, but set Title Static value **blank** → push → Title
-should be **empty**, no error, and NOT show a literal like `literal:` or a
-column name.
-
-## S3 — Partial update vs Full replace (put blanks unsent fields)
-**Guards patch/put semantics.** Symptom if broken: Full replace doesn't clear a
-skipped field (or Partial wrongly clears fields).
-This is a **two-push** test on the same slice.
-
-**Link:** https://inventory.scaletopia.io/people?source=claude-qa-2026-08&country=CA
-**Expected: 1000 people (all Toronto). Button: Add to EmailBison.**
-
-Push A — seed a value:
-- Existing lead behavior: **Partial update**.
-- Standard fields: **Title → Static value → `TITLE-CA`**. Others default.
-- Push (1000). → all 1000 leads get **Title = TITLE-CA**.
-
-Push B — full replace with Title skipped:
-- Open the **same link**.
-- Existing lead behavior: **Full replace (put)**.
-- Standard fields: **Title → Skip**. Others default.
-- Push (1000).
-
-Check in EmailBison:
-1. After Push B, **Title is now BLANK** on all 1000 (Full replace cleared the
-   field you didn't send). If Title still says `TITLE-CA`, put is broken.
-2. **Filter-integrity check:** every one of the 1000 leads is in **Toronto** /
-   Canada. If any London/Austin/other-country lead appears, the `country=CA`
-   filter leaked.
-
-## S4 — Uncleaned company → RAW name fallback (highest risk)
-**Guards `7942be4` / `1a9bbce` (companyName←brandName must fall back to raw name
-when there's no cleaned brand).** Symptom if broken: Company arrives **blank**
-for nearly every lead.
-
-**Link:** https://inventory.scaletopia.io/people?source=claude-qa-2026-08&niche=qa-uncleaned
-**Expected: 300 people (linked companies have brand_name = null).**
-
-Set:
-- Existing lead behavior: **Partial update**.
-- Standard fields: **Company name → Source = brandName** (the default — leave it).
-- Push (300).
-
-Check in EmailBison:
-1. Every lead's **Company = `Raw Uncleaned Co NNNN`** (the raw name).
-2. **No lead has a blank Company.** A single blank one = the fallback regressed.
-
-## S5 — Cleaned company → BRAND name preferred
-**Guards `7942be4` / `1a9bbce` (cleaned brand wins when present).**
-Symptom if broken: raw `QA Company` sent instead of cleaned `QA Brand`.
-
-**Link:** https://inventory.scaletopia.io/people?source=claude-qa-2026-08&industry=retail&country=DE
-**Expected: 100 people (linked companies ARE cleaned).**
-
-Set:
-- Existing lead behavior: **Partial update**.
-- Standard fields: **Company name → Source = brandName** (default).
-- Push (100).
-
-Check in EmailBison:
-1. Every lead's **Company = `QA Brand NNNN`** (cleaned).
-2. **None** show `QA Company NNNN` (that would mean it sent the raw name).
-
-## S6 — No-email leads → per-lead failure reason
-**Guards `f56f3ca` / `9539058` (report the real reason, not a bare name).**
-Symptom if broken: shows just a name, or a misleading "queued/0 failed".
-
-**Link:** https://inventory.scaletopia.io/people?source=claude-qa-2026-08&niche=qa-noemail
-**Expected: 100 people, all with NO email. Button: Add to EmailBison.**
-
-Set: defaults, Partial update, no custom vars. Push (100).
-
-Check:
-1. **Push Activity** shows **100 failed**, each as `{name} — no email on record`
-   (or equivalent specific reason).
-2. **Nothing** lands in EmailBison (0 leads created).
-
-## S7 — Mixed batch → partial success + counts
-**Guards `f56f3ca`, `c8f7bdc` (Total selected ≠ 0), `3df7cf0` (failure reasons
-persist across ticks).** Symptom if broken: Total selected shows 0, or the 100
-failure reasons are lost after the run.
-
-**Link:** https://inventory.scaletopia.io/people?source=claude-qa-2026-08&industry=hospitality
-**Expected: 1100 = 1000 valid + 100 no-email. Button: Add to EmailBison.**
-
-Set: defaults, Partial update. Push (1100).
-
-Check:
-1. Push Activity: **Total selected 1100**, **~1000 succeeded, 100 failed**, each
-   failure with the no-email reason (reasons still visible after it finishes).
-2. EmailBison gets ~1000 leads.
+### EB-5 — Full replace (put) blanks an unsent field
+Guards patch-vs-put semantics.
+- Same link. **Existing lead behavior = Full replace (put).** **Title → — ignore —.**
+  Others default. **Push (15).**
+- Verify: **Title is now BLANK** on all 15 (put cleared the field you didn't
+  send). If Title still shows `QA-STATIC-TITLE`, put is broken.
 
 ---
 
-# COMPANIES scenarios (`/companies`)
+# SEQUENCE 2 — People: brand name preferred over raw
 
-A company push resolves to the **people linked to those companies** (EmailBison
-has no company object). Each seeded company links to 20 people.
+**Link:** https://inventory.scaletopia.io/people?q=revitalash.com
+**Expected: 4 people**, all linked to a company whose **raw name is
+`RevitaLash Cosmetics`** but **cleaned `brand_name` is `RevitaLash`**. Button: ✉.
 
-## S8 — Company → linked-people resolution shown
-**Guards `4fc02df` (surface "X companies → Y people").**
-Symptom if broken: the company/people gap isn't explained.
-
-**Link:** https://inventory.scaletopia.io/companies?source=claude-qa-2026-08&country=GB
-**Expected: 50 companies → 1000 linked people. Button: Add to EmailBison.**
-
-Set:
-- Existing lead behavior: **Partial update**.
-- Standard fields: leave defaults. Optionally add a custom variable
-  `qa_industry ← Industry` (company industry) to confirm company columns resolve
-  on a company-side push.
-- Push.
-
-Check:
-1. **Push Activity** reads *"50 companies selected → 1000 linked people sent"*.
-2. 1000 leads in EmailBison; if you set `qa_industry`, it's populated.
-
-## S9 — Company push with ZERO linked people
-**Guards `4fc02df` (explicit 0-people message, not a silent 0/0).**
-Symptom if broken: looks like a broken 0/0 push.
-
-**Link:** https://inventory.scaletopia.io/companies?source=claude-qa-2026-08&niche=qa-orphan-nopeople
-**Expected: 10 companies → 0 linked people. Button: Add to EmailBison.**
-
-Set: defaults. Push.
-
-Check:
-1. Push Activity explicitly says **10 companies → 0 linked people** with a "no
-   linked people" explanation.
-2. Nothing pushed. It must NOT read as a silent/failed 0/0.
+### EB-6 — Cleaned brand wins when present
+Guards `companyName ← brandName` preferring the cleaned brand.
+- Partial update. **Company name → default (brandName).** **Push (4).**
+- Verify in EmailBison: every lead's **Company = `RevitaLash`** (cleaned brand),
+  **not** `RevitaLash Cosmetics` (the raw name). That difference is the whole test.
 
 ---
 
-# CAMPAIGN scenarios (`/people`)
+# SEQUENCE 3 — People: no-email + mixed batch failure reporting
 
-## S10 — New campaign attach, then already-in-campaign failure
-**Guards `1d9fdb3` (variant contract), `444fe87` (leads already active in another
-campaign reported as REAL failures, not silent no-ops).**
-Symptom if broken: campaign create 404s; or the second push says "100 queued, 0
-failed" while those leads never actually attach.
+### EB-7 — All-no-email → per-lead failure reason
+**Link:** https://inventory.scaletopia.io/people?email=empty&country=AU
+**Expected: 20 people, all with NO email.** Button: ✉.
+- Defaults, Partial update, no custom vars. **Push (20).**
+- Verify Push Activity: **20 failed**, each `{name} — no email on record`.
+  **0 leads** created in EmailBison.
 
-**Link:** https://inventory.scaletopia.io/people?source=claude-qa-2026-08&industry=education&country=US
-**Expected: 100 people. Button: Add to EmailBison Campaign (🚀).**
+### EB-8 — Mixed batch → partial success + counts + reason persistence
+**Link:** https://inventory.scaletopia.io/people?industry=oil%20and%20gas
+**Expected: 84 people = 55 with email + 29 with no email.** Button: ✉.
+- Defaults, Partial update. **Push (84).**
+- Verify Push Activity: **Total selected 84**, **~55 created, 29 failed**, each
+  failure showing the no-email reason, and reasons **still visible after the run
+  finishes** (not lost between worker ticks).
 
-Push A — create + attach:
-- Campaign step: **+ Create a campaign** → name `QA Campaign A`, pick a sender,
-  set a schedule; (optional) add a **sequence step + A/B variant** to exercise
-  `1d9fdb3`.
+---
+
+# SEQUENCE 4 — People: custom-variable edge cases
+
+**Reuse Link:** https://inventory.scaletopia.io/people?country=AU&email=not_empty (15).
+
+### EB-9 — Multiple static custom vars at once
+- Partial update. Add 3 custom vars, **Source = Static value**, distinct names:
+  `qa_a`=`AAA`, `qa_b`=`BBB`, `qa_c`=`CCC`. **Push (15).**
+- Verify: all 3 present verbatim on every lead (none dropped, none overwrite
+  each other).
+
+### EB-10 — Duplicate custom-var name (document behavior)
+- Add two rows both named `qa_dup` — one Static `S`, one Column ← City. **Push.**
+- Verify which value wins on the wire and record it (EmailBison decides
+  last-wins; this is a "document the actual behavior" case).
+
+### EB-11 — Phone/Website are custom vars, not native (C-1 audit)
+- Add `phone` ← **Phone** column and `website` ← **Website** column.
+- **First confirm the dialog's standard-field section shows exactly 5 rows**
+  (Company/First/Last/Email/Title) — **no native Phone or Website row.**
+- **Push.** Verify `phone`/`website` land as EmailBison **custom variables**.
+
+### EB-12 — Invalid custom-var row gating
+- Add a row with a **blank name** → **Continue must be disabled** with a hint.
+- Fix the name; add a **Static** row with an **empty value** → it should be
+  **silently dropped** from the push (not block, not error).
+
+---
+
+# SEQUENCE 5 — Companies: company-native push (ADR 0005)
+
+### EB-C1 — Company pushed as its own lead
+**Link:** https://inventory.scaletopia.io/companies?country=BH&email=not_empty
+**Expected: 16 companies, all with their own email.** Button: **Add to
+EmailBison** (✉, on /companies).
+- Partial update, defaults. **Push (16).**
+- Verify in EmailBison: **16 leads created**, each with **Company = the company's
+  own name**, **First name = raw company name**, **Last name = literally
+  `company last name`**, Title empty. (This is the company-native shape — a
+  person-shaped mapping here would be the bug.)
+
+### EB-C2 — Company with no email skipped + stale "linked people" note
+**Link:** https://inventory.scaletopia.io/companies?country=BH
+**Expected: 32 companies = 16 with email + 16 with none.** Button: ✉.
+- Partial update, defaults. **Push (32).**
+- Verify: **16 created, 16 failed** with a "no email" reason.
+- **Flag check (suspected bug):** read the Push Activity completion note. Under
+  company-native push it **should** attribute the gap to companies-with-no-email
+  being skipped. If it still says **"…resolved to Y linked people…"** /
+  "companies with no linked people contribute nothing", **that wording is stale**
+  — note it for the bug report.
+
+### EB-C3 — Company bindable-column list omits person fields
+- Open the /companies push **Options** step. Verify the standard-field Source
+  dropdowns do **not** offer First name / Last name / Title as *record* columns
+  in the person sense (company-specific bindable list). Record what's offered.
+
+---
+
+# SEQUENCE 6 — People: campaigns (🚀)
+
+**All of Sequence 6 uses ONE fresh all-email slice.**
+**Link:** https://inventory.scaletopia.io/people?country=AE&email=not_empty
+**Expected: 9 people** (all have email). Button: **Add to EmailBison Campaign** (🚀).
+
+### EB-13 — Create campaign + A/B variant + "Just add leads"
+Guards campaign create orchestration, sequence variant linking, auto-upsert of
+never-pushed candidates.
+- **Campaign step: + Create a campaign** → name `QA-Campaign-A`, pick ≥1 sender,
+  set a schedule; add **1 step** (subject + body) and **+ Add split test variant**
+  (fill Variant B subject + body — this exercises the A/B linking).
 - Options: defaults, Partial update.
-- Launch step: **Just add leads**.
-- Confirm (100).
+- Launch step: **Just add leads** (not launch).
+- **Confirm (9).**
+- Verify: no 404 on create; **9 leads attach to `QA-Campaign-A`**; the campaign
+  shows the A/B variant step in EmailBison with no error.
 
-Check A:
-1. No 404 creating the campaign.
-2. Push Activity: 100 attached; the 100 leads appear in `QA Campaign A` in
-   EmailBison.
-3. If you added a variant: the campaign shows the A/B variant step (variant marked
-   on the second step, pointing at the base step — no error).
+### EB-14 — Re-push SAME people to SAME campaign → quiet no-op
+Guards the `campaign_tag` skip (the fix for false "failed" reports).
+- Same link. **Campaign step: pick existing `QA-Campaign-A`.** **Confirm (9).**
+- Verify Push Activity: **~9 updated / 0 failed**, **no false "failed" rows**,
+  and no re-attach errors.
 
-Push B — same leads, different campaign:
-- Open the **same link**. Campaign step: **create `QA Campaign B`**.
-- Confirm (100).
+### EB-15 — Same people to a DIFFERENT campaign → real failures + conflict UI
+Guards already-in-another-campaign reporting, the pre-flight conflict warning,
+and the allow-parallel toggle (the most recently churned code).
+- Same link. **Campaign step: + Create `QA-Campaign-B`** (sender + schedule + 1
+  step). Options defaults. **On the confirm step, parallel sending OFF.**
+- Verify the confirm step shows an **amber warning** like "**9 of 9 already look
+  active in a different campaign**" with an inline **allow-parallel toggle**.
+- **Confirm (9).** Verify: the 9 are reported **failed with a reason** (e.g.
+  "already in a campaign"), **not** "9 queued, 0 failed", and they do **not**
+  silently join Campaign B.
+- **EB-15b:** re-push the same 9 to `QA-Campaign-B` with **parallel ON** → they
+  should now attach; verify in EmailBison the lead is active in **both**
+  campaigns.
 
-Check B:
-1. Because the 100 are already active in Campaign A, EmailBison no-ops them — the
-   fix must report them as **failed with a reason** per lead (e.g. "already in a
-   campaign"), NOT "100 queued, 0 failed".
-2. They do NOT get silently added to Campaign B.
+### EB-16 — Launch guard: empty campaign must not launch
+Guards the `succeeded >= 1` auto-launch gate.
+- **Link:** https://inventory.scaletopia.io/people?email=empty&country=AU (20, all
+  no-email). Campaign step: create `QA-Campaign-C`. Launch step: **Add leads &
+  launch**. **Confirm (20).**
+- Verify: 0 attach (all no-email) → the campaign is **NOT launched** (stays
+  draft). A launched-but-empty campaign is the failure.
+
+---
+
+# SEQUENCE 7 — Cross-workspace (OPTIONAL — needs a 2nd EB client/workspace)
+
+Only run if you have a second client whose EmailBison creds point at a
+**different workspace**.
+
+### EB-X1 — Campaign lists are per-client
+- Open the campaign picker for Client A, then Client B → each shows **its own
+  workspace's** campaigns only (no bleed).
+
+### EB-X2 — Same campaign name in two workspaces stays independent
+- Create `QA-Campaign` in both workspaces; push the same people to each →
+  independent attach records; the conflict-check for A must **not** flag B's
+  membership (dedupe is by campaign **id**, never name).
 
 ---
 
@@ -258,18 +270,59 @@ Check B:
 
 | # | Guards | Failure symptom |
 |---|--------|-----------------|
-| S1 | `6726848`, `c8f7bdc` | new column empty; re-push re-counts as created |
-| S2 | `037a49a` | static value blank / column-key leak |
-| S3 | patch/put | Full replace doesn't blank skipped field |
-| S4 | `7942be4`,`1a9bbce` | uncleaned company name blank |
-| S5 | `7942be4`,`1a9bbce` | raw name sent instead of brand |
-| S6 | `f56f3ca`,`9539058` | failure shows bare name, no reason |
-| S7 | `c8f7bdc`,`3df7cf0` | Total selected 0; reasons lost mid-run |
-| S8 | `4fc02df` | company→people count not surfaced |
-| S9 | `4fc02df` | silent 0/0 |
-| S10 | `1d9fdb3`,`444fe87` | variant 404; already-in-campaign silently dropped |
+| EB-1 | defaults, brand→raw fallback, column vars, stringify, created count | blank company; var empty; `[object Object]`; miscount |
+| EB-2 | created/updated heuristic, dedupe | re-push re-counts as created / dup leads |
+| EB-3 | `custom_variables` omit-on-empty | re-push wipes existing vars |
+| EB-4 | static-value standard field | blank / `literal:` marker leak |
+| EB-5 | patch vs put | put doesn't blank the unsent field |
+| EB-6 | brand preferred over raw | raw name sent instead of cleaned brand |
+| EB-7 | no-email failure reason | bare name / no reason / silent |
+| EB-8 | mixed batch counts + reason persistence | Total 0; reasons lost mid-run |
+| EB-9 | multiple static vars | a var dropped / overwritten |
+| EB-10 | duplicate var name | (documentation case) |
+| EB-11 | phone/website are custom vars (5 native only) | native phone/website row exists |
+| EB-12 | invalid-row gating | blank-name not blocked; empty static not dropped |
+| EB-C1 | company-native shape | person-shaped mapping / blank last name |
+| EB-C2 | company no-email skip + note wording | still says "linked people" |
+| EB-C3 | company bindable list | person-only fields offered |
+| EB-13 | campaign create + variant + auto-upsert | 404; variant error; leads never attach |
+| EB-14 | same-campaign no-op (`campaign_tag`) | duplicates reported as failed |
+| EB-15 | other-campaign failures + conflict UI + parallel | silent drop; missing warning; toggle ignored |
+| EB-16 | launch guard | empty campaign launched |
+| EB-X1/X2 | per-client cache / id-based dedupe | cross-workspace bleed |
 
-## Needs a different setup (not in this seed)
-- Custom-var cache-key-per-client (`6ef7e3a`) — two clients / two EB workspaces.
-- Sender-email & custom-var pagination (`248efff`,`6ef7e3a`) — >15 mailboxes/vars.
-- Stranded-job reaper / cron whitelist (`08a5938`,`75261a0`) — infra, not UI-observable.
+## Needs different setup / not UI-testable (do not attempt from the UI)
+- **>15 custom variables** (reference-panel pagination + re-create bug) — needs
+  such a workspace.
+- **>15 sender mailboxes** (sender-picker pagination) — needs such a workspace.
+- Retry/backoff on 429/5xx; worker resumability on very large (multi-tick)
+  batches; stranded-job reaper; cron/worker-secret gating — infra, only
+  indirectly visible as Push Activity stalls/progress.
+- Legacy saved-mapping normalization — needs a pre-existing legacy
+  `push_field_mappings` row.
+- Per-candidate write-back failure / chunk-failure isolation — can't force from
+  the UI.
+
+## Results log (fill as you go — the verification subagent reads this)
+
+| Test | Expected N | Observed Push N | Pass/Fail | Notes |
+|------|-----------|-----------------|-----------|-------|
+| EB-1 | 15 | | | |
+| EB-2 | 15 | | | |
+| EB-3 | 15 | | | |
+| EB-4 | 15 | | | |
+| EB-5 | 15 | | | |
+| EB-6 | 4 | | | |
+| EB-7 | 20 | | | |
+| EB-8 | 84 | | | |
+| EB-9 | 15 | | | |
+| EB-10 | 15 | | | |
+| EB-11 | 15 | | | |
+| EB-12 | 15 | | | |
+| EB-C1 | 16 | | | |
+| EB-C2 | 32 | | | |
+| EB-C3 | — | | | |
+| EB-13 | 9 | | | |
+| EB-14 | 9 | | | |
+| EB-15 | 9 | | | |
+| EB-16 | 20 | | | |
