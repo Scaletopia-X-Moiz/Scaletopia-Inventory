@@ -7,7 +7,7 @@ import {
   type CompanyListFilters,
 } from "@/lib/data/companies";
 import { includeOnly } from "@/lib/data/include-exclude";
-import { filterSet } from "@/lib/data/virtual-columns";
+import { filterSet, virtualColumnIdentity } from "@/lib/data/virtual-columns";
 import { getCompanyEnrichmentFields } from "@/lib/data/enrichment-fields";
 
 describe("getCompanyFilterOptions", () => {
@@ -307,7 +307,7 @@ describe("getCompanies — virtual-column Text filter (ticket #34)", () => {
     expect(result.total).toBeGreaterThan(0);
     expect(result.total).toBeLessThanOrEqual(all.total);
     for (const row of result.rows) {
-      expect(row.virtualColumnValues?.[field!.key]).toBe(value);
+      expect(row.virtualColumnValues?.[virtualColumnIdentity(undefined, field!.key, "company")]).toBe(value);
     }
   }, 30000);
 
@@ -337,7 +337,7 @@ describe("getCompanies — virtual-column Text filter (ticket #34)", () => {
     expect(list.total).toBeGreaterThanOrEqual(onlyA.total);
     expect(list.total).toBeGreaterThan(0);
     for (const row of list.rows) {
-      expect(values).toContain(row.virtualColumnValues?.[field!.key]);
+      expect(values).toContain(row.virtualColumnValues?.[virtualColumnIdentity(undefined, field!.key, "company")]);
     }
   }, 30000);
 

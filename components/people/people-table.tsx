@@ -1,7 +1,9 @@
 import Link from "next/link";
+import { Building2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { PersonListRow } from "@/lib/data/people";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
+import { virtualColumnIdentity } from "@/lib/data/virtual-columns";
 import { EmailStatusBadge } from "@/components/people/email-status-badge";
 import { PhoneStatusBadge } from "@/components/people/phone-status-badge";
 import { formatValue } from "@/components/companies/enrichment-list";
@@ -58,10 +60,13 @@ export function PeopleTable({
             ))}
             {virtualColumns.map((col) => (
               <th
-                key={col.key}
+                key={virtualColumnIdentity(col.source, col.key, "person")}
                 className="whitespace-nowrap px-3 py-2.5 text-left text-xs font-semibold text-stamp"
               >
-                {col.key}
+                <span className="inline-flex items-center gap-1">
+                  {col.source === "company" && <Building2 size={14} className="text-ink-soft" />}
+                  {col.key}
+                </span>
               </th>
             ))}
           </tr>
@@ -125,9 +130,9 @@ export function PeopleTable({
                 {formatLastUpdated(row.lastUpdated)}
               </PersonCell>
               {virtualColumns.map((col) => {
-                const value = row.virtualColumnValues?.[col.key];
+                const value = row.virtualColumnValues?.[virtualColumnIdentity(col.source, col.key, "person")];
                 return (
-                  <PersonCell key={col.key} href={`/people/${row.id}`}>
+                  <PersonCell key={virtualColumnIdentity(col.source, col.key, "person")} href={`/people/${row.id}`}>
                     {value == null ? "—" : formatValue(value)}
                   </PersonCell>
                 );

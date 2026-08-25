@@ -7,7 +7,7 @@ import {
   type PersonListFilters,
 } from "@/lib/data/people";
 import { includeOnly } from "@/lib/data/include-exclude";
-import { filterSet } from "@/lib/data/virtual-columns";
+import { filterSet, virtualColumnIdentity } from "@/lib/data/virtual-columns";
 import { getPersonEnrichmentFields } from "@/lib/data/enrichment-fields";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import type { PushStatusFilter } from "@/lib/data/push-status-filter";
@@ -239,7 +239,7 @@ describe("getPeople — virtual-column Text filter (ticket #41)", () => {
     expect(result.total).toBeGreaterThan(0);
     expect(result.total).toBeLessThanOrEqual(all.total);
     for (const row of result.rows) {
-      expect(row.virtualColumnValues?.[field!.key]).toBe(value);
+      expect(row.virtualColumnValues?.[virtualColumnIdentity(undefined, field!.key, "person")]).toBe(value);
     }
   }, 30000);
 

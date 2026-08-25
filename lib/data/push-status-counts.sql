@@ -68,7 +68,10 @@ scoped AS (
         AND pp.client_id = pr.push_client_id
         AND pp.platform = pr.push_platform
     ) AS is_pushed
-  FROM people p, params pr
+  -- Ticket #30: LEFT JOIN so a person with no linked company still
+  -- evaluates person-sourced conditions correctly, mirroring
+  -- people_matching_virtual_filters (virtual-columns.sql).
+  FROM people p LEFT JOIN companies co ON co.id = p.company_id, params pr
   WHERE
     (pr.search IS NULL OR p.full_name ILIKE '%' || pr.search || '%' OR p.email ILIKE '%' || pr.search || '%')
     AND (pr.job_title IS NULL OR p.job_title ILIKE '%' || pr.job_title || '%')
@@ -93,6 +96,10 @@ scoped AS (
       OR (pr.phone_filter = 'empty' AND (p.phone IS NULL OR p.phone = '')))
     -- Grouped virtual-filter fold (ticket #117) — identical to the copies in
     -- people-canonical-columns.sql / virtual-columns.sql; keep in lockstep.
+    --
+    -- Ticket #30: per-condition dispatch, identical to person_filter_options
+    -- (people-canonical-columns.sql) — a company-sourced condition reads the
+    -- LEFT-JOINed co.custom_data.
     AND (
       COALESCE(jsonb_array_length(pr.virtual_filters->'groups'), 0) = 0
       OR CASE WHEN COALESCE(pr.virtual_filters->>'combinator', 'and') = 'or' THEN
@@ -100,10 +107,16 @@ scoped AS (
           SELECT 1 FROM jsonb_array_elements(pr.virtual_filters->'groups') AS grp
           WHERE CASE WHEN COALESCE(grp->>'combinator', 'and') = 'or' THEN
               EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
-                      WHERE virtual_filter_predicate_matches(p.custom_data, cond))
+                      WHERE (CASE
+                        WHEN COALESCE(cond->>'source','person') = 'company' THEN virtual_filter_predicate_matches(co.custom_data, cond)
+                        ELSE virtual_filter_predicate_matches(p.custom_data, cond)
+                        END))
             ELSE
               NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
-                          WHERE NOT virtual_filter_predicate_matches(p.custom_data, cond))
+                          WHERE NOT (CASE
+                            WHEN COALESCE(cond->>'source','person') = 'company' THEN virtual_filter_predicate_matches(co.custom_data, cond)
+                            ELSE virtual_filter_predicate_matches(p.custom_data, cond)
+                            END))
             END
         )
       ELSE
@@ -111,10 +124,16 @@ scoped AS (
           SELECT 1 FROM jsonb_array_elements(pr.virtual_filters->'groups') AS grp
           WHERE NOT (CASE WHEN COALESCE(grp->>'combinator', 'and') = 'or' THEN
               EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
-                      WHERE virtual_filter_predicate_matches(p.custom_data, cond))
+                      WHERE (CASE
+                        WHEN COALESCE(cond->>'source','person') = 'company' THEN virtual_filter_predicate_matches(co.custom_data, cond)
+                        ELSE virtual_filter_predicate_matches(p.custom_data, cond)
+                        END))
             ELSE
               NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
-                          WHERE NOT virtual_filter_predicate_matches(p.custom_data, cond))
+                          WHERE NOT (CASE
+                            WHEN COALESCE(cond->>'source','person') = 'company' THEN virtual_filter_predicate_matches(co.custom_data, cond)
+                            ELSE virtual_filter_predicate_matches(p.custom_data, cond)
+                            END))
             END)
         )
       END
@@ -210,6 +229,9 @@ scoped AS (
     AND (pr.phone_filter = 'any'
       OR (pr.phone_filter = 'not_empty' AND c.phone IS NOT NULL AND c.phone <> '')
       OR (pr.phone_filter = 'empty' AND (c.phone IS NULL OR c.phone = '')))
+    -- Ticket #30: per-condition dispatch, identical to company_filter_options
+    -- (canonical-columns.sql) — a person-sourced condition reads this
+    -- company's linked people.
     AND (
       COALESCE(jsonb_array_length(pr.virtual_filters->'groups'), 0) = 0
       OR CASE WHEN COALESCE(pr.virtual_filters->>'combinator', 'and') = 'or' THEN
@@ -217,10 +239,30 @@ scoped AS (
           SELECT 1 FROM jsonb_array_elements(pr.virtual_filters->'groups') AS grp
           WHERE CASE WHEN COALESCE(grp->>'combinator', 'and') = 'or' THEN
               EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
-                      WHERE virtual_filter_predicate_matches(c.custom_data, cond))
+                      WHERE (CASE
+                        WHEN COALESCE(cond->>'source','company') = 'person' THEN
+                          CASE WHEN COALESCE(cond->>'quantifier','any') = 'all' THEN
+                            EXISTS (SELECT 1 FROM people pe WHERE pe.company_id = c.id)
+                            AND NOT EXISTS (SELECT 1 FROM people pe WHERE pe.company_id = c.id AND NOT virtual_filter_predicate_matches(pe.custom_data, cond))
+                          ELSE
+                            EXISTS (SELECT 1 FROM people pe WHERE pe.company_id = c.id AND virtual_filter_predicate_matches(pe.custom_data, cond))
+                          END
+                        ELSE
+                          virtual_filter_predicate_matches(c.custom_data, cond)
+                        END))
             ELSE
               NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
-                          WHERE NOT virtual_filter_predicate_matches(c.custom_data, cond))
+                          WHERE NOT (CASE
+                            WHEN COALESCE(cond->>'source','company') = 'person' THEN
+                              CASE WHEN COALESCE(cond->>'quantifier','any') = 'all' THEN
+                                EXISTS (SELECT 1 FROM people pe WHERE pe.company_id = c.id)
+                                AND NOT EXISTS (SELECT 1 FROM people pe WHERE pe.company_id = c.id AND NOT virtual_filter_predicate_matches(pe.custom_data, cond))
+                              ELSE
+                                EXISTS (SELECT 1 FROM people pe WHERE pe.company_id = c.id AND virtual_filter_predicate_matches(pe.custom_data, cond))
+                              END
+                            ELSE
+                              virtual_filter_predicate_matches(c.custom_data, cond)
+                            END))
             END
         )
       ELSE
@@ -228,10 +270,30 @@ scoped AS (
           SELECT 1 FROM jsonb_array_elements(pr.virtual_filters->'groups') AS grp
           WHERE NOT (CASE WHEN COALESCE(grp->>'combinator', 'and') = 'or' THEN
               EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
-                      WHERE virtual_filter_predicate_matches(c.custom_data, cond))
+                      WHERE (CASE
+                        WHEN COALESCE(cond->>'source','company') = 'person' THEN
+                          CASE WHEN COALESCE(cond->>'quantifier','any') = 'all' THEN
+                            EXISTS (SELECT 1 FROM people pe WHERE pe.company_id = c.id)
+                            AND NOT EXISTS (SELECT 1 FROM people pe WHERE pe.company_id = c.id AND NOT virtual_filter_predicate_matches(pe.custom_data, cond))
+                          ELSE
+                            EXISTS (SELECT 1 FROM people pe WHERE pe.company_id = c.id AND virtual_filter_predicate_matches(pe.custom_data, cond))
+                          END
+                        ELSE
+                          virtual_filter_predicate_matches(c.custom_data, cond)
+                        END))
             ELSE
               NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
-                          WHERE NOT virtual_filter_predicate_matches(c.custom_data, cond))
+                          WHERE NOT (CASE
+                            WHEN COALESCE(cond->>'source','company') = 'person' THEN
+                              CASE WHEN COALESCE(cond->>'quantifier','any') = 'all' THEN
+                                EXISTS (SELECT 1 FROM people pe WHERE pe.company_id = c.id)
+                                AND NOT EXISTS (SELECT 1 FROM people pe WHERE pe.company_id = c.id AND NOT virtual_filter_predicate_matches(pe.custom_data, cond))
+                              ELSE
+                                EXISTS (SELECT 1 FROM people pe WHERE pe.company_id = c.id AND virtual_filter_predicate_matches(pe.custom_data, cond))
+                              END
+                            ELSE
+                              virtual_filter_predicate_matches(c.custom_data, cond)
+                            END))
             END)
         )
       END

@@ -52,7 +52,7 @@ describe("PeopleTable — virtual columns (ticket #41)", () => {
   it("renders an extra header and cell for each active virtual column", () => {
     const html = renderToStaticMarkup(
       createElement(PeopleTable, {
-        rows: [makeRow({ virtualColumnValues: { lead_score: 87 } })],
+        rows: [makeRow({ virtualColumnValues: { "person:lead_score": 87 } })],
         virtualColumns: [{ key: "lead_score", type: "number" }],
       })
     );

@@ -12,7 +12,7 @@ import type { EmailBisonPushCandidate } from "@/lib/data/people";
 import type { EmailBisonPushRecord } from "@/lib/emailbison/types";
 import type { IncludeExclude } from "@/lib/data/include-exclude";
 import type { ActiveVirtualColumn, VirtualFilterSet } from "@/lib/data/virtual-columns";
-import { isFilterSetActive } from "@/lib/data/virtual-columns";
+import { isFilterSetActive, virtualColumnIdentity } from "@/lib/data/virtual-columns";
 import {
   pushStatusRpcPayload,
   type PushPlatform,
@@ -562,13 +562,24 @@ const ENRICHMENT_VALUES_ID_CHUNK_SIZE = 100;
 /** custom_data[key] for each active virtual column, scoped to just the ids on
  * the rendered page — same shape/reasoning as getPeopleCountsForCompanies:
  * avoids pulling the whole custom_data blob (and the whole table) just to
- * populate a handful of display columns for one page. */
+ * populate a handful of display columns for one page.
+ *
+ * Ticket #30: values are keyed by the column's composite identity
+ * (virtualColumnIdentity), not the bare key, so they line up with the same
+ * convention used on the People page. The Companies page's add-column UI is
+ * restricted to company-source columns, so in practice every column here has
+ * `source` absent or `"company"`. A person-source column (e.g. a stale
+ * bookmarked URL) is out of scope for a company->people aggregation — it
+ * renders as null rather than crashing. */
 async function getCompanyEnrichmentValues(
   ids: string[],
-  keys: string[]
+  columns: ActiveVirtualColumn[]
 ): Promise<Map<string, Record<string, unknown>>> {
   const result = new Map<string, Record<string, unknown>>();
-  if (ids.length === 0 || keys.length === 0) return result;
+  if (ids.length === 0 || columns.length === 0) return result;
+
+  const companyColumns = columns.filter((c) => (c.source ?? "company") === "company");
+  const personColumns = columns.filter((c) => c.source === "person");
 
   const chunks = chunkIds(ids, ENRICHMENT_VALUES_ID_CHUNK_SIZE);
   const chunkResults = await Promise.all(
@@ -584,7 +595,12 @@ async function getCompanyEnrichmentValues(
   for (const rows of chunkResults) {
     for (const row of rows) {
       const values: Record<string, unknown> = {};
-      for (const key of keys) values[key] = row.custom_data?.[key] ?? null;
+      for (const col of companyColumns) {
+        values[virtualColumnIdentity(col.source, col.key, "company")] = row.custom_data?.[col.key] ?? null;
+      }
+      for (const col of personColumns) {
+        values[virtualColumnIdentity(col.source, col.key, "company")] = null;
+      }
       result.set(row.id, values);
     }
   }
@@ -653,8 +669,7 @@ export async function getCompanies(
   }
 
   if (filters.virtualColumns?.length) {
-    const keys = filters.virtualColumns.map((c) => c.key);
-    const values = await getCompanyEnrichmentValues(pageRows.map((r) => r.id), keys);
+    const values = await getCompanyEnrichmentValues(pageRows.map((r) => r.id), filters.virtualColumns);
     for (const row of pageRows) {
       row.virtualColumnValues = values.get(row.id) ?? {};
     }

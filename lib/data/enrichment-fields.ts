@@ -10,6 +10,7 @@ export interface EnrichmentField {
   key: string;
   type: EnrichmentFieldType;
   sampleValues: string[];
+  source: "company" | "person";
 }
 
 export interface EnrichmentFieldDiscovery {
@@ -20,7 +21,7 @@ export interface EnrichmentFieldDiscovery {
 }
 
 interface EnrichmentFieldDiscoveryRpcResult {
-  fields: EnrichmentField[];
+  fields: Array<Omit<EnrichmentField, "source">>;
   sampledRows: number;
 }
 
@@ -46,7 +47,10 @@ export async function getCompanyEnrichmentFields(
   });
   if (error) throw error;
   const result = data as EnrichmentFieldDiscoveryRpcResult;
-  return { fields: result.fields, sampledRows: result.sampledRows };
+  return {
+    fields: result.fields.map((field) => ({ ...field, source: "company" as const })),
+    sampledRows: result.sampledRows,
+  };
 }
 
 /** Same as getCompanyEnrichmentFields, scoped to /people instead. */
@@ -62,5 +66,36 @@ export async function getPersonEnrichmentFields(
   });
   if (error) throw error;
   const result = data as EnrichmentFieldDiscoveryRpcResult;
-  return { fields: result.fields, sampledRows: result.sampledRows };
+  return {
+    fields: result.fields.map((field) => ({ ...field, source: "person" as const })),
+    sampledRows: result.sampledRows,
+  };
+}
+
+/** Merges company and person enrichment fields into one source-tagged list
+ * for the cross-table field picker (issue #30) — offers both /companies and
+ * /people custom_data keys regardless of which page the picker is opened
+ * from. Runs both discovery RPCs in parallel; results are concatenated
+ * (company fields first, then person fields) without deduping across
+ * sources, since a key present on both tables is a distinct filterable field
+ * per source. `sampledRows` reports the per-source counts rather than a
+ * single combined number, since the two tables are sampled independently and
+ * a sum would misleadingly imply one shared sample. */
+export async function getAllEnrichmentFields(
+  companyFilters: CompanyListFilters = {},
+  personFilters: PersonListFilters = {},
+  sampleSize: number = DEFAULT_SAMPLE_SIZE,
+  maxValuesPerKey: number = DEFAULT_MAX_VALUES_PER_KEY
+): Promise<{
+  fields: EnrichmentField[];
+  sampledRows: { company: number; person: number };
+}> {
+  const [companyResult, personResult] = await Promise.all([
+    getCompanyEnrichmentFields(companyFilters, sampleSize, maxValuesPerKey),
+    getPersonEnrichmentFields(personFilters, sampleSize, maxValuesPerKey),
+  ]);
+  return {
+    fields: [...companyResult.fields, ...personResult.fields],
+    sampledRows: { company: companyResult.sampledRows, person: personResult.sampledRows },
+  };
 }

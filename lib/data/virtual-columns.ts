@@ -36,6 +36,17 @@ export interface VirtualColumnFilter {
    * the chip input's stacked keywords (ticket #116); "matches any of" for
    * contains, "matches none of" for not_contains. */
   value?: string | number | boolean | string[] | [string | number, string | number] | null;
+  /** Which entity's custom_data this condition reads (ticket #30's symmetric
+   * cross-table enrichment filtering): 'company' or 'person'. Absent means
+   * "the page's own entity" — the pre-#30 behavior, so existing bookmarked
+   * `vf` URLs keep parsing and matching identically. */
+  source?: "company" | "person";
+  /** Only meaningful for a one-to-many cross-table condition (the Companies
+   * page filtering by its people's data): 'any' matches a company with at
+   * least one qualifying person, 'all' requires every one of its people to
+   * qualify. Absent defaults to 'any'. Meaningless (ignored) for a same-table
+   * condition or the People page's many-to-one company lookup. */
+  quantifier?: "any" | "all";
 }
 
 /** Two-level grouped filter logic (ticket #117), matching Clay's nesting
@@ -65,6 +76,9 @@ export interface VirtualFilterSet {
 export interface ActiveVirtualColumn {
   key: string;
   type: VirtualColumnType;
+  /** Which entity's custom_data this column reads — see VirtualColumnFilter's
+   * `source`. Absent means "the page's own entity" (pre-#30 behavior). */
+  source?: "company" | "person";
 }
 
 /** Operator metadata drives both validation (here) and the operator UI
@@ -199,6 +213,17 @@ function isIsoDate(value: unknown): value is string {
   return typeof value === "string" && ISO_DATE.test(value);
 }
 
+/** `undefined` is valid (means "the page's own entity") — only a present-but-
+ * wrong value is rejected, per the field's backward-compat contract. */
+function isValidSource(value: unknown): value is "company" | "person" | undefined {
+  return value === undefined || value === "company" || value === "person";
+}
+
+/** `undefined` is valid (means "default to 'any'") — see `quantifier` above. */
+function isValidQuantifier(value: unknown): value is "any" | "all" | undefined {
+  return value === undefined || value === "any" || value === "all";
+}
+
 /** Validates the `value` payload against the column type and the operator's
  * arity: text wants a non-empty string, number a finite number (a
  * [min, max] pair for `between`), date an ISO-date string (or pair). A
@@ -239,13 +264,18 @@ function isValidVirtualColumnFilter(value: unknown): value is VirtualColumnFilte
   if (typeof f.type !== "string" || !SUPPORTED_TYPES.includes(f.type as VirtualColumnType)) return false;
   const meta = operatorsForType(f.type as VirtualColumnType).find((o) => o.id === f.operator);
   if (!meta) return false;
-  return isValidFilterValue(f.type as VirtualColumnType, meta, f.value);
+  if (!isValidFilterValue(f.type as VirtualColumnType, meta, f.value)) return false;
+  if (!isValidSource(f.source)) return false;
+  return isValidQuantifier(f.quantifier);
 }
 
 export function isValidActiveVirtualColumn(value: unknown): value is ActiveVirtualColumn {
   if (typeof value !== "object" || value === null) return false;
   const c = value as Record<string, unknown>;
-  return isNonEmptyKey(c.key) && typeof c.type === "string" && SUPPORTED_TYPES.includes(c.type as VirtualColumnType);
+  if (!isNonEmptyKey(c.key) || typeof c.type !== "string" || !SUPPORTED_TYPES.includes(c.type as VirtualColumnType)) {
+    return false;
+  }
+  return isValidSource(c.source);
 }
 
 function isCombinator(value: unknown): value is FilterCombinator {
@@ -326,16 +356,20 @@ export function isFilterSetActive(set: VirtualFilterSet | null | undefined): boo
   return !!set && set.groups.some((g) => g.conditions.length > 0);
 }
 
-/** Drops every condition on `key` across all groups (used when a display
- * column is removed), pruning any group left empty; returns undefined when no
- * condition remains. */
+/** Drops every condition on (source, key) across all groups (used when a
+ * display column is removed), pruning any group left empty; returns undefined
+ * when no condition remains. `source` is compared as-is (not resolved against
+ * a selfEntity) — the caller passes the removed column's own `source`, so a
+ * bare (source-absent) column removal only removes bare (source-absent)
+ * conditions, matching the pre-#30 behavior exactly. */
 export function removeColumnFromFilterSet(
   set: VirtualFilterSet | null | undefined,
-  key: string
+  key: string,
+  source?: "company" | "person"
 ): VirtualFilterSet | undefined {
   if (!set) return undefined;
   const groups = set.groups
-    .map((g) => ({ ...g, conditions: g.conditions.filter((c) => c.key !== key) }))
+    .map((g) => ({ ...g, conditions: g.conditions.filter((c) => !(c.key === key && c.source === source)) }))
     .filter((g) => g.conditions.length > 0);
   return groups.length ? { ...set, groups } : undefined;
 }
@@ -357,4 +391,18 @@ export function parseVirtualColumnsParam(searchParams: URLSearchParams): ActiveV
 
 export function serializeVirtualColumnsParam(columns: ActiveVirtualColumn[]): string | null {
   return columns.length ? JSON.stringify(columns) : null;
+}
+
+/** Composite identity for a filter/column: (source, key) rather than key
+ * alone, since ticket #30 lets a page carry conditions/columns against both
+ * its own entity and the other table's — "lead_score" on companies and
+ * "lead_score" on people are different fields that must not collide when
+ * deduping or matching. `source` absent resolves to `selfEntity` (the page's
+ * own entity), matching every other absent-source fallback in this file. */
+export function virtualColumnIdentity(
+  source: "company" | "person" | undefined,
+  key: string,
+  selfEntity: "company" | "person"
+): string {
+  return `${source ?? selfEntity}:${key}`;
 }

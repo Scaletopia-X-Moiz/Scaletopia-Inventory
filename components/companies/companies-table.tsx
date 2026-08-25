@@ -1,8 +1,10 @@
 import Link from "next/link";
 import { Tooltip } from "radix-ui";
+import { Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { CompanyListRow } from "@/lib/data/companies";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
+import { virtualColumnIdentity } from "@/lib/data/virtual-columns";
 import { SourceChip } from "@/components/companies/source-chip";
 import { PeopleDrawerTrigger } from "@/components/companies/people-drawer-trigger";
 import { EmailStatusBadge } from "@/components/people/email-status-badge";
@@ -69,10 +71,13 @@ export function CompaniesTable({
             ))}
             {virtualColumns.map((col) => (
               <th
-                key={col.key}
+                key={virtualColumnIdentity(col.source, col.key, "company")}
                 className="whitespace-nowrap px-3 py-2.5 text-left text-xs font-semibold text-stamp"
               >
-                {col.key}
+                <span className="inline-flex items-center gap-1">
+                  {col.source === "person" && <Users size={14} className="text-ink-soft" />}
+                  {col.key}
+                </span>
               </th>
             ))}
           </tr>
@@ -176,9 +181,9 @@ export function CompaniesTable({
                 {formatLastUpdated(row.lastUpdated)}
               </CompanyCell>
               {virtualColumns.map((col) => {
-                const value = row.virtualColumnValues?.[col.key];
+                const value = row.virtualColumnValues?.[virtualColumnIdentity(col.source, col.key, "company")];
                 return (
-                  <CompanyCell key={col.key} href={`/companies/${row.id}`}>
+                  <CompanyCell key={virtualColumnIdentity(col.source, col.key, "company")} href={`/companies/${row.id}`}>
                     {value == null ? "—" : formatValue(value)}
                   </CompanyCell>
                 );

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Check, ChevronDown, Plus, X } from "lucide-react";
+import { Building2, Check, ChevronDown, Plus, Search, Users, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   ADDABLE_ENRICHMENT_TYPES,
@@ -10,6 +10,7 @@ import {
   operatorsForType,
   sanitizeFilterSet,
   serializeVirtualFiltersParam,
+  virtualColumnIdentity,
   type ActiveVirtualColumn,
   type FilterCombinator,
   type VirtualColumnFilter,
@@ -18,14 +19,11 @@ import {
   type VirtualColumnType,
   type VirtualFilterSet,
 } from "@/lib/data/virtual-columns";
-
-type EnrichmentFieldType = "Text" | "Number" | "Boolean" | "List" | "Date";
-
-interface EnrichmentField {
-  key: string;
-  type: EnrichmentFieldType;
-  sampleValues: string[];
-}
+// Type-only import: erased entirely at compile time (isolatedModules), so it
+// never pulls enrichment-fields.ts's `supabaseAdmin`/`server-only` runtime
+// code into this "use client" bundle — safe despite that module being
+// server-only at runtime (ticket #30).
+import type { EnrichmentField } from "@/lib/data/enrichment-fields";
 
 /** One shared enrichment-field discovery for the whole bar: the "Add column"
  * picker and every filter condition's column/value picker read the same
@@ -97,17 +95,23 @@ export function VirtualColumnsBar({
   removeColumn,
   setFilterSet,
   onScreenValues = {},
-  endpoint = "/api/companies/enrichment-fields",
+  endpoint = "/api/enrichment-fields",
+  selfEntity,
 }: {
   activeColumns: ActiveVirtualColumn[];
   activeFilterSet: VirtualFilterSet | undefined;
-  addColumn: (key: string, type: VirtualColumnType) => void;
-  removeColumn: (key: string) => void;
+  addColumn: (key: string, type: VirtualColumnType, source?: "company" | "person") => void;
+  removeColumn: (key: string, source?: "company" | "person") => void;
   setFilterSet: (next: VirtualFilterSet | undefined) => void;
   onScreenValues?: Record<string, string[]>;
-  /** Enrichment-field discovery endpoint — defaults to Companies; People
-   * passes "/api/people/enrichment-fields" (ticket #41). */
+  /** Enrichment-field discovery endpoint — defaults to the combined
+   * cross-table endpoint (ticket #30); both /companies and /people point here
+   * explicitly for clarity. */
   endpoint?: string;
+  /** Which entity this page's own custom_data belongs to — drives composite
+   * (source, key) identity for dedupe/matching, the Add-column picker's
+   * source scoping, and the ANY/ALL quantifier UI (ticket #30). */
+  selfEntity: "company" | "person";
 }) {
   const { fields, loading, ensureLoaded } = useEnrichmentFields(endpoint);
 
@@ -119,14 +123,19 @@ export function VirtualColumnsBar({
   return (
     <div className="flex flex-wrap items-center gap-2">
       {activeColumns.map((col) => (
-        <DisplayColumnChip key={col.key} column={col} onRemove={() => removeColumn(col.key)} />
+        <DisplayColumnChip
+          key={virtualColumnIdentity(col.source, col.key, selfEntity)}
+          column={col}
+          onRemove={() => removeColumn(col.key, col.source)}
+        />
       ))}
       <AddColumnButton
         fields={fields}
         loading={loading}
         ensureLoaded={ensureLoaded}
         onAdd={addColumn}
-        addedKeys={activeColumns.map((c) => c.key)}
+        addedKeys={activeColumns.map((c) => virtualColumnIdentity(c.source, c.key, selfEntity))}
+        selfEntity={selfEntity}
       />
       <FilterBuilderButton
         activeFilterSet={activeFilterSet}
@@ -136,6 +145,7 @@ export function VirtualColumnsBar({
         ensureLoaded={ensureLoaded}
         onScreenValues={onScreenValues}
         conditionCount={conditionCount}
+        selfEntity={selfEntity}
       />
     </div>
   );
@@ -162,56 +172,150 @@ function DisplayColumnChip({ column, onRemove }: { column: ActiveVirtualColumn; 
   );
 }
 
+/** Type-to-search box pinned above a field list (mirrors command-palette.tsx's
+ * query input) — filters the list client-side, case-insensitively, as the
+ * user types (ticket #30). */
+function FieldSearchInput({
+  value,
+  onChange,
+  autoFocus,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  autoFocus?: boolean;
+}) {
+  return (
+    <div className="mb-1.5 flex items-center gap-1.5 rounded border border-rule bg-card px-2 py-1">
+      <Search size={13} className="shrink-0 text-ink-soft" />
+      <input
+        autoFocus={autoFocus}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="Search fields…"
+        className="w-full min-w-0 bg-transparent text-xs text-ink outline-none placeholder:text-ink-mute"
+      />
+    </div>
+  );
+}
+
+/** One row in a field picker list: a leading source icon (Building2/Users, per
+ * ticket #30 req 7 — the whole source signal, no extra colored badges), the
+ * key, and the muted right-aligned type. */
+function FieldOption({ field, onSelect }: { field: EnrichmentField; onSelect: (field: EnrichmentField) => void }) {
+  const Icon = field.source === "company" ? Building2 : Users;
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={() => onSelect(field)}
+        className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-ink hover:bg-hover"
+      >
+        <Icon size={14} className="shrink-0 text-ink-soft" />
+        <span className="min-w-0 flex-1 truncate">{field.key}</span>
+        <span className="shrink-0 text-xs text-ink-soft/70">{field.type}</span>
+      </button>
+    </li>
+  );
+}
+
+/** Groups a field list into "Company fields" / "Person fields" sections
+ * (styled like command-palette.tsx's group labels), hiding a section — and
+ * its header — when it has no matches (ticket #30 req 7). */
+function EnrichmentFieldOptions({
+  fields,
+  onSelect,
+  emptyMessage = "No matching fields.",
+}: {
+  fields: EnrichmentField[];
+  onSelect: (field: EnrichmentField) => void;
+  emptyMessage?: string;
+}) {
+  const company = fields.filter((f) => f.source === "company");
+  const person = fields.filter((f) => f.source === "person");
+  if (company.length === 0 && person.length === 0) {
+    return <p className="px-2 py-1.5 text-xs text-ink-soft/70">{emptyMessage}</p>;
+  }
+  return (
+    <ul className="flex max-h-64 flex-col gap-0.5 overflow-y-auto">
+      {company.length > 0 && (
+        <>
+          <li className="px-2 pt-1.5 pb-1 text-xs font-medium text-ink-mute">Company fields</li>
+          {company.map((field) => (
+            <FieldOption key={`company:${field.key}`} field={field} onSelect={onSelect} />
+          ))}
+        </>
+      )}
+      {person.length > 0 && (
+        <>
+          <li className="px-2 pt-1.5 pb-1 text-xs font-medium text-ink-mute">Person fields</li>
+          {person.map((field) => (
+            <FieldOption key={`person:${field.key}`} field={field} onSelect={onSelect} />
+          ))}
+        </>
+      )}
+    </ul>
+  );
+}
+
 function AddColumnButton({
   fields,
   loading,
   ensureLoaded,
   onAdd,
   addedKeys,
+  selfEntity,
 }: {
   fields: EnrichmentField[] | null;
   loading: boolean;
   ensureLoaded: () => void;
-  onAdd: (key: string, type: VirtualColumnType) => void;
+  onAdd: (key: string, type: VirtualColumnType, source: "company" | "person") => void;
+  /** Composite (source, key) identities — see virtualColumnIdentity. */
   addedKeys: string[];
+  selfEntity: "company" | "person";
 }) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
 
   useEffect(() => {
     if (open) ensureLoaded();
   }, [open, ensureLoaded]);
 
-  const addableFields = (fields ?? []).filter(
-    (f) => f.type in ADDABLE_ENRICHMENT_TYPES && !addedKeys.includes(f.key)
-  );
+  // Clears the search on every fresh open (rather than in a reactive effect
+  // keyed on `open`, which would call setState synchronously from an effect
+  // body) so re-opening the popover always starts unfiltered.
+  const handleOpenChange = useCallback((next: boolean) => {
+    setOpen(next);
+    if (next) setQuery("");
+  }, []);
+
+  const addedSet = useMemo(() => new Set(addedKeys), [addedKeys]);
+  const term = query.trim().toLowerCase();
+  const addableFields = (fields ?? []).filter((f) => {
+    if (!(f.type in ADDABLE_ENRICHMENT_TYPES)) return false;
+    // As a display column, a person field on the Companies page is ambiguous
+    // (which person's value?) — only the People page (selfEntity="person")
+    // offers both sources as columns (ticket #30 req 6).
+    if (selfEntity === "company" && f.source !== "company") return false;
+    if (addedSet.has(virtualColumnIdentity(f.source, f.key, selfEntity))) return false;
+    if (term && !f.key.toLowerCase().includes(term)) return false;
+    return true;
+  });
 
   return (
-    <FilterPopoverButton open={open} onOpenChange={setOpen} label="Add column">
+    <FilterPopoverButton open={open} onOpenChange={handleOpenChange} label="Add column">
       <p className="mb-2 text-xs font-medium text-ink-soft">Add column from enrichment</p>
+      <FieldSearchInput value={query} onChange={setQuery} autoFocus />
       {loading && fields === null ? (
         <p className="text-xs text-ink-soft/70">Loading fields…</p>
-      ) : addableFields.length === 0 ? (
-        <p className="text-xs text-ink-soft/70">
-          No addable enrichment fields for the current filters.
-        </p>
       ) : (
-        <ul className="flex max-h-64 flex-col gap-0.5 overflow-y-auto">
-          {addableFields.map((field) => (
-            <li key={field.key}>
-              <button
-                type="button"
-                onClick={() => {
-                  onAdd(field.key, ADDABLE_ENRICHMENT_TYPES[field.type]);
-                  setOpen(false);
-                }}
-                className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm text-ink hover:bg-hover"
-              >
-                <span className="truncate">{field.key}</span>
-                <span className="shrink-0 text-xs text-ink-soft/70">{field.type}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
+        <EnrichmentFieldOptions
+          fields={addableFields}
+          emptyMessage="No addable enrichment fields for the current filters."
+          onSelect={(field) => {
+            onAdd(field.key, ADDABLE_ENRICHMENT_TYPES[field.type], field.source);
+            setOpen(false);
+          }}
+        />
       )}
     </FilterPopoverButton>
   );
@@ -293,6 +397,12 @@ interface DraftCondition {
   type: VirtualColumnType | "";
   operator: string;
   value?: VirtualColumnFilter["value"];
+  /** Absent means "the page's own entity" (selfEntity) — see
+   * VirtualColumnFilter.source (ticket #30). */
+  source?: "company" | "person";
+  /** Only meaningful for a one-to-many cross-table condition — see
+   * VirtualColumnFilter.quantifier. */
+  quantifier?: "any" | "all";
 }
 interface DraftGroup {
   id: string;
@@ -320,7 +430,15 @@ function setToDraft(set: VirtualFilterSet | undefined): DraftSet {
       id: draftId(),
       combinator: g.combinator,
       conditions: g.conditions.length
-        ? g.conditions.map((c) => ({ id: draftId(), key: c.key, type: c.type, operator: c.operator, value: c.value }))
+        ? g.conditions.map((c) => ({
+            id: draftId(),
+            key: c.key,
+            type: c.type,
+            operator: c.operator,
+            value: c.value,
+            source: c.source,
+            quantifier: c.quantifier,
+          }))
         : [emptyCondition()],
     })),
   };
@@ -334,7 +452,14 @@ function draftToSet(draft: DraftSet): VirtualFilterSet | undefined {
     combinator: draft.combinator,
     groups: draft.groups.map((g) => ({
       combinator: g.combinator,
-      conditions: g.conditions.map((c) => ({ key: c.key, type: c.type, operator: c.operator, value: c.value })),
+      conditions: g.conditions.map((c) => ({
+        key: c.key,
+        type: c.type,
+        operator: c.operator,
+        value: c.value,
+        source: c.source,
+        quantifier: c.quantifier,
+      })),
     })),
   });
 }
@@ -347,6 +472,7 @@ function FilterBuilderButton({
   ensureLoaded,
   onScreenValues,
   conditionCount,
+  selfEntity,
 }: {
   activeFilterSet: VirtualFilterSet | undefined;
   setFilterSet: (next: VirtualFilterSet | undefined) => void;
@@ -355,6 +481,7 @@ function FilterBuilderButton({
   ensureLoaded: () => void;
   onScreenValues: Record<string, string[]>;
   conditionCount: number;
+  selfEntity: "company" | "person";
 }) {
   const [open, setOpen] = useState(false);
 
@@ -432,6 +559,7 @@ function FilterBuilderButton({
               fields={fields}
               loading={loading}
               onScreenValues={onScreenValues}
+              selfEntity={selfEntity}
               onChangeCombinator={(c) => updateGroup(group.id, (g) => ({ ...g, combinator: c }))}
               onChangeCondition={(condId, next, opts) =>
                 updateGroup(
@@ -517,6 +645,7 @@ function GroupEditor({
   fields,
   loading,
   onScreenValues,
+  selfEntity,
   onChangeCombinator,
   onChangeCondition,
   onAddCondition,
@@ -527,6 +656,7 @@ function GroupEditor({
   fields: EnrichmentField[] | null;
   loading: boolean;
   onScreenValues: Record<string, string[]>;
+  selfEntity: "company" | "person";
   onChangeCombinator: (value: FilterCombinator) => void;
   onChangeCondition: (condId: string, next: DraftCondition, opts?: { debounce?: boolean }) => void;
   onAddCondition: () => void;
@@ -550,6 +680,7 @@ function GroupEditor({
               fields={fields}
               loading={loading}
               onScreenValues={onScreenValues}
+              selfEntity={selfEntity}
               onChange={(next, opts) => onChangeCondition(cond.id, next, opts)}
               onRemove={() => onRemoveCondition(cond.id)}
             />
@@ -574,6 +705,41 @@ function GroupEditor({
             Remove group
           </button>
         )}
+      </div>
+    </div>
+  );
+}
+
+/** ANY/ALL toggle for a one-to-many cross-table condition (ticket #30 req 8):
+ * on the Companies page, a condition sourced from People is many-valued per
+ * company, so the user must say whether "at least one" (any) or "every one"
+ * (all) of a company's people must match. Reuses CombinatorToggle's two-
+ * segment pill styling. Never shown for a same-source condition or on the
+ * People page's many-to-one company lookup (meaningless there). */
+function QuantifierToggle({
+  value,
+  onChange,
+}: {
+  value: "any" | "all";
+  onChange: (value: "any" | "all") => void;
+}) {
+  return (
+    <div className="inline-flex items-center gap-1">
+      <span className="text-[11px] text-ink-soft/70">of people</span>
+      <div className="inline-flex overflow-hidden rounded border border-rule text-[11px] font-medium">
+        {(["any", "all"] as const).map((q) => (
+          <button
+            key={q}
+            type="button"
+            onClick={() => onChange(q)}
+            className={cn(
+              "px-2 py-0.5 uppercase",
+              value === q ? "bg-stamp text-white" : "bg-card text-ink-soft hover:text-ink"
+            )}
+          >
+            {q}
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -625,11 +791,90 @@ function coerceValue(
   return undefined;
 }
 
+/** The filter builder's column picker: a searchable dropdown (replacing a
+ * plain native `<select>`) grouped into Company/Person sections — the filter
+ * builder always offers BOTH sources regardless of page (ticket #30 req 6),
+ * unlike AddColumnButton's page-scoped picker. Selection carries the whole
+ * `EnrichmentField` (not just its key) so the caller can resolve the correct
+ * (source, key) identity even when the same key exists on both sources. */
+function ColumnSelectDropdown({
+  fields,
+  loading,
+  condition,
+  conditionSource,
+  onSelect,
+}: {
+  fields: EnrichmentField[] | null;
+  loading: boolean;
+  condition: DraftCondition;
+  conditionSource: "company" | "person";
+  onSelect: (field: EnrichmentField) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+
+  // Clears the search on every fresh open (see AddColumnButton's identical
+  // handleOpenChange) rather than in a reactive effect keyed on `open`.
+  const handleOpenChange = useCallback((next: boolean) => {
+    setOpen(next);
+    if (next) setQuery("");
+  }, []);
+
+  const addableFields = (fields ?? []).filter((f) => f.type in ADDABLE_ENRICHMENT_TYPES);
+  const term = query.trim().toLowerCase();
+  const filteredFields = term ? addableFields.filter((f) => f.key.toLowerCase().includes(term)) : addableFields;
+  // Keep a stale column selectable/visible even if discovery no longer lists
+  // it (matches the pre-#30 native-select behavior).
+  const isStale = !!condition.key && !addableFields.some((f) => f.key === condition.key && f.source === conditionSource);
+
+  const CurrentIcon = condition.key ? (conditionSource === "company" ? Building2 : Users) : null;
+  const label = condition.key || (loading && fields === null ? "loading…" : "select field");
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => handleOpenChange(!open)}
+        className="flex max-w-[9rem] items-center gap-1 rounded border border-rule bg-card px-1.5 py-1 text-ink outline-none hover:border-ink-soft focus:border-stamp"
+      >
+        {CurrentIcon && <CurrentIcon size={12} className="shrink-0 text-ink-soft" />}
+        <span className={cn("min-w-0 flex-1 truncate text-left", !condition.key && "text-ink-mute")}>{label}</span>
+        <ChevronDown size={12} className="shrink-0 text-ink-soft" />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-full z-30 mt-1 w-64 rounded-lg border border-rule bg-card p-2 shadow-lg">
+            <FieldSearchInput value={query} onChange={setQuery} autoFocus />
+            {isStale && !term && (
+              <p className="px-2 pb-1 text-[11px] text-ink-soft/70">
+                Current: {condition.key} (no longer in discovery)
+              </p>
+            )}
+            {loading && fields === null ? (
+              <p className="px-2 py-1.5 text-xs text-ink-soft/70">Loading fields…</p>
+            ) : (
+              <EnrichmentFieldOptions
+                fields={filteredFields}
+                onSelect={(field) => {
+                  onSelect(field);
+                  setOpen(false);
+                }}
+              />
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ConditionEditor({
   condition,
   fields,
   loading,
   onScreenValues,
+  selfEntity,
   onChange,
   onRemove,
 }: {
@@ -637,6 +882,7 @@ function ConditionEditor({
   fields: EnrichmentField[] | null;
   loading: boolean;
   onScreenValues: Record<string, string[]>;
+  selfEntity: "company" | "person";
   onChange: (next: DraftCondition, opts?: { debounce?: boolean }) => void;
   onRemove: () => void;
 }) {
@@ -651,17 +897,20 @@ function ConditionEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [valueSig]);
 
-  const addableFields = (fields ?? []).filter((f) => f.type in ADDABLE_ENRICHMENT_TYPES);
   const columnType = condition.type || null;
   const operators = columnType ? operatorsForType(columnType) : [];
   const operatorMeta = operators.find((o) => o.id === condition.operator);
   const inputType = columnType ? INPUT_TYPE[columnType] : "text";
 
+  // Absent `condition.source` means "the page's own entity" — resolve to
+  // selfEntity so lookups/matching use the real (source, key) identity
+  // (ticket #30).
+  const conditionSource = condition.source ?? selfEntity;
   const authoritativeValues =
     columnType === "text" && fields !== null
-      ? (fields.find((f) => f.key === condition.key)?.sampleValues ?? [])
+      ? (fields.find((f) => f.key === condition.key && f.source === conditionSource)?.sampleValues ?? [])
       : null;
-  const screen = onScreenValues[condition.key] ?? [];
+  const screen = onScreenValues[virtualColumnIdentity(condition.source, condition.key, selfEntity)] ?? [];
 
   function isValueListMode(op: string): boolean {
     if (columnType !== "text" || (op !== "is" && op !== "is_not")) return false;
@@ -673,17 +922,27 @@ function ConditionEditor({
   }
 
   function currentSelected(): string[] {
-    if (Array.isArray(condition.value)) return condition.value as string[];
-    if (typeof condition.value === "string") return [condition.value];
+    // condition.value is typed string | string[] (for is/is_not/contains
+    // list-mode operators) but a hand-edited/legacy URL or a stale committed
+    // value could carry a raw number/boolean — coerce every element so it
+    // lines up with pickerOptions' String(v)-coerced candidates (line ~1009);
+    // without this, e.g. a numeric single value would compare `85 !== "85"`
+    // and never show as checked/selected.
+    if (Array.isArray(condition.value)) return condition.value.map((v) => String(v));
+    if (condition.value != null) return [String(condition.value)];
     return [];
   }
 
-  function changeColumn(key: string) {
-    const field = addableFields.find((f) => f.key === key);
-    const type = field ? ADDABLE_ENRICHMENT_TYPES[field.type] : "";
-    // A new column resets the operator/value — its operators (and value arity)
-    // differ by type.
-    onChange({ ...condition, key, type, operator: "", value: undefined });
+  function changeColumn(field: EnrichmentField) {
+    const type = ADDABLE_ENRICHMENT_TYPES[field.type];
+    // Store `source` only when it differs from the page's own entity, so a
+    // same-source pick keeps emitting the pre-#30 shape (source omitted) —
+    // undefined resolves back to selfEntity everywhere else in this file.
+    const source = field.source === selfEntity ? undefined : field.source;
+    // A new column resets the operator/value/quantifier — its operators (and
+    // value arity) differ by type, and a same-source pick makes any prior
+    // quantifier meaningless.
+    onChange({ ...condition, key: field.key, type, source, operator: "", value: undefined, quantifier: undefined });
   }
 
   function emitOperator(op: string, value: VirtualColumnFilter["value"] | undefined) {
@@ -751,31 +1010,22 @@ function ConditionEditor({
   const useChipInput = isChipInputMode(condition.operator);
   const selectedValues = currentSelected();
   const pickerOptions = (() => {
-    const set = new Set<string>(authoritativeValues ?? screen);
-    for (const v of selectedValues) set.add(v);
+    // Values are typed string[] but numeric columns surface real numbers at
+    // runtime — coerce so String methods (localeCompare) don't blow up.
+    const set = new Set<string>((authoritativeValues ?? screen).map((v) => String(v)));
+    for (const v of selectedValues) set.add(String(v));
     return [...set].sort((a, b) => a.localeCompare(b));
   })();
 
   return (
     <div className="flex flex-1 flex-wrap items-center gap-1.5 rounded-md border border-rule bg-card px-2 py-1.5 text-xs">
-      <select
-        value={condition.key}
-        onChange={(e) => changeColumn(e.target.value)}
-        className="max-w-[9rem] rounded border border-rule bg-card px-1.5 py-1 text-ink outline-none focus:border-stamp"
-      >
-        <option value="">
-          {loading && fields === null ? "loading…" : "select field"}
-        </option>
-        {/* Keep a stale column selectable even if discovery no longer lists it. */}
-        {condition.key && !addableFields.some((f) => f.key === condition.key) && (
-          <option value={condition.key}>{condition.key}</option>
-        )}
-        {addableFields.map((f) => (
-          <option key={f.key} value={f.key}>
-            {f.key}
-          </option>
-        ))}
-      </select>
+      <ColumnSelectDropdown
+        fields={fields}
+        loading={loading}
+        condition={condition}
+        conditionSource={conditionSource}
+        onSelect={changeColumn}
+      />
       {columnType && (
         <select
           value={condition.operator}
@@ -832,6 +1082,12 @@ function ConditionEditor({
           />
         </>
       ) : null}
+      {selfEntity === "company" && conditionSource === "person" && (
+        <QuantifierToggle
+          value={condition.quantifier ?? "any"}
+          onChange={(q) => onChange({ ...condition, quantifier: q === "any" ? undefined : q })}
+        />
+      )}
       <button
         type="button"
         aria-label="Remove condition"

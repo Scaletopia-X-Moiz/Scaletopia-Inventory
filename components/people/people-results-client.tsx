@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { AlertDialog } from "radix-ui";
 import type { PersonListResult } from "@/lib/data/people";
+import { virtualColumnIdentity } from "@/lib/data/virtual-columns";
 import { PeopleTable } from "@/components/people/people-table";
 import { VirtualColumnsBar } from "@/components/companies/virtual-columns-bar";
 import { useVirtualColumnsState } from "@/components/companies/use-virtual-columns";
@@ -107,15 +108,16 @@ export function PeopleResultsClient() {
    * fuller, authoritative set (ticket #38, mirrored for People). */
   const onScreenValues = useMemo(() => {
     const acc: Record<string, Set<string>> = {};
-    for (const col of virtualColumns) acc[col.key] = new Set<string>();
+    for (const col of virtualColumns) acc[virtualColumnIdentity(col.source, col.key, "person")] = new Set<string>();
     for (const row of result?.rows ?? []) {
       for (const col of virtualColumns) {
-        const v = row.virtualColumnValues?.[col.key];
+        const identity = virtualColumnIdentity(col.source, col.key, "person");
+        const v = row.virtualColumnValues?.[identity];
         if (typeof v === "string") {
           const t = v.trim();
-          if (t) acc[col.key].add(t);
+          if (t) acc[identity].add(t);
         } else if (typeof v === "number" || typeof v === "boolean") {
-          acc[col.key].add(String(v));
+          acc[identity].add(String(v));
         }
       }
     }
@@ -193,7 +195,8 @@ export function PeopleResultsClient() {
         removeColumn={removeVirtualColumn}
         setFilterSet={setVirtualFilterSet}
         onScreenValues={onScreenValues}
-        endpoint="/api/people/enrichment-fields"
+        endpoint="/api/enrichment-fields"
+        selfEntity="person"
       />
 
       <PeopleTable rows={result.rows} virtualColumns={virtualColumns} />

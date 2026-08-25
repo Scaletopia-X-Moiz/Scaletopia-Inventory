@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { AlertDialog } from "radix-ui";
 import type { CompanyListResult } from "@/lib/data/companies";
+import { virtualColumnIdentity } from "@/lib/data/virtual-columns";
 import { CompaniesTable } from "@/components/companies/companies-table";
 import { VirtualColumnsBar } from "@/components/companies/virtual-columns-bar";
 import { useVirtualColumnsState } from "@/components/companies/use-virtual-columns";
@@ -106,15 +107,16 @@ export function CompaniesResultsClient() {
    * fuller, authoritative set (ticket #38). */
   const onScreenValues = useMemo(() => {
     const acc: Record<string, Set<string>> = {};
-    for (const col of virtualColumns) acc[col.key] = new Set<string>();
+    for (const col of virtualColumns) acc[virtualColumnIdentity(col.source, col.key, "company")] = new Set<string>();
     for (const row of result?.rows ?? []) {
       for (const col of virtualColumns) {
-        const v = row.virtualColumnValues?.[col.key];
+        const identity = virtualColumnIdentity(col.source, col.key, "company");
+        const v = row.virtualColumnValues?.[identity];
         if (typeof v === "string") {
           const t = v.trim();
-          if (t) acc[col.key].add(t);
+          if (t) acc[identity].add(t);
         } else if (typeof v === "number" || typeof v === "boolean") {
-          acc[col.key].add(String(v));
+          acc[identity].add(String(v));
         }
       }
     }
@@ -178,6 +180,8 @@ export function CompaniesResultsClient() {
         removeColumn={removeVirtualColumn}
         setFilterSet={setVirtualFilterSet}
         onScreenValues={onScreenValues}
+        endpoint="/api/enrichment-fields"
+        selfEntity="company"
       />
 
       <CompaniesTable rows={result.rows} virtualColumns={virtualColumns} />

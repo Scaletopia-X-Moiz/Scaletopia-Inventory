@@ -8,6 +8,7 @@ import {
   removeColumnFromFilterSet,
   serializeVirtualColumnsParam,
   serializeVirtualFiltersParam,
+  virtualColumnIdentity,
   type ActiveVirtualColumn,
   type VirtualColumnType,
   type VirtualFilterSet,
@@ -30,6 +31,10 @@ export function useVirtualColumnsState(table: VirtualColumnsCacheTable = "compan
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  // The entity this page's own custom_data belongs to — derived from `table`
+  // so cross-table (source, key) identity (ticket #30) can be resolved
+  // without a separate prop threaded through every caller.
+  const selfEntity: "company" | "person" = table === "people" ? "person" : "company";
 
   const activeColumns = parseVirtualColumnsParam(searchParams);
   const activeFilterSet = parseVirtualFiltersParam(searchParams);
@@ -66,21 +71,23 @@ export function useVirtualColumnsState(table: VirtualColumnsCacheTable = "compan
   }, [searchParams, table]);
 
   const addColumn = useCallback(
-    (key: string, type: VirtualColumnType) => {
-      if (activeColumns.some((c) => c.key === key)) return;
-      persist([...activeColumns, { key, type }], activeFilterSet);
+    (key: string, type: VirtualColumnType, source?: "company" | "person") => {
+      const identity = virtualColumnIdentity(source, key, selfEntity);
+      if (activeColumns.some((c) => virtualColumnIdentity(c.source, c.key, selfEntity) === identity)) return;
+      persist([...activeColumns, { key, type, ...(source ? { source } : {}) }], activeFilterSet);
     },
-    [activeColumns, activeFilterSet, persist]
+    [activeColumns, activeFilterSet, persist, selfEntity]
   );
 
   const removeColumn = useCallback(
-    (key: string) => {
+    (key: string, source?: "company" | "person") => {
+      const identity = virtualColumnIdentity(source, key, selfEntity);
       persist(
-        activeColumns.filter((c) => c.key !== key),
-        removeColumnFromFilterSet(activeFilterSet, key)
+        activeColumns.filter((c) => virtualColumnIdentity(c.source, c.key, selfEntity) !== identity),
+        removeColumnFromFilterSet(activeFilterSet, key, source)
       );
     },
-    [activeColumns, activeFilterSet, persist]
+    [activeColumns, activeFilterSet, persist, selfEntity]
   );
 
   /** Replaces the whole grouped filter set at once — the group/condition

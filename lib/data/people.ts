@@ -15,7 +15,7 @@ import { filteredCompaniesHaveOwnBrandName, type CompanyListFilters } from "@/li
 import { getPushJobPersonIds, type PushJobOutcome } from "@/lib/data/push-jobs";
 import type { IncludeExclude } from "@/lib/data/include-exclude";
 import type { ActiveVirtualColumn, VirtualFilterSet } from "@/lib/data/virtual-columns";
-import { isFilterSetActive } from "@/lib/data/virtual-columns";
+import { isFilterSetActive, virtualColumnIdentity } from "@/lib/data/virtual-columns";
 import {
   pushStatusRpcPayload,
   type PushPlatform,
@@ -440,31 +440,86 @@ const ENRICHMENT_VALUES_ID_CHUNK_SIZE = 100;
 /** custom_data[key] for each active virtual column, scoped to just the ids on
  * the rendered page — mirrors getCompanyEnrichmentValues in
  * lib/data/companies.ts: avoids pulling the whole custom_data blob (and the
- * whole table) just to populate a handful of display columns for one page. */
+ * whole table) just to populate a handful of display columns for one page.
+ *
+ * Ticket #30 (symmetric cross-table enrichment display): a column's `source`
+ * decides where its value is read from. `source` absent or `"person"` reads
+ * `people.custom_data[key]` as before. `source === "company"` resolves via
+ * the linked company (`people.company_id -> companies.id`) instead — a
+ * second scoped-by-id fetch, never the whole companies table. Every value is
+ * keyed by the column's composite identity (virtualColumnIdentity), not the
+ * bare key, since a key can exist on both tables. */
 async function getPersonEnrichmentValues(
   ids: string[],
-  keys: string[]
+  columns: ActiveVirtualColumn[]
 ): Promise<Map<string, Record<string, unknown>>> {
   const result = new Map<string, Record<string, unknown>>();
-  if (ids.length === 0 || keys.length === 0) return result;
+  if (ids.length === 0 || columns.length === 0) return result;
 
-  const chunks = chunkIds(ids, ENRICHMENT_VALUES_ID_CHUNK_SIZE);
-  const chunkResults = await Promise.all(
-    chunks.map((chunk) =>
-      fetchAllRows<{ id: string; custom_data: Record<string, unknown> | null }>(
+  const personColumns = columns.filter((c) => (c.source ?? "person") === "person");
+  const companyColumns = columns.filter((c) => c.source === "company");
+
+  const idChunks = chunkIds(ids, ENRICHMENT_VALUES_ID_CHUNK_SIZE);
+
+  // Person-source columns: read people.custom_data directly, scoped to the
+  // page's ids (unchanged behavior).
+  const personCustomData = new Map<string, Record<string, unknown> | null>();
+  // Every person on the page, so company-source columns know each row's
+  // company_id even when no person-source column is active.
+  const personCompanyIds = new Map<string, string | null>();
+
+  const peopleChunkResults = await Promise.all(
+    idChunks.map((chunk) =>
+      fetchAllRows<{ id: string; company_id: string | null; custom_data: Record<string, unknown> | null }>(
         "people",
-        "id,custom_data",
+        "id,company_id,custom_data",
         (query) => query.in("id", chunk)
       )
     )
   );
-
-  for (const rows of chunkResults) {
+  for (const rows of peopleChunkResults) {
     for (const row of rows) {
-      const values: Record<string, unknown> = {};
-      for (const key of keys) values[key] = row.custom_data?.[key] ?? null;
-      result.set(row.id, values);
+      personCustomData.set(row.id, row.custom_data);
+      personCompanyIds.set(row.id, row.company_id);
     }
+  }
+
+  // Company-source columns: resolve the linked companies' custom_data,
+  // scoped to just the distinct company ids the page's people reference.
+  const companyCustomDataById = new Map<string, Record<string, unknown> | null>();
+  if (companyColumns.length > 0) {
+    const companyIds = Array.from(
+      new Set(Array.from(personCompanyIds.values()).filter((id): id is string => id != null))
+    );
+    if (companyIds.length > 0) {
+      const companyChunks = chunkIds(companyIds, ENRICHMENT_VALUES_ID_CHUNK_SIZE);
+      const companyChunkResults = await Promise.all(
+        companyChunks.map((chunk) =>
+          fetchAllRows<{ id: string; custom_data: Record<string, unknown> | null }>(
+            "companies",
+            "id,custom_data",
+            (query) => query.in("id", chunk)
+          )
+        )
+      );
+      for (const rows of companyChunkResults) {
+        for (const row of rows) companyCustomDataById.set(row.id, row.custom_data);
+      }
+    }
+  }
+
+  for (const id of ids) {
+    const values: Record<string, unknown> = {};
+    const ownCustomData = personCustomData.get(id) ?? null;
+    for (const col of personColumns) {
+      values[virtualColumnIdentity(col.source, col.key, "person")] = ownCustomData?.[col.key] ?? null;
+    }
+    const companyId = personCompanyIds.get(id) ?? null;
+    const linkedCustomData = companyId ? (companyCustomDataById.get(companyId) ?? null) : null;
+    for (const col of companyColumns) {
+      values[virtualColumnIdentity(col.source, col.key, "person")] = linkedCustomData?.[col.key] ?? null;
+    }
+    result.set(id, values);
   }
   return result;
 }
@@ -509,8 +564,7 @@ export async function getPeople(
   }
 
   if (filters.virtualColumns?.length) {
-    const keys = filters.virtualColumns.map((c) => c.key);
-    const values = await getPersonEnrichmentValues(pageRows.map((r) => r.id), keys);
+    const values = await getPersonEnrichmentValues(pageRows.map((r) => r.id), filters.virtualColumns);
     for (const row of pageRows) {
       row.virtualColumnValues = values.get(row.id) ?? {};
     }

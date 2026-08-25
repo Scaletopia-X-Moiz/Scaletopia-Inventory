@@ -113,9 +113,12 @@ WITH params AS (
 -- MATERIALIZED forces one scan of `people`, reused by all six facet
 -- subqueries below instead of six independent scans.
 base AS MATERIALIZED (
+  -- Ticket #30: LEFT JOIN so a person with no linked company (company_id
+  -- NULL) still evaluates person-sourced conditions correctly, mirroring
+  -- people_matching_virtual_filters (virtual-columns.sql).
   SELECT p.niche_tokens, p.industry_id, p.country_id, p.source_tokens,
          p.employee_count, p.email_status, p.phone_type, p.email, p.phone, p.job_title
-  FROM people p, params pr
+  FROM people p LEFT JOIN companies co ON co.id = p.company_id, params pr
   WHERE
     (pr.search IS NULL OR p.full_name ILIKE '%' || pr.search || '%' OR p.email ILIKE '%' || pr.search || '%')
     AND (pr.job_title IS NULL OR p.job_title ILIKE '%' || pr.job_title || '%')
@@ -141,6 +144,12 @@ base AS MATERIALIZED (
     -- Grouped virtual-filter fold (ticket #117) — keep in lockstep with all
     -- six inlined copies (virtual-columns.sql, canonical-columns.sql,
     -- enrichment-fields.sql).
+    --
+    -- Ticket #30: per-condition dispatch — a company-sourced condition
+    -- ('source' = 'company') reads the LEFT-JOINed co.custom_data; absent
+    -- source (or 'person') is byte-identical to pre-#30 behavior. People->
+    -- company is one-to-one, so no quantifier is needed here (unlike the
+    -- company->people fan-out in canonical-columns.sql).
     AND (
       COALESCE(jsonb_array_length(pr.virtual_filters->'groups'), 0) = 0
       OR CASE WHEN COALESCE(pr.virtual_filters->>'combinator', 'and') = 'or' THEN
@@ -148,10 +157,16 @@ base AS MATERIALIZED (
           SELECT 1 FROM jsonb_array_elements(pr.virtual_filters->'groups') AS grp
           WHERE CASE WHEN COALESCE(grp->>'combinator', 'and') = 'or' THEN
               EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
-                      WHERE virtual_filter_predicate_matches(p.custom_data, cond))
+                      WHERE (CASE
+                        WHEN COALESCE(cond->>'source','person') = 'company' THEN virtual_filter_predicate_matches(co.custom_data, cond)
+                        ELSE virtual_filter_predicate_matches(p.custom_data, cond)
+                        END))
             ELSE
               NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
-                          WHERE NOT virtual_filter_predicate_matches(p.custom_data, cond))
+                          WHERE NOT (CASE
+                            WHEN COALESCE(cond->>'source','person') = 'company' THEN virtual_filter_predicate_matches(co.custom_data, cond)
+                            ELSE virtual_filter_predicate_matches(p.custom_data, cond)
+                            END))
             END
         )
       ELSE
@@ -159,10 +174,16 @@ base AS MATERIALIZED (
           SELECT 1 FROM jsonb_array_elements(pr.virtual_filters->'groups') AS grp
           WHERE NOT (CASE WHEN COALESCE(grp->>'combinator', 'and') = 'or' THEN
               EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
-                      WHERE virtual_filter_predicate_matches(p.custom_data, cond))
+                      WHERE (CASE
+                        WHEN COALESCE(cond->>'source','person') = 'company' THEN virtual_filter_predicate_matches(co.custom_data, cond)
+                        ELSE virtual_filter_predicate_matches(p.custom_data, cond)
+                        END))
             ELSE
               NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp->'conditions', '[]'::jsonb)) AS cond
-                          WHERE NOT virtual_filter_predicate_matches(p.custom_data, cond))
+                          WHERE NOT (CASE
+                            WHEN COALESCE(cond->>'source','person') = 'company' THEN virtual_filter_predicate_matches(co.custom_data, cond)
+                            ELSE virtual_filter_predicate_matches(p.custom_data, cond)
+                            END))
             END)
         )
       END
