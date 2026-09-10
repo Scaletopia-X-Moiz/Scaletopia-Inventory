@@ -49,9 +49,15 @@ issue titles, issue bodies, every comment, and the closing note in the app.
    the issue, and say the same thing to the user. Use this exact skeleton:
 
    ## Plan
+
    **Asking for:** <what the ticket is actually asking for>
+
    **Changing:** <which files you will change>
+
    **Verifying:** <how you will check it works>
+
+   Keep the blank lines between the fields. GitHub renders a single newline as
+   a soft break, so without them the three fields cram into one dense block.
 
    If the ticket is vague, ask the user before writing this — do not guess.
 
@@ -94,8 +100,11 @@ Only when the user says the work is done.
    The summary uses this exact skeleton:
 
    ## Closing summary
+
    **What changed:** <what changed>
+
    **Why this way:** <why it was done that way>
+
    **How it was tested:** <how it was tested>
 
 3. Mark the ticket done in the app:

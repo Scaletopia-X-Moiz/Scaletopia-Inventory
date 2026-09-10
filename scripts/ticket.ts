@@ -112,7 +112,9 @@ const NOTE_TYPES: Record<string, string> = {
  * cannot be skipped or drifted. */
 function formatNote(type: string, summary: string, what: string, why: string): string {
   const label = NOTE_TYPES[type];
-  return `### ${label}: ${summary}\n**What:** ${what}\n**Why it matters:** ${why}`;
+  // Blank lines between the parts are load-bearing: GitHub renders a single
+  // newline as a soft break, which crams the fields into one dense block.
+  return `### ${label}: ${summary}\n\n**What:** ${what}\n\n**Why it matters:** ${why}`;
 }
 
 /** Shells out to the GitHub CLI, translating the usual setup failures. */
