@@ -12,6 +12,12 @@ so the notes survive between sessions and between the user's two machines.
 All database reads and writes go through `scripts/ticket.ts`. Never query the
 `tickets` table directly.
 
+## Writing style
+
+Everything you write to GitHub or to a ticket note is read by a human. Never
+use em dashes. Use a full stop, a comma, or brackets instead. This applies to
+issue titles, issue bodies, every comment, and the closing note in the app.
+
 ## Starting or resuming
 
 1. Read the ticket:
