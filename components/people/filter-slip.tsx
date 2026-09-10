@@ -35,6 +35,8 @@ export function PeopleFilterSlip({
   const [, startTransition] = useTransition();
   const [search, setSearch] = useState(searchParams.get("q") ?? "");
   const [jobTitle, setJobTitle] = useState(searchParams.get("title") ?? "");
+  const [jobTitleExclude, setJobTitleExclude] = useState(searchParams.get("title_exclude") ?? "");
+  const titleOp = searchParams.get("titleOp") === "equals" ? "equals" : "contains";
   const [empMin, setEmpMin] = useState(searchParams.get("empmin") ?? "");
   const [empMax, setEmpMax] = useState(searchParams.get("empmax") ?? "");
 
@@ -144,10 +146,18 @@ export function PeopleFilterSlip({
     });
   }
 
+  function setTitleOp(op: "contains" | "equals") {
+    navigate((params) => {
+      if (op === "equals") params.set("titleOp", "equals");
+      else params.delete("titleOp");
+    });
+  }
+
   function clearAll() {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     setSearch("");
     setJobTitle("");
+    setJobTitleExclude("");
     setEmpMin("");
     setEmpMax("");
     startTransition(() => {
@@ -158,6 +168,7 @@ export function PeopleFilterSlip({
   const hasActiveFilters =
     Boolean(searchParams.get("q")) ||
     Boolean(searchParams.get("title")) ||
+    Boolean(searchParams.get("title_exclude")) ||
     Boolean(searchParams.get("email")) ||
     Boolean(searchParams.get("phone")) ||
     Boolean(searchParams.get("empmin")) ||
@@ -193,7 +204,16 @@ export function PeopleFilterSlip({
         />
       </div>
 
-      <div className="min-w-[200px] flex-1">
+      <div className="flex min-w-[240px] flex-1 items-center gap-1.5">
+        <select
+          value={titleOp}
+          onChange={(e) => setTitleOp(e.target.value === "equals" ? "equals" : "contains")}
+          aria-label="Job title match"
+          className="rounded-md border border-rule bg-card py-1.5 pl-2 pr-1 text-sm text-ink outline-none focus:border-stamp"
+        >
+          <option value="contains">contains</option>
+          <option value="equals">equals</option>
+        </select>
         <input
           type="text"
           value={jobTitle}
@@ -202,6 +222,19 @@ export function PeopleFilterSlip({
             commitTextDebounced("title", e.target.value);
           }}
           placeholder="Job title — founder, CEO, owner"
+          className="w-full rounded-md border border-rule bg-card py-1.5 px-3 text-sm text-ink outline-none placeholder:text-ink-soft/70 focus:border-stamp"
+        />
+      </div>
+
+      <div className="min-w-[160px] flex-1">
+        <input
+          type="text"
+          value={jobTitleExclude}
+          onChange={(e) => {
+            setJobTitleExclude(e.target.value);
+            commitTextDebounced("title_exclude", e.target.value);
+          }}
+          placeholder="Exclude titles — intern, assistant"
           className="w-full rounded-md border border-rule bg-card py-1.5 px-3 text-sm text-ink outline-none placeholder:text-ink-soft/70 focus:border-stamp"
         />
       </div>

@@ -37,6 +37,13 @@ export interface PersonListFilters {
   emailStatus?: IncludeExclude;
   phoneType?: IncludeExclude;
   jobTitle?: string;
+  /** How the `jobTitle` include terms match: "contains" (substring, default)
+   * or "equals" (whole value, case-insensitive). */
+  jobTitleOp?: "contains" | "equals";
+  /** Comma-separated titles to exclude — a row is dropped if its title
+   * contains any of them (ticket item 2). Always substring, mirroring the
+   * ticket's "does not contain". */
+  jobTitleExclude?: string;
   employeeMin?: number;
   employeeMax?: number;
   /** Restrict to exactly the people a push run touched, via the per-record
@@ -203,16 +210,25 @@ function applyPresenceFilter(query: any, column: string, filter: SingleSelectFil
   return query;
 }
 
-/** jobTitle matches any of several comma-separated terms, case-insensitively —
- * pushed to Postgres as an OR of ILIKE clauses. Not one of the six facet
- * dimensions (companies has no equivalent and it's cheap as-is), so it's just
- * folded into the base WHERE like search/employee size. */
-function jobTitleOrClause(raw: string | undefined): string {
-  const terms = (raw ?? "")
+/** Splits a comma-separated title input into trimmed, non-empty, ILIKE-safe
+ * terms (strips `%`/`,` that would otherwise break PostgREST's or-string). */
+function jobTitleTerms(raw: string | undefined): string[] {
+  return (raw ?? "")
     .split(",")
-    .map((t) => t.trim())
+    .map((t) => t.trim().replace(/[%,]/g, ""))
     .filter(Boolean);
-  return terms.map((t) => `job_title.ilike.%${t.replace(/[%,]/g, "")}%`).join(",");
+}
+
+/** jobTitle matches any of several comma-separated terms, case-insensitively —
+ * pushed to Postgres as an OR of ILIKE clauses. "contains" wraps each term in
+ * %…% (substring); "equals" uses the bare term, so ILIKE acts as a
+ * case-insensitive whole-value match. Not one of the six facet dimensions
+ * (companies has no equivalent and it's cheap as-is), so it's just folded into
+ * the base WHERE like search/employee size. */
+function jobTitleOrClause(raw: string | undefined, op: "contains" | "equals" = "contains"): string {
+  return jobTitleTerms(raw)
+    .map((t) => (op === "equals" ? `job_title.ilike.${t}` : `job_title.ilike.%${t}%`))
+    .join(",");
 }
 
 /** Pushes every /people filter into Postgres: search (ILIKE), jobTitle (OR of
@@ -234,8 +250,16 @@ function applyPersonFilters(query: any, filters: PersonListFilters): any {
     q = q.or(`full_name.ilike.%${term}%,email.ilike.%${term}%`);
   }
 
-  const jobTitleClause = jobTitleOrClause(filters.jobTitle);
+  const jobTitleClause = jobTitleOrClause(filters.jobTitle, filters.jobTitleOp);
   if (jobTitleClause) q = q.or(jobTitleClause);
+
+  // Exclude (T46 item 2, #147): drop a row if its title contains any excluded
+  // term. Each `.not(...ilike...)` ANDs, so all excludes must miss. Matches the
+  // app-wide exclude convention (applyScalarIncludeExclude/notIn), which also
+  // drops NULL-valued rows.
+  for (const term of jobTitleTerms(filters.jobTitleExclude)) {
+    q = q.not("job_title", "ilike", `%${term}%`);
+  }
 
   if (filters.employeeMin != null || filters.employeeMax != null) {
     if (filters.employeeMin != null) q = q.gte("employee_count", filters.employeeMin);
@@ -1127,6 +1151,11 @@ export function toFilterOptionsRpcPayload(filters: PersonListFilters): Record<st
   const hasExplicitRange = filters.employeeMin != null || filters.employeeMax != null;
   return {
     search: filters.search ?? null,
+    // The person_filter_options RPC only understands jobTitle as a substring
+    // include; jobTitleOp ("equals") and jobTitleExclude are NOT passed, so
+    // facet counts scope by the include-contains terms only. The main list
+    // (applyPersonFilters) honours all three. Reconcile in Phase 2 if the count
+    // drift matters (needs a SQL change to person_filter_options).
     jobTitle: filters.jobTitle ?? null,
     employeeMin: filters.employeeMin ?? null,
     employeeMax: filters.employeeMax ?? null,

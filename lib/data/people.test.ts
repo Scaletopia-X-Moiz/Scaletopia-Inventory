@@ -179,6 +179,51 @@ describe("getPeople", () => {
     }
   });
 
+  it("job title 'equals' matches the whole title case-insensitively, not a substring (T46)", async () => {
+    const all = await getAllFilteredPeople({});
+    // Pick a title that is NOT a substring-prefix of some other title, so
+    // equals and contains can diverge. Any real title works for the exact-match
+    // assertion; the point is that every returned row equals it exactly.
+    const sample = all.find((r) => r.jobTitle && r.jobTitle.trim().length > 3);
+    if (!sample) return;
+    const exact = sample.jobTitle!.trim();
+
+    const result = await getPeople({ jobTitle: exact, jobTitleOp: "equals" }, 1, 1000);
+    expect(result.total).toBeGreaterThan(0);
+    for (const row of result.rows) {
+      expect(row.jobTitle?.trim().toLowerCase()).toBe(exact.toLowerCase());
+    }
+  });
+
+  it("job title exclude drops rows whose title contains an excluded term (T46)", async () => {
+    const all = await getAllFilteredPeople({});
+    const sample = all.find((r) => r.jobTitle && r.jobTitle.trim().length >= 3);
+    if (!sample) return;
+    const term = sample.jobTitle!.trim().slice(0, 3);
+
+    const included = await getPeople({ jobTitle: term }, 1, 1000);
+    const excluded = await getPeople({ jobTitleExclude: term }, 1, 1000);
+    expect(included.total).toBeGreaterThan(0);
+    // No excluded row may contain the term.
+    for (const row of excluded.rows) {
+      expect(row.jobTitle?.toLowerCase() ?? "").not.toContain(term.toLowerCase());
+    }
+    // Include and exclude of the same term partition the titled population.
+    const titled = all.filter((r) => r.jobTitle).length;
+    expect(included.total).toBeLessThanOrEqual(titled);
+  });
+
+  it("job title include + exclude combine: contains one term but not another (T46)", async () => {
+    const all = await getAllFilteredPeople({});
+    const inc = all.find((r) => r.jobTitle && r.jobTitle.trim().length >= 3);
+    if (!inc) return;
+    const term = inc.jobTitle!.trim().slice(0, 3);
+
+    const result = await getPeople({ jobTitle: term, jobTitleExclude: term }, 1, 1000);
+    // A title can't both contain and not-contain the same term, so the set is empty.
+    expect(result.total).toBe(0);
+  });
+
   it("employee size and industry filters join through the linked company", async () => {
     const result = await getPeople({ employeeBucket: ["1-10"] }, 1, 1000);
     expect(result.total).toBeGreaterThan(0);

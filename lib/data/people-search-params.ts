@@ -28,6 +28,8 @@ export function parsePersonFilters(searchParams: URLSearchParams): PersonListFil
     emailStatus: parseIncludeExcludeParam(searchParams, "emailStatus"),
     phoneType: parseIncludeExcludeParam(searchParams, "phoneType"),
     jobTitle: searchParams.get("title") ?? undefined,
+    jobTitleOp: searchParams.get("titleOp") === "equals" ? "equals" : undefined,
+    jobTitleExclude: searchParams.get("title_exclude") ?? undefined,
     employeeMin: Number.isFinite(Number(empMin)) && empMin ? Number(empMin) : undefined,
     employeeMax: Number.isFinite(Number(empMax)) && empMax ? Number(empMax) : undefined,
     pushJobId: searchParams.get("pushJobId") ?? undefined,
