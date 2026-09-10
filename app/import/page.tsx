@@ -14,7 +14,7 @@ import {
 import { fuzzyMatchColumn } from "@/lib/import/normalize";
 import { parseCSV, applyColumnMap, filterMappedNonEmptyRows, serializeCSV } from "@/lib/import/csv";
 import { summarizeFailures } from "@/lib/import/failure-messages";
-import { Upload, History, CheckCircle, AlertCircle, Loader2, Download, ChevronRight, RefreshCw } from "lucide-react";
+import { Upload, History, CheckCircle, AlertCircle, Loader2, Download, ChevronRight, RefreshCw, Plus } from "lucide-react";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
@@ -216,8 +216,7 @@ function StepUpload({
     csv: ParsedCSV,
     provider: ProviderPreset | null,
     customKey: string,
-    targetTable: TargetTable,
-    companySyncEnabled: boolean
+    targetTable: TargetTable
   ) => void;
 }) {
   const [dragging, setDragging] = useState(false);
@@ -225,7 +224,6 @@ function StepUpload({
   const [providerKey, setProviderKey] = useState("manual-csv");
   const [targetOverride, setTargetOverride] = useState<TargetTable | "">("");
   const [customProviders, setCustomProviders] = useState<ProviderPreset[]>([]);
-  const [companySync, setCompanySync] = useState(false);
 
   const [showAddForm, setShowAddForm] = useState(false);
   const [newName, setNewName] = useState("");
@@ -263,14 +261,6 @@ function StepUpload({
   const effectiveTable: TargetTable = tableIsLocked
     ? (selectedProvider?.targetTable ?? "companies")
     : (targetOverride || selectedProvider?.targetTable || "companies");
-
-  // Pre-check the sync toggle per the selected preset's default whenever the
-  // provider or effective table changes, but let the user override it freely
-  // afterwards (this effect only re-fires on those two changes).
-  useEffect(() => {
-    setCompanySync(effectiveTable === "people" ? (selectedProvider?.companySyncDefault ?? false) : false);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [providerKey, effectiveTable]);
 
   async function handleFile(file: File) {
     const text = await file.text();
@@ -446,25 +436,6 @@ function StepUpload({
         )}
       </div>
 
-      {/* Company data sync toggle (people imports only) */}
-      {effectiveTable === "people" && (
-        <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-rule bg-paper px-3 py-2.5">
-          <input
-            type="checkbox"
-            checked={companySync}
-            onChange={(e) => setCompanySync(e.target.checked)}
-            className="mt-0.5 h-4 w-4 shrink-0 rounded border-rule"
-          />
-          <span className="text-sm text-ink">
-            This file also contains company data — import companies too
-            <span className="mt-0.5 block text-xs text-ink-mute">
-              Extracts embedded company columns (e.g. domain, industry, revenue) into a
-              separate Companies import, linked to these people automatically.
-            </span>
-          </span>
-        </label>
-      )}
-
       {/* Drop zone */}
       <div
         onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
@@ -534,8 +505,7 @@ function StepUpload({
             csv,
             selectedProvider,
             selectedProvider?.sourceKey ?? "custom",
-            effectiveTable,
-            effectiveTable === "people" && companySync
+            effectiveTable
           )
         }
         className="self-end rounded-lg bg-stamp px-5 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-40 transition-opacity"
@@ -613,7 +583,7 @@ function StepMapping({
   initialMappings,
   targetTable,
   sourceKey,
-  companySyncEnabled,
+  initialCompanySyncEnabled,
   initialCompanyMappings,
   onNext,
   onBack,
@@ -622,13 +592,23 @@ function StepMapping({
   initialMappings: ColumnMapping[];
   targetTable: TargetTable;
   sourceKey: string;
-  companySyncEnabled: boolean;
+  initialCompanySyncEnabled: boolean;
   initialCompanyMappings: ColumnMapping[];
-  onNext: (mappings: ColumnMapping[], companyMappings: ColumnMapping[]) => void;
+  onNext: (
+    mappings: ColumnMapping[],
+    companyMappings: ColumnMapping[],
+    companySyncEnabled: boolean
+  ) => void;
   onBack: () => void;
 }) {
   const [mappings, setMappings] = useState<ColumnMapping[]>(initialMappings);
   const [companyMappings, setCompanyMappings] = useState<ColumnMapping[]>(initialCompanyMappings);
+  // The company-sync toggle lives here rather than on the Upload step: this is
+  // the screen where the user is looking for a field to map to, so it is the
+  // only place the option is discoverable (ticket 47). Offered for every
+  // people-target import, not just presets carrying a companyColumnMap —
+  // without one the rows simply arrive fuzzy-matched instead of pre-mapped.
+  const [companySyncEnabled, setCompanySyncEnabled] = useState(initialCompanySyncEnabled);
   const candidates = targetTable === "companies" ? COMPANIES_FIELDS : PEOPLE_FIELDS;
 
   useEffect(() => {
@@ -672,7 +652,7 @@ function StepMapping({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sourceKey, columnMap, targetTable }),
     }).catch(() => {});
-    onNext(mappings, companyMappings);
+    onNext(mappings, companyMappings, companySyncEnabled);
   }
 
   return (
@@ -683,6 +663,27 @@ function StepMapping({
           Match each CSV column to a Supabase field. Ignored columns won&apos;t be imported.
         </p>
       </div>
+
+      {/* Company-sync toggle. Lives on this step (not Upload) so the option is
+          in front of the user at the moment they are hunting for a company
+          field to map to — see ticket 47. */}
+      {targetTable === "people" && !companySyncEnabled && (
+        <button
+          type="button"
+          onClick={() => setCompanySyncEnabled(true)}
+          className="flex w-full items-start gap-2.5 rounded-lg border border-dashed border-rule px-3 py-2.5 text-left transition-colors hover:border-stamp/50 hover:bg-hover"
+        >
+          <Plus size={16} className="mt-0.5 shrink-0 text-stamp" />
+          <span className="text-sm text-ink">
+            Looking for company fields? Enable the companies section
+            <span className="mt-0.5 block text-xs text-ink-mute">
+              Adds a second table for mapping embedded company columns (employee count,
+              industry, revenue, website…). They&apos;re imported into Companies and linked
+              to these people automatically.
+            </span>
+          </span>
+        </button>
+      )}
 
       <div className="flex flex-col gap-3">
         {companySyncEnabled && (
@@ -700,12 +701,23 @@ function StepMapping({
 
       {companySyncEnabled && (
         <div className="flex flex-col gap-3">
-          <div>
-            <p className="text-xs font-medium text-ink-soft uppercase tracking-wide">Company columns</p>
-            <p className="mt-1 text-xs text-ink-mute">
-              This file also contains embedded company data. Map those columns here — they&apos;ll be
-              imported into Companies and linked to the people above automatically.
-            </p>
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-xs font-medium text-ink-soft uppercase tracking-wide">Company columns</p>
+              <p className="mt-1 text-xs text-ink-mute">
+                This file also contains embedded company data. Map those columns here — they&apos;ll be
+                imported into Companies and linked to the people above automatically.
+              </p>
+            </div>
+            {targetTable === "people" && (
+              <button
+                type="button"
+                onClick={() => setCompanySyncEnabled(false)}
+                className="shrink-0 rounded border border-rule px-2 py-1 text-xs text-ink-soft transition-colors hover:bg-hover"
+              >
+                Remove
+              </button>
+            )}
           </div>
           <MappingTable
             mappings={companyMappings}
@@ -1880,7 +1892,7 @@ export default function ImportPage() {
                 <div className="p-6">
                   {step === "upload" && (
                     <StepUpload
-                      onNext={(parsedCsv, provider, sourceKey, targetTable, companySyncEnabled) => {
+                      onNext={(parsedCsv, provider, sourceKey, targetTable) => {
                         setCsv(parsedCsv);
                         const providerMap =
                           provider && targetTable !== provider.targetTable
@@ -1891,9 +1903,16 @@ export default function ImportPage() {
                           providerMap,
                           targetTable
                         );
-                        const companyMappings = companySyncEnabled
-                          ? autoMapColumns(parsedCsv.headers, provider?.companyColumnMap ?? {}, "companies")
-                          : [];
+                        // Company mappings are computed for every people import,
+                        // even with the sync toggle off, so flipping it on from
+                        // the mapping step has rows ready immediately. The preset
+                        // only decides whether it starts on.
+                        const companySyncEnabled =
+                          targetTable === "people" && (provider?.companySyncDefault ?? false);
+                        const companyMappings =
+                          targetTable === "people"
+                            ? autoMapColumns(parsedCsv.headers, provider?.companyColumnMap ?? {}, "companies")
+                            : [];
                         setMeta((prev) => ({
                           ...prev,
                           provider,
@@ -1914,13 +1933,14 @@ export default function ImportPage() {
                       initialMappings={meta.columnMappings}
                       targetTable={meta.targetTable}
                       sourceKey={meta.provider?.sourceKey ?? meta.customSourceKey}
-                      companySyncEnabled={meta.companySyncEnabled}
+                      initialCompanySyncEnabled={meta.companySyncEnabled}
                       initialCompanyMappings={meta.companyColumnMappings}
-                      onNext={(mappings, companyMappings) => {
+                      onNext={(mappings, companyMappings, companySyncEnabled) => {
                         setMeta((prev) => ({
                           ...prev,
                           columnMappings: mappings,
                           companyColumnMappings: companyMappings,
+                          companySyncEnabled,
                         }));
                         setStep("metadata");
                       }}
