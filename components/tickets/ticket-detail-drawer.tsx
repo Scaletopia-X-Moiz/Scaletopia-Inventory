@@ -110,6 +110,7 @@ function StatusEditor({ ticket }: { ticket: TicketRow }) {
         >
           <option value="open">Open</option>
           <option value="in_progress">In progress</option>
+          <option value="awaiting_reply">Waiting on you</option>
           <option value="done">Done</option>
         </select>
         {pending ? <Loader2 size={14} className="animate-spin text-ink-soft" /> : null}

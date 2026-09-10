@@ -37,7 +37,7 @@ export interface ActionState {
 }
 
 const CATEGORIES: TicketCategory[] = ["bug", "feature_request", "improvement"];
-const STATUSES: TicketStatus[] = ["open", "in_progress", "done"];
+const STATUSES: TicketStatus[] = ["open", "in_progress", "awaiting_reply", "done"];
 const PRIORITIES: TicketPriority[] = PRIORITY_OPTIONS;
 const MAX_TITLE = 200;
 const MAX_DESCRIPTION = 5000;

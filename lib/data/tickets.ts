@@ -4,7 +4,7 @@ import type { Role } from "@/lib/auth/dal";
 import type { TicketPriority } from "@/lib/tickets/priority";
 
 export type TicketCategory = "bug" | "feature_request" | "improvement";
-export type TicketStatus = "open" | "in_progress" | "done";
+export type TicketStatus = "open" | "in_progress" | "done" | "awaiting_reply";
 export type { TicketPriority };
 export type TicketTab = "open" | "done" | "all";
 
@@ -98,7 +98,7 @@ export async function getTickets(
   }
 
   if (filters.tab === "open") {
-    query = query.in("status", ["open", "in_progress"]);
+    query = query.in("status", ["open", "in_progress", "awaiting_reply"]);
   } else if (filters.tab === "done") {
     query = query.eq("status", "done");
   }

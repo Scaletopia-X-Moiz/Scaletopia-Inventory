@@ -63,6 +63,7 @@ const USAGE = `Usage:
   npx tsx scripts/ticket.ts create "<title>" "<description>" [--category bug|feature_request|improvement] [--priority urgent|high|medium|low|nice_to_have]
   npx tsx scripts/ticket.ts start <n> --issue <i>
   npx tsx scripts/ticket.ts note <n> "<text>"
+  npx tsx scripts/ticket.ts wait <n> "<note>"
   npx tsx scripts/ticket.ts done <n> "<note>"`;
 
 function fail(message: string): never {
@@ -217,13 +218,37 @@ async function done(id: number, text: string | undefined): Promise<void> {
   console.log(`Ticket ${id} is done, with the closing note saved.`);
 }
 
+/** Parks a ticket on the requester: sets status to `awaiting_reply` (the app
+ * renders this as "Waiting on you" to whoever raised it) and stores `text` as
+ * the current_note, so the question is visible next to the status in /tickets.
+ * The note author is recorded the same way `done` does. */
+async function waiting(id: number, text: string | undefined): Promise<void> {
+  if (!text) fail(`missing note text.\n\n${USAGE}`);
+  await fetchTicket(id);
+  const profileId = await fetchDevProfileId();
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from("tickets")
+    .update({
+      status: "awaiting_reply",
+      current_note: text,
+      note_updated_by: profileId,
+      note_updated_at: now,
+      updated_at: now,
+    })
+    .eq("id", id);
+  if (error) fail(`could not update ticket ${id}: ${error.message}`);
+  console.log(`Ticket ${id} is now waiting on the requester, with the note saved.`);
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (!command) fail(`missing subcommand.\n\n${USAGE}`);
 
   if (
     command !== "show" && command !== "start" && command !== "note" &&
-    command !== "done" && command !== "create" && command !== "describe"
+    command !== "done" && command !== "create" && command !== "describe" &&
+    command !== "wait"
   ) {
     fail(`unknown subcommand "${command}".\n\n${USAGE}`);
   }
@@ -241,6 +266,8 @@ async function main() {
       return note(id, args[1]);
     case "done":
       return done(id, args[1]);
+    case "wait":
+      return waiting(id, args[1]);
     case "describe":
       return describe(id, args[1]);
   }
