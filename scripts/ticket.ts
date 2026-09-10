@@ -59,6 +59,7 @@ interface TicketRow {
 
 const USAGE = `Usage:
   npx tsx scripts/ticket.ts show <n>
+  npx tsx scripts/ticket.ts describe <n> "<description>"
   npx tsx scripts/ticket.ts create "<title>" "<description>" [--category bug|feature_request|improvement] [--priority urgent|high|medium|low|nice_to_have]
   npx tsx scripts/ticket.ts start <n> --issue <i>
   npx tsx scripts/ticket.ts note <n> "<text>"
@@ -156,6 +157,19 @@ async function create(args: string[]): Promise<void> {
   console.log(`Created ticket #${(data as { id: number }).id}: ${title}`);
 }
 
+/** Rewrites a ticket's description in place, for fixing up wording after the
+ * fact without opening the app. Title, status and priority are untouched. */
+async function describe(id: number, text: string | undefined): Promise<void> {
+  if (!text) fail(`missing description text.\n\n${USAGE}`);
+  await fetchTicket(id);
+  const { error } = await supabase
+    .from("tickets")
+    .update({ description: text, updated_at: new Date().toISOString() })
+    .eq("id", id);
+  if (error) fail(`could not update ticket ${id}: ${error.message}`);
+  console.log(`Rewrote the description on ticket ${id}.`);
+}
+
 async function start(id: number, rest: string[]): Promise<void> {
   const flagIndex = rest.indexOf("--issue");
   if (flagIndex === -1) fail(`missing --issue.\n\n${USAGE}`);
@@ -209,7 +223,7 @@ async function main() {
 
   if (
     command !== "show" && command !== "start" && command !== "note" &&
-    command !== "done" && command !== "create"
+    command !== "done" && command !== "create" && command !== "describe"
   ) {
     fail(`unknown subcommand "${command}".\n\n${USAGE}`);
   }
@@ -227,6 +241,8 @@ async function main() {
       return note(id, args[1]);
     case "done":
       return done(id, args[1]);
+    case "describe":
+      return describe(id, args[1]);
   }
 }
 
