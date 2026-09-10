@@ -30,9 +30,11 @@ if (!url || !serviceRoleKey) {
 }
 const supabase = createClient(url, serviceRoleKey, { auth: { persistSession: false } });
 
-// The dev running this CLI. `done` records them as the note author, mirroring
-// what updateTicketNote in lib/data/tickets.ts writes from the app.
-const DEV_EMAIL = "moizali128a@gmail.com";
+// The dev running this CLI, as the app knows them — this is the `profiles`
+// row (role "dev"), NOT the git commit email, which is a different address.
+// `create` records them as the ticket author and `done` as the note author,
+// mirroring what updateTicketNote in lib/data/tickets.ts writes from the app.
+const DEV_EMAIL = "moizpriv47@gmail.com";
 
 const TICKET_COLUMNS =
   "id,title,description,category,status,priority,github_issue,created_by,current_note,note_updated_by,note_updated_at,created_at,updated_at," +
@@ -57,6 +59,7 @@ interface TicketRow {
 
 const USAGE = `Usage:
   npx tsx scripts/ticket.ts show <n>
+  npx tsx scripts/ticket.ts create "<title>" "<description>" [--category bug|feature_request|improvement] [--priority urgent|high|medium|low|nice_to_have]
   npx tsx scripts/ticket.ts start <n> --issue <i>
   npx tsx scripts/ticket.ts note <n> "<text>"
   npx tsx scripts/ticket.ts done <n> "<note>"`;
@@ -118,6 +121,41 @@ async function show(id: number): Promise<void> {
   console.log(t.current_note || "(none)");
 }
 
+const CATEGORIES = ["bug", "feature_request", "improvement"] as const;
+const PRIORITIES = ["urgent", "high", "medium", "low", "nice_to_have"] as const;
+
+/** Raises a ticket in the app, the same way the /tickets "New ticket" dialog
+ * does. Used when work in a session turns up something worth tracking that
+ * nobody has filed yet — the in-app ticket stays the source of truth, so it
+ * has to exist here rather than only as a GitHub issue. */
+async function create(args: string[]): Promise<void> {
+  const flagIndex = args.findIndex((a) => a.startsWith("--"));
+  const positional = flagIndex === -1 ? args : args.slice(0, flagIndex);
+  const [title, description] = positional;
+  if (!title || !description) fail(`create needs a title and a description.\n\n${USAGE}`);
+
+  const readFlag = (name: string, allowed: readonly string[], fallback: string): string => {
+    const i = args.indexOf(`--${name}`);
+    if (i === -1) return fallback;
+    const value = args[i + 1];
+    if (!value || !allowed.includes(value)) {
+      fail(`--${name} must be one of: ${allowed.join(", ")}`);
+    }
+    return value;
+  };
+  const category = readFlag("category", CATEGORIES, "improvement");
+  const priority = readFlag("priority", PRIORITIES, "medium");
+
+  const profileId = await fetchDevProfileId();
+  const { data, error } = await supabase
+    .from("tickets")
+    .insert({ title, description, category, priority, status: "open", created_by: profileId })
+    .select("id")
+    .single();
+  if (error) fail(`could not create the ticket: ${error.message}`);
+  console.log(`Created ticket #${(data as { id: number }).id}: ${title}`);
+}
+
 async function start(id: number, rest: string[]): Promise<void> {
   const flagIndex = rest.indexOf("--issue");
   if (flagIndex === -1) fail(`missing --issue.\n\n${USAGE}`);
@@ -169,9 +207,15 @@ async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (!command) fail(`missing subcommand.\n\n${USAGE}`);
 
-  if (command !== "show" && command !== "start" && command !== "note" && command !== "done") {
+  if (
+    command !== "show" && command !== "start" && command !== "note" &&
+    command !== "done" && command !== "create"
+  ) {
     fail(`unknown subcommand "${command}".\n\n${USAGE}`);
   }
+
+  // `create` is the one subcommand not addressed by ticket number.
+  if (command === "create") return create(args);
 
   const id = parseTicketNumber(args[0]);
   switch (command) {

@@ -77,8 +77,11 @@ Push to `main` when the user asks, not automatically.
 
 Only when the user says the work is done.
 
-1. Check it actually works: run the type check and the tests, and where it
-   matters, run the app and look at the real page.
+1. Suggest what the user should write in the ticket itself, in the inventory
+   interface at `/tickets`. Give them a short draft they can paste in — a
+   couple of sentences, plain language, no file names or jargon, written for
+   whoever raised the ticket. Say what now works and that the ticket is
+   closed. Do not claim it is still being tested.
 
 2. Post the closing comment and close the issue:
 
