@@ -22,6 +22,9 @@ config({ path: ".env.local" });
 
 import { createClient } from "@supabase/supabase-js";
 import { execFileSync } from "node:child_process";
+import { writeFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const url = process.env.SUPABASE_URL;
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -62,7 +65,7 @@ const USAGE = `Usage:
   npx tsx scripts/ticket.ts describe <n> "<description>"
   npx tsx scripts/ticket.ts create "<title>" "<description>" [--category bug|feature_request|improvement] [--priority urgent|high|medium|low|nice_to_have]
   npx tsx scripts/ticket.ts start <n> --issue <i>
-  npx tsx scripts/ticket.ts note <n> "<text>"
+  npx tsx scripts/ticket.ts note <n> <decision|dead-end|migration|gotcha|blocked> "<summary>" "<what>" "<why it matters>"
   npx tsx scripts/ticket.ts wait <n> "<note>"
   npx tsx scripts/ticket.ts done <n> "<note>"`;
 
@@ -91,6 +94,25 @@ async function fetchDevProfileId(): Promise<string> {
   if (error) fail(`could not look up the profile for ${DEV_EMAIL}: ${error.message}`);
   if (!data) fail(`no profile found for ${DEV_EMAIL} — cannot record the note author.`);
   return (data as { id: string }).id;
+}
+
+// The closed vocabulary for work-log notes. Keeping this short is deliberate:
+// a fixed set of labels is what makes the issue thread skimmable. The raw key
+// is what the user types; the label is what gets rendered in the heading.
+const NOTE_TYPES: Record<string, string> = {
+  decision: "DECISION",
+  "dead-end": "DEAD END",
+  migration: "MIGRATION",
+  gotcha: "GOTCHA",
+  blocked: "BLOCKED",
+};
+
+/** Assembles the canonical work-log note body. The template lives here, not in
+ * the skill prose, so every note comes out identically shaped and the format
+ * cannot be skipped or drifted. */
+function formatNote(type: string, summary: string, what: string, why: string): string {
+  const label = NOTE_TYPES[type];
+  return `### ${label}: ${summary}\n**What:** ${what}\n**Why it matters:** ${why}`;
 }
 
 /** Shells out to the GitHub CLI, translating the usual setup failures. */
@@ -189,14 +211,35 @@ async function start(id: number, rest: string[]): Promise<void> {
   console.log(`Ticket ${id} is now in_progress, linked to GitHub issue #${issue}.`);
 }
 
-async function note(id: number, text: string | undefined): Promise<void> {
-  if (!text) fail(`missing note text.\n\n${USAGE}`);
+async function note(id: number, rest: string[]): Promise<void> {
+  const [type, summary, what, why] = rest;
+  if (!type || !(type in NOTE_TYPES)) {
+    fail(`note type must be one of: ${Object.keys(NOTE_TYPES).join(", ")}.\n\n${USAGE}`);
+  }
+  if (!summary || !what || !why) {
+    fail(`note needs a summary, a "what", and a "why".\n\n${USAGE}`);
+  }
   const t = await fetchTicket(id);
   if (t.github_issue === null) {
     fail(`ticket ${id} has no GitHub issue yet — run \`npx tsx scripts/ticket.ts start ${id} --issue <i>\` first.`);
   }
-  runGh(["issue", "comment", String(t.github_issue), "--body", text]);
-  console.log(`Posted a comment on issue #${t.github_issue}.`);
+
+  // Post via a temp --body-file rather than --body: on Windows a multi-line
+  // --body argument is truncated to its first line, which would flatten the
+  // template down to just its heading.
+  const body = formatNote(type, summary, what, why);
+  const bodyFile = join(tmpdir(), `ticket-note-${id}-${Date.now()}.md`);
+  writeFileSync(bodyFile, body, "utf8");
+  try {
+    runGh(["issue", "comment", String(t.github_issue), "--body-file", bodyFile]);
+  } finally {
+    try {
+      unlinkSync(bodyFile);
+    } catch {
+      // Best-effort cleanup; a leftover temp file is harmless.
+    }
+  }
+  console.log(`Posted a ${NOTE_TYPES[type]} note on issue #${t.github_issue}.`);
 }
 
 async function done(id: number, text: string | undefined): Promise<void> {
@@ -263,7 +306,7 @@ async function main() {
     case "start":
       return start(id, args.slice(1));
     case "note":
-      return note(id, args[1]);
+      return note(id, args.slice(1));
     case "done":
       return done(id, args[1]);
     case "wait":

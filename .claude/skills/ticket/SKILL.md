@@ -46,26 +46,30 @@ issue titles, issue bodies, every comment, and the closing note in the app.
    npx tsx scripts/ticket.ts start <number> --issue <issue>
 
 5. Read the code you will need to touch. Then post your plan as a comment on
-   the issue, and say the same thing to the user:
+   the issue, and say the same thing to the user. Use this exact skeleton:
 
-   gh issue comment <issue> --body "<plan>"
+   ## Plan
+   **Asking for:** <what the ticket is actually asking for>
+   **Changing:** <which files you will change>
+   **Verifying:** <how you will check it works>
 
-   The plan covers: what the ticket is actually asking for, which files you
-   will change, and how you will check it works. If the ticket is vague, ask
-   the user before writing this — do not guess.
+   If the ticket is vague, ask the user before writing this — do not guess.
 
 ## While working
 
 Work on `main`. Do not create branches.
 
-Post a comment on the issue whenever something happens that you would not want
-to figure out twice:
+Post a note on the issue whenever something happens that you would not want to
+figure out twice. The command takes a type, a one-line summary, what happened,
+and why it matters, and formats them into the log for you:
 
-  npx tsx scripts/ticket.ts note <number> "<what happened>"
+  npx tsx scripts/ticket.ts note <number> <type> "<summary>" "<what>" "<why it matters>"
 
-That includes: a decision and the reason for it, an approach that failed, a
-database migration you ran, anything surprising about the codebase. Do not log
-routine edits — the commits already show those.
+The type is one of, and only one of: decision, dead-end, migration, gotcha,
+blocked. That closed list is what keeps the thread skimmable — do not invent
+new ones. Log a note when you hit one of those: a decision and its reason, an
+approach that failed, a migration you ran, a gotcha in the codebase, a blocker.
+Do not log routine edits — the commits already show those.
 
 Commit as you go. Put the ticket in the message:
 
@@ -87,8 +91,12 @@ Only when the user says the work is done.
 
    gh issue close <issue> --comment "<summary>"
 
-   The summary has three parts: what changed, why it was done that way, and how
-   it was tested.
+   The summary uses this exact skeleton:
+
+   ## Closing summary
+   **What changed:** <what changed>
+   **Why this way:** <why it was done that way>
+   **How it was tested:** <how it was tested>
 
 3. Mark the ticket done in the app:
 
