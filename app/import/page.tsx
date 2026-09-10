@@ -611,6 +611,33 @@ function StepMapping({
   const [companySyncEnabled, setCompanySyncEnabled] = useState(initialCompanySyncEnabled);
   const candidates = targetTable === "companies" ? COMPANIES_FIELDS : PEOPLE_FIELDS;
 
+  // People are attached to their employer purely by matching `domain` against
+  // the companies table (fetchCompanyIdByDomain in lib/import/push.ts). If
+  // either side of a linked import has no domain to match on, every person is
+  // silently saved with a null company_id — and therefore no employee_count,
+  // industry or company LinkedIn, which is precisely what the user enabled
+  // this section to get. The push reports no error for that, so warn here.
+  // The company side accepts website_url too, since push derives a domain from
+  // it as a fallback; the people side has no such fallback because
+  // PEOPLE_FIELDS has no website_url to map.
+  const peopleHasDomain = mappings.some((m) => m.supabaseField === "domain");
+  const companyHasDomain = companyMappings.some(
+    (m) => m.supabaseField === "domain" || m.supabaseField === "website_url"
+  );
+  // Shown for every people import, not just synced ones: the company lookup
+  // runs on every people push, so a people-only file with no domain lands
+  // exactly the same unlinked rows. The company line only applies when that
+  // section is actually on.
+  const linkWarnings =
+    targetTable !== "people"
+      ? []
+      : [
+          peopleHasDomain ? null : 'People columns: map a column to "domain".',
+          companySyncEnabled && !companyHasDomain
+            ? 'Company columns: map a column to "domain" (or "website_url").'
+            : null,
+        ].filter((w): w is string => w !== null);
+
   useEffect(() => {
     fetch(`/api/import/mappings?sourceKey=${encodeURIComponent(sourceKey)}`)
       .then((r) => r.json())
@@ -725,6 +752,27 @@ function StepMapping({
             candidates={COMPANIES_FIELDS}
             onChange={setCompanyField}
           />
+        </div>
+      )}
+
+      {linkWarnings.length > 0 && (
+        <div className="flex items-start gap-2.5 rounded-lg border border-red-300 bg-red-50 px-3 py-2.5">
+          <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-600" />
+          <div className="text-sm text-red-700">
+            <p className="font-medium">
+              These people will not be linked to their companies.
+            </p>
+            <p className="mt-0.5 text-xs text-red-600">
+              People are matched to a company by domain. Without it every person is
+              imported with no company attached, so employee count, industry and
+              company LinkedIn stay empty. Fix by mapping:
+            </p>
+            <ul className="mt-1 list-disc pl-4 text-xs text-red-600">
+              {linkWarnings.map((w) => (
+                <li key={w}>{w}</li>
+              ))}
+            </ul>
+          </div>
         </div>
       )}
 
