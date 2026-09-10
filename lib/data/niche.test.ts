@@ -31,6 +31,17 @@ describe("nichesFromTags", () => {
     expect(nichesFromTags(tags, knownClients)).toEqual(["dtc-beauty", "health-wellness"]);
   });
 
+  it("strips bare year and year-month date tags, not just full ISO dates", () => {
+    // The import Tag Metadata tuple's date element is often a bare year, and its
+    // client element ("All clients") only strips because a company carries that
+    // client name — mirror that here by seeding it into knownClients.
+    const clients = new Set([...knownClients, "all clients"]);
+    expect(nichesFromTags(["All clients", "Beauty & Skincare", "2026"], clients)).toEqual([
+      "Beauty & Skincare",
+    ]);
+    expect(nichesFromTags(["kynship", "dtc-beauty", "2026-04"], clients)).toEqual(["dtc-beauty"]);
+  });
+
   it("dedupes repeated niche values", () => {
     const tags = ["kynship", "dtc-beauty", "2026-04-07", "dtc-beauty", "2026-06-01"];
     expect(nichesFromTags(tags, knownClients)).toEqual(["dtc-beauty"]);

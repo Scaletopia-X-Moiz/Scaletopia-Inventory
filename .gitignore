@@ -27,8 +27,10 @@ env.local
 # local test data (large CSV/XLSX exports, kept out of git)
 /testcsv/
 
-# supabase CLI link state (local machine only)
-/supabase/
+# supabase local CLI link state (local machine only) — but keep the edge
+# function SOURCE tracked; it's application code, not machine state.
+/supabase/*
+!/supabase/functions/
 .vercel
 
 # scratch scripts / one-off debug & verify runs (local only)

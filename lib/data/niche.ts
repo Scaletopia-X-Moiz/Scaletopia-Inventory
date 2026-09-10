@@ -1,4 +1,9 @@
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Date-shaped tags the import Tag Metadata step emits as the tuple's 3rd
+// element. Historically only full ISO dates (YYYY-MM-DD) were stripped, but the
+// step often writes a bare year ("2026") or year-month ("2026-04"), which then
+// leaked into niche_tokens as a fake niche. A tag that is only digits (and an
+// optional -MM / -DD) is never a real niche, so strip all three shapes.
+const DATE_RE = /^\d{4}(-\d{2}(-\d{2})?)?$/;
 const STRIPPED_PREFIXES = ["campaign:", "geo:", "imported:", "source:"];
 
 /** Extracts niche values from a person's tags, used only when their linked

@@ -317,8 +317,14 @@ async function bulkInsert(
     // people: country_id/source_tokens are normalized from the record's own
     // raw fields. industry_id/employee_count/company_linkedin_url mirror the
     // linked company's own already-canonical columns (not re-normalized —
-    // copied directly). niche_tokens prefers the company's niche and only
-    // falls back to parsing the person's own tags when the company has none.
+    // copied directly). niche_tokens (what the People Niche facet counts) is
+    // resolved in priority order: (1) the linked company's own niche, (2) this
+    // push's Tag Metadata niche — tags[1] of the [client, niche, date] tuple,
+    // the value the user picked for the whole import, (3) as a last resort,
+    // niches parsed from the record's OWN source tags (r.tags, distinct from
+    // the push-level tuple). Tier 2 is the fix for the common case where the
+    // import has a Tag Metadata niche but the rows carry no source tags: that
+    // used to fall straight to (3) on an empty r.tags and leave niche_tokens [].
     const company = r.company_id ? companyById.get(r.company_id as string) : undefined;
     return {
       country_id: normalizeCountry(r.country as string | null | undefined)?.id ?? null,
@@ -328,7 +334,9 @@ async function bulkInsert(
       company_linkedin_url: company?.linkedin_url ?? null,
       niche_tokens: company?.niche
         ? [company.niche]
-        : nichesFromTags(r.tags as string[] | undefined, knownClients),
+        : tags[1]
+          ? [tags[1]]
+          : nichesFromTags(r.tags as string[] | undefined, knownClients),
     };
   };
 
@@ -511,9 +519,14 @@ async function bulkUpdate(
         industry_id: company?.industry_id ?? null,
         employee_count: company?.employee_count ?? null,
         company_linkedin_url: company?.linkedin_url ?? null,
+        // niche_tokens: mirror bulkInsert's priority — company niche, then the
+        // Tag Metadata niche (tags[1]), then niches parsed from the record's own
+        // source tags (r.tags).
         niche_tokens: company?.niche
           ? [company.niche]
-          : nichesFromTags(r.tags as string[] | undefined, knownClients),
+          : tags[1]
+            ? [tags[1]]
+            : nichesFromTags(r.tags as string[] | undefined, knownClients),
       };
     };
 

@@ -337,7 +337,32 @@ describe("pushRecords — people canonical columns", () => {
     expect(data?.niche_tokens).toEqual(["fintech"]);
   });
 
-  it("falls back to tag-parsed niche_tokens when the linked company has no niche", async () => {
+  it("uses the Tag Metadata niche (tags[1]) for niche_tokens when the company has none", async () => {
+    // The common real import: a Tag Metadata niche is set but the rows carry no
+    // source tags of their own. niche_tokens must reflect that chosen niche
+    // (tags[1]) rather than falling through to an empty source-tag parse.
+    const linkedin = testPersonLinkedin("canonical-niche-metadata");
+    await pushRecords(
+      {
+        records: [{ linkedin_url: linkedin, full_name: "Niche Metadata Person" }],
+        targetTable: "people",
+        sourceKey: SOURCE_KEY,
+        tags: TAGS,
+      },
+      noopProgress
+    );
+
+    const { data } = await supabaseAdmin
+      .from("people")
+      .select("niche_tokens,company_id")
+      .eq("linkedin_url", linkedin)
+      .single();
+
+    expect(data?.company_id).toBeNull();
+    expect(data?.niche_tokens).toEqual(["test-niche"]);
+  });
+
+  it("falls back to tag-parsed niche_tokens when there is no company or Tag Metadata niche", async () => {
     const linkedin = testPersonLinkedin("canonical-niche-fallback");
     await pushRecords(
       {
@@ -350,7 +375,9 @@ describe("pushRecords — people canonical columns", () => {
         ],
         targetTable: "people",
         sourceKey: SOURCE_KEY,
-        tags: TAGS,
+        // Empty Tag Metadata niche (tags[1]) so tier 2 is skipped and the
+        // record's own source tags are parsed instead.
+        tags: ["test-client", "", "2026-01-01"],
       },
       noopProgress
     );
