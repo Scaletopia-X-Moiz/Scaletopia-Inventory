@@ -13,7 +13,8 @@
     "verify:auth-hook": "tsx lib/auth/verify-access-token-hook.ts",
     "bench:dashboard": "tsx scripts/bench-dashboard.ts",
     "seed:clients": "tsx lib/import/seed-clients.ts",
-    "audit:niche-tagging": "tsx scripts/audit-niche-tagging.ts"
+    "audit:niche-tagging": "tsx scripts/audit-niche-tagging.ts",
+    "ticket": "tsx scripts/ticket.ts"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.3.0",

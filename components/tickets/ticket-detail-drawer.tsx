@@ -2,7 +2,7 @@
 
 import { useActionState, useCallback, useEffect, useState } from "react";
 import { Dialog } from "radix-ui";
-import { Loader2, Trash2, X } from "lucide-react";
+import { ExternalLink, Loader2, Trash2, X } from "lucide-react";
 import { timeAgo } from "@/lib/utils";
 import type { Role } from "@/lib/auth/dal";
 import type { TicketRow } from "@/lib/data/tickets";
@@ -26,6 +26,10 @@ import {
 } from "@/app/tickets/actions";
 
 type TicketAttachments = { report: TicketAttachmentRow[]; note: TicketAttachmentRow[] };
+
+// Work-log issues for a ticket live in this repo; ticket.githubIssue is the
+// issue number, null until a dev starts work.
+const GITHUB_ISSUES_URL = "https://github.com/Scaletopia-X-Moiz/Scaletopia-Inventory/issues";
 
 const fieldClass =
   "w-full rounded-lg border border-rule bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-stamp";
@@ -170,6 +174,21 @@ function NoteAttachmentsEditor({
       />
       {error && <p className="text-xs text-danger">{error}</p>}
     </div>
+  );
+}
+
+function WorkLogLink({ issue }: { issue: number | null }) {
+  if (issue === null) return null;
+  return (
+    <a
+      href={`${GITHUB_ISSUES_URL}/${issue}`}
+      target="_blank"
+      rel="noreferrer"
+      className="mt-2 inline-flex items-center gap-1.5 text-xs text-ink-soft underline-offset-2 transition-colors hover:text-ink hover:underline"
+    >
+      <ExternalLink size={13} />
+      View work log on GitHub
+    </a>
   );
 }
 
@@ -324,6 +343,7 @@ export function TicketDetailDrawer({ ticket, viewerRole, viewerId, children }: T
                   attachments={attachments?.note ?? []}
                   onAttachmentsChanged={refetchAttachments}
                 />
+                <WorkLogLink issue={ticket.githubIssue} />
                 <div className="text-xs text-ink-mute">
                   Reported by {ticket.createdByEmail ?? "unknown"} · {timeAgo(ticket.createdAt)}
                 </div>
@@ -367,6 +387,7 @@ export function TicketDetailDrawer({ ticket, viewerRole, viewerId, children }: T
                       <AttachmentList attachments={attachments.note} ticketId={ticket.id} />
                     </div>
                   )}
+                  <WorkLogLink issue={ticket.githubIssue} />
                 </div>
                 <div className="text-xs text-ink-mute">
                   {isOwnTicket ? "Reported by you" : `Reported by ${ticket.createdByEmail ?? "unknown"}`} ·{" "}
