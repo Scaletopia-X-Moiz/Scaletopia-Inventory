@@ -52,7 +52,9 @@ $$;
 --
 -- A string is trimmed of leading/trailing whitespace and has its currency
 -- symbols ($, euro, pound) removed before either regex check (ticket #39
--- fix round 2). Only two shapes are then accepted: a plain number
+-- fix round 2), along with a leading or trailing three-letter uppercase
+-- currency code ("USD $92,736.76", "5000 EUR"; the estimated_monthly_sales
+-- import stores every value this way). Only two shapes are then accepted: a plain number
 -- (^-?\d+(\.\d+)?$, e.g. "5000" or "-5" from either "-$5" or "$-5", the
 -- currency-symbol removal leaves the minus adjacent to the digits either
 -- way), or a comma-grouped thousands number (^-?\d{1,3}(,\d{3})+(\.\d+)?$,
@@ -74,11 +76,11 @@ LANGUAGE sql IMMUTABLE AS $$
     WHEN v IS NULL THEN NULL
     WHEN jsonb_typeof(v) = 'number' THEN (v #>> '{}')::numeric
     WHEN jsonb_typeof(v) = 'string'
-      AND regexp_replace(trim(both from (v #>> '{}')), '[$€£]', '', 'g') ~ '^-?\d{1,3}(,\d{3})+(\.\d+)?$'
-      THEN regexp_replace(regexp_replace(trim(both from (v #>> '{}')), '[$€£]', '', 'g'), ',', '', 'g')::numeric
+      AND regexp_replace(trim(both from (v #>> '{}')), '^[A-Z]{3}\s*|\s*[A-Z]{3}$|[$€£]\s*', '', 'g') ~ '^-?\d{1,3}(,\d{3})+(\.\d+)?$'
+      THEN regexp_replace(regexp_replace(trim(both from (v #>> '{}')), '^[A-Z]{3}\s*|\s*[A-Z]{3}$|[$€£]\s*', '', 'g'), ',', '', 'g')::numeric
     WHEN jsonb_typeof(v) = 'string'
-      AND regexp_replace(trim(both from (v #>> '{}')), '[$€£]', '', 'g') ~ '^-?\d+(\.\d+)?$'
-      THEN regexp_replace(trim(both from (v #>> '{}')), '[$€£]', '', 'g')::numeric
+      AND regexp_replace(trim(both from (v #>> '{}')), '^[A-Z]{3}\s*|\s*[A-Z]{3}$|[$€£]\s*', '', 'g') ~ '^-?\d+(\.\d+)?$'
+      THEN regexp_replace(trim(both from (v #>> '{}')), '^[A-Z]{3}\s*|\s*[A-Z]{3}$|[$€£]\s*', '', 'g')::numeric
     ELSE NULL
   END
 $$;
