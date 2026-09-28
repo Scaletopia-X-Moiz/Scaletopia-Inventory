@@ -163,6 +163,25 @@ export function operatorsForType(type: VirtualColumnType): VirtualColumnOperator
   }
 }
 
+/** Types a user can switch a filter condition's column to from the filter
+ * builder itself, overriding the type the enrichment field was discovered as
+ * (ticket #39 — "monthly sales revenue" imported as Text should still get
+ * Number operators like greater-than/less-than, without re-importing). Text,
+ * Number and Date only: Boolean and List stay fixed to their discovered type,
+ * since a value-less boolean predicate or an array-shaped list value doesn't
+ * carry over the same way. Overriding the type is a pure filter-UI concern —
+ * the condition's `type` field already drives both operator selection (this
+ * file) and the SQL predicate's dispatch (virtual-columns.sql's
+ * virtual_filter_predicate_matches reads `f->>'type'` straight off the same
+ * payload) — so no new field or SQL change is needed to support it. */
+export const TYPE_OVERRIDE_OPTIONS: VirtualColumnType[] = ["text", "number", "date"];
+
+/** Whether a filter condition's type can be switched away from its
+ * discovered type — see TYPE_OVERRIDE_OPTIONS. */
+export function canOverrideVirtualColumnType(type: VirtualColumnType): boolean {
+  return TYPE_OVERRIDE_OPTIONS.includes(type);
+}
+
 /** Maps an enrichment field's discovered type (lib/data/enrichment-fields.ts)
  * to the VirtualColumnType it becomes as a column — the mapping the table's
  * "Add column" picker uses (tickets #34, #36), reused so a column added from

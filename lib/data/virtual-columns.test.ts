@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import {
+  canOverrideVirtualColumnType,
   MULTI_SELECT_VALUE_CAP,
   filterSet,
   isLowCardinalityTextField,
+  operatorsForType,
   parseVirtualColumnsParam,
   parseVirtualFiltersParam,
   serializeVirtualColumnsParam,
   serializeVirtualFiltersParam,
+  TYPE_OVERRIDE_OPTIONS,
   type ActiveVirtualColumn,
   type VirtualColumnFilter,
   type VirtualFilterSet,
@@ -509,6 +512,58 @@ describe("vf/vc URL param round-trip (ticket #34)", () => {
     const params = new URLSearchParams();
     params.set("vc", serializeVirtualColumnsParam(columns)!);
     expect(parseVirtualColumnsParam(params)).toEqual(columns);
+  });
+});
+
+describe("filter-column type override (ticket #39)", () => {
+  it("offers Text, Number and Date as override targets, and switches the operator list per type", () => {
+    expect(TYPE_OVERRIDE_OPTIONS).toEqual(["text", "number", "date"]);
+    expect(operatorsForType("number").map((o) => o.id)).toEqual(["is", "is_not", "gt", "lt", "between"]);
+    expect(operatorsForType("date").map((o) => o.id)).toEqual(["on", "before", "after", "between"]);
+    expect(operatorsForType("text").map((o) => o.id)).toEqual([
+      "is",
+      "is_not",
+      "contains",
+      "not_contains",
+      "is_empty",
+      "is_not_empty",
+    ]);
+  });
+
+  it("allows overriding Text/Number/Date but not Boolean/List", () => {
+    expect(canOverrideVirtualColumnType("text")).toBe(true);
+    expect(canOverrideVirtualColumnType("number")).toBe(true);
+    expect(canOverrideVirtualColumnType("date")).toBe(true);
+    expect(canOverrideVirtualColumnType("boolean")).toBe(false);
+    expect(canOverrideVirtualColumnType("list")).toBe(false);
+  });
+
+  it("round-trips a filter whose type was overridden away from a plausible discovered type (e.g. a Text 'monthly_revenue' field treated as Number)", () => {
+    const filters: VirtualColumnFilter[] = [{ key: "monthly_revenue", type: "number", operator: "gt", value: 10000 }];
+    const params = new URLSearchParams();
+    params.set("vf", serializeVirtualFiltersParam(filterSet(...filters))!);
+    expect(parseVirtualFiltersParam(params)).toEqual(filterSet(...filters));
+  });
+
+  it("ignores an invalid/unsupported override type in a hand-edited URL, dropping just that condition", () => {
+    const params = new URLSearchParams();
+    params.set(
+      "vf",
+      JSON.stringify([
+        { key: "a", type: "currency", operator: "gt", value: 10 }, // not a real VirtualColumnType
+        { key: "b", type: "number", operator: "gt", value: 10 }, // valid — survives
+      ])
+    );
+    expect(parseVirtualFiltersParam(params)).toEqual(filterSet({ key: "b", type: "number", operator: "gt", value: 10 }));
+  });
+
+  it("drops the condition when a value carried over from the old type no longer matches the new type's shape (e.g. an old Text value left non-numeric after switching to Number)", () => {
+    const params = new URLSearchParams();
+    params.set(
+      "vf",
+      JSON.stringify([{ key: "monthly_revenue", type: "number", operator: "is", value: "not-a-number" }])
+    );
+    expect(parseVirtualFiltersParam(params)).toBeUndefined();
   });
 });
 

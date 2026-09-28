@@ -6,10 +6,12 @@ import { Building2, Check, ChevronDown, Plus, Search, Users, X } from "lucide-re
 import { cn } from "@/lib/utils";
 import {
   ADDABLE_ENRICHMENT_TYPES,
+  canOverrideVirtualColumnType,
   isLowCardinalityTextField,
   operatorsForType,
   sanitizeFilterSet,
   serializeVirtualFiltersParam,
+  TYPE_OVERRIDE_OPTIONS,
   virtualColumnIdentity,
   type ActiveVirtualColumn,
   type FilterCombinator,
@@ -949,6 +951,16 @@ function ConditionEditor({
     onChange({ ...condition, operator: op, value });
   }
 
+  /** Overrides the condition's type away from what the field was discovered
+   * as (ticket #39 — e.g. treat a Text "monthly sales revenue" field as
+   * Number so it gets greater-than/less-than). Resets operator/value since
+   * the operator list (and value shape) differs per type; key/source/
+   * quantifier are unaffected — this is still the same underlying field. */
+  function changeType(nextType: VirtualColumnType) {
+    if (nextType === condition.type) return;
+    onChange({ ...condition, type: nextType, operator: "", value: undefined });
+  }
+
   function changeOperator(op: string) {
     if (!columnType) return;
     const meta = operators.find((o) => o.id === op);
@@ -1026,6 +1038,21 @@ function ConditionEditor({
         conditionSource={conditionSource}
         onSelect={changeColumn}
       />
+      {columnType && canOverrideVirtualColumnType(columnType) && (
+        <select
+          value={columnType}
+          onChange={(e) => changeType(e.target.value as VirtualColumnType)}
+          aria-label="Treat column as type"
+          title="Treat this column's values as"
+          className="rounded border border-rule bg-card px-1.5 py-1 text-ink outline-none focus:border-stamp"
+        >
+          {TYPE_OVERRIDE_OPTIONS.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </select>
+      )}
       {columnType && (
         <select
           value={condition.operator}
