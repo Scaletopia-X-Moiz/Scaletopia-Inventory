@@ -566,6 +566,14 @@ $$;
 -- in enrichment-fields.sql) had the same non-inlinable-call bug and were
 -- fixed the same way later (ticket #37 perf fix); no caller should reference
 -- `virtual_filters_match` directly.
+-- Hotfix (see lib/data/hotfix-companies-rpc-materialize.sql): the trailing
+-- ORDER BY c.id below (needed because the caller pages results with
+-- `.range()`) used to sit in the same query as the predicate, so the
+-- planner satisfied it by walking companies_pkey in UUID order -- random
+-- heap fetches over a 418 MB table, ~40s vs ~4s for the same predicate as a
+-- seq scan. The `matched` CTE is MATERIALIZED so the predicate is evaluated
+-- (and can use a seq scan) before the id-order sort is applied to the
+-- already-small result set.
 CREATE OR REPLACE FUNCTION companies_matching_virtual_filters(filters jsonb DEFAULT '{}'::jsonb)
 RETURNS TABLE(id uuid) LANGUAGE sql STABLE AS $$
   WITH params AS (
@@ -598,7 +606,11 @@ RETURNS TABLE(id uuid) LANGUAGE sql STABLE AS $$
       ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{emailStatus,exclude}', '[]'::jsonb))) AS emailstatus_exc,
       ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{phoneType,include}', '[]'::jsonb))) AS phonetype_inc,
       ARRAY(SELECT jsonb_array_elements_text(COALESCE(filters#>'{phoneType,exclude}', '[]'::jsonb))) AS phonetype_exc
-  )
+  ),
+  -- Forces Postgres to build this result set before the outer ORDER BY is
+  -- applied, instead of pulling the sort into this subquery and walking
+  -- companies_pkey in id order (see hotfix header comment above).
+  matched AS MATERIALIZED (
   SELECT c.id
   FROM companies c, params p
   WHERE
@@ -755,7 +767,8 @@ RETURNS TABLE(id uuid) LANGUAGE sql STABLE AS $$
         )
       ELSE true
     END
-  ORDER BY c.id
+  )
+  SELECT matched.id FROM matched ORDER BY matched.id
 $$;
 
 -- Mirrors companies_matching_virtual_filters for /people — same jsonb shape
