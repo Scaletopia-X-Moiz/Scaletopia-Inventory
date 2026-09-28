@@ -150,7 +150,7 @@ describe("applyColumnMap", () => {
   });
 
   it("drops rows with no identity fields (domain, linkedin_url, company_name, full_name, first_name)", () => {
-    const junkRows = [
+    const junkRows: Record<string, string>[] = [
       { Notes: "nothing useful", Industry: "Tech" },
       { Company: "Acme", Notes: "has a name" },
     ];
@@ -337,6 +337,148 @@ describe("fixture: manual-companies.csv", () => {
   it("parses 3 data rows total", () => {
     const { rows } = parseCSV(fixture("manual-companies.csv"));
     expect(rows).toHaveLength(3);
+  });
+});
+
+// ─── fixture: quickenrich-people.csv ─────────────────────────────────────────
+// Anonymized copy of a real QuickEnrich Google Maps export: the real 74-column
+// header row, invented values. A person+company join, one person per row.
+
+describe("fixture: quickenrich-people.csv", () => {
+  const quickEnrich = BUILTIN_PROVIDERS.find((p) => p.sourceKey === "quickenrich")!;
+  const companyMap = quickEnrich.companyColumnMap!;
+  const load = () => parseCSV(fixture("quickenrich-people.csv"));
+
+  it("is a people-primary preset with company sync on", () => {
+    expect(quickEnrich.displayName).toBe("QuickEnrich");
+    expect(quickEnrich.targetTable).toBe("people");
+    expect(quickEnrich.companySyncDefault).toBe(true);
+    expect(quickEnrich.altColumnMap).toEqual(companyMap);
+  });
+
+  it("parses 4 rows, keeping the multi-line quoted description intact", () => {
+    const { headers, rows } = load();
+    expect(headers).toHaveLength(74);
+    expect(rows).toHaveLength(4);
+    // Line ending inside the quoted cell depends on git's autocrlf on checkout.
+    expect(rows[0]["Company Description"].replace(/\r\n/g, "\n")).toBe(
+      'We fight for "injured" people.\nFree consultations, no fee unless we win.'
+    );
+  });
+
+  it("maps every header explicitly on both sides, so nothing is left to the fuzzy matcher", () => {
+    const { headers } = load();
+    for (const h of headers) {
+      expect(quickEnrich.columnMap[h], `people map is missing "${h}"`).toBeTruthy();
+      expect(companyMap[h], `company map is missing "${h}"`).toBeTruthy();
+    }
+  });
+
+  it("maps each people/company field from at most one header (the mapping step keeps only one)", () => {
+    for (const map of [quickEnrich.columnMap, companyMap]) {
+      const seen = new Map<string, string>();
+      for (const [header, field] of Object.entries(map)) {
+        if (field === "ignore" || field === "custom_data") continue;
+        expect(seen.get(field), `"${header}" and "${seen.get(field)}" both map to ${field}`).toBeUndefined();
+        seen.set(field, header);
+      }
+    }
+  });
+
+  it("uses only valid fields for each table", () => {
+    const people = new Set([...PEOPLE_FIELDS, "ignore"]);
+    const companies = new Set([...COMPANIES_FIELDS, "ignore"]);
+    for (const f of Object.values(quickEnrich.columnMap)) expect(people.has(f), f).toBe(true);
+    for (const f of Object.values(companyMap)) expect(companies.has(f), f).toBe(true);
+  });
+
+  it("maps the person fields", () => {
+    const mapped = applyColumnMap(load().rows, quickEnrich.columnMap, "people");
+    expect(mapped).toHaveLength(4);
+    expect(mapped[0]).toMatchObject({
+      full_name: "Jane Example",
+      first_name: "Jane",
+      last_name: "Example",
+      job_title: "Managing Partner",
+      city: "Austin",
+      state: "Texas",
+      country: "United States",
+      linkedin_url: "https://www.linkedin.com/in/jane-example-123",
+      linkedin_username: "jane-example-123",
+      company_name: "Example Injury Law, PLLC",
+      domain: "exampleinjurylaw.com",
+      phone: "+15125550101",
+      phone_type: "mobile",
+    });
+    // Person location, not the company's: Sam lives in Round Rock, the firm is in Austin.
+    expect(mapped[1].city).toBe("Round Rock");
+    expect(mapped[0].custom_data).toMatchObject({
+      "Use AI Is Decision Maker": "yes",
+      "Use AI Confidence": "95",
+      "Updated Practice Area": "car accidents",
+      "Formatted Company Name": "Example Injury Law",
+    });
+  });
+
+  it("keeps the second phone lookup in custom_data when AI Ark found no phone", () => {
+    const mapped = applyColumnMap(load().rows, quickEnrich.columnMap, "people");
+    expect(mapped[1]).not.toHaveProperty("phone");
+    expect(mapped[1].custom_data).toMatchObject({
+      "Normalized Phone Number": "+15125550102",
+      "Phone Type (2)": "fixed_line",
+    });
+  });
+
+  it("never lets status cells or company columns leak into a person", () => {
+    const mapped = applyColumnMap(load().rows, quickEnrich.columnMap, "people");
+    const custom = JSON.stringify(mapped.map((m) => m.custom_data));
+    expect(custom).not.toContain("Status Code");
+    expect(custom).not.toContain("Record Found");
+    expect(mapped[0]).not.toHaveProperty("employee_count");
+    expect(mapped[0]).not.toHaveProperty("industry");
+  });
+
+  it("maps the company block", () => {
+    const mapped = applyColumnMap(load().rows, companyMap, "companies");
+    expect(mapped[0]).toMatchObject({
+      company_name: "Example Injury Law, PLLC",
+      domain: "exampleinjurylaw.com",
+      linkedin_url: "https://www.linkedin.com/company/example-injury-law",
+      employee_count: "6",
+      industry: "law practice",
+      city: "Austin",
+      state: "Texas",
+      country: "United States",
+    });
+    expect(mapped[0]).not.toHaveProperty("website_url");
+    expect(mapped[0]).not.toHaveProperty("phone");
+  });
+
+  it('drops the "your city" placeholder instead of using it as a city', () => {
+    const mapped = applyColumnMap(load().rows, companyMap, "companies");
+    expect(mapped[3]).not.toHaveProperty("city");
+  });
+
+  it("scrubs the failed-lookup godaddysites.com domain and uses the row's own company LinkedIn", () => {
+    const mapped = applyColumnMap(load().rows, companyMap, "companies");
+    const normalized = mapped.map((r) => ({
+      ...r,
+      domain: scrubJunkDomain(normalizeDomain(r.domain as string)),
+      linkedin_url: normalizeLinkedInUrl(r.linkedin_url as string),
+    }));
+    expect(normalized[2].domain).toBeNull();
+    expect(normalized[2].linkedin_url).toBe("https://www.linkedin.com/company/placeholder-works/");
+    // Two people at Example Injury Law, one company row after dedupe.
+    expect(dedupeCompanies(normalized)).toHaveLength(3);
+  });
+
+  it("dedupes people by LinkedIn (4 distinct people)", () => {
+    const mapped = applyColumnMap(load().rows, quickEnrich.columnMap, "people");
+    const normalized = mapped.map((r) => ({
+      ...r,
+      linkedin_url: normalizeLinkedInUrl(r.linkedin_url as string),
+    }));
+    expect(dedupePeople(normalized)).toHaveLength(4);
   });
 });
 

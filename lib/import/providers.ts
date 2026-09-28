@@ -20,6 +20,122 @@ export interface ProviderPreset {
   companySyncDefault?: boolean;
 }
 
+// QuickEnrich company-side map, shared by the QuickEnrich preset's
+// `companyColumnMap` (the "this file also contains company data" sync) and
+// its `altColumnMap` (a companies-only import of the same file). Verified
+// against a real QuickEnrich Google Maps export (see the preset below).
+// Every header is listed, person columns included as "ignore", because an
+// unlisted header falls through to the fuzzy matcher, which would put
+// "Person City" onto the company's city or "Person Linkedin Url" onto its
+// linkedin_url.
+const QUICKENRICH_COMPANY_COLUMN_MAP: Record<string, string> = {
+  // QuickEnrich table plumbing: status cells ("Status Code: 200",
+  // "✅ Record Found"), always-empty action columns, and per-client
+  // lookups. None of it is lead data.
+  "Rows from: Find companies Table": "ignore",
+  "Webhook": "ignore",
+  "Find people": "ignore",
+  "Get Company Info (Lookup Enrichment)": "ignore",
+  "OpenRouter - Company Name Cleaning": "ignore",
+  "AI Ark Phone Enrichment": "ignore",
+  "Phone Verification (AI Ark)": "ignore",
+  "HTTP API (5)": "ignore",
+  "Email Verification (Blitz API) - Icypeas": "ignore",
+  "Email Verification (AI Ark) - Icypeas": "ignore",
+  "Email Verification (Mahabub & Waterfall) - Icypeas": "ignore",
+  "Get External Emails & Phone Numbers": "ignore",
+  "Scaletopia": "ignore",
+  "Leadgenix": "ignore",
+  "Chamber Media": "ignore",
+  "SeedX": "ignore",
+  "Wise Digital": "ignore",
+  "Kynship": "ignore",
+  "Growth Lab": "ignore",
+  "Bigleap": "ignore",
+  "Acceler8": "ignore",
+  "Redo": "ignore",
+  "GoFish": "ignore",
+  "Taktical Digital": "ignore",
+  "Post To Supabase": "ignore",
+  "EmailBison - Create/Update Leads": "ignore",
+  "EmailBison - Update Lead To Fetch ESP": "ignore",
+  "EmailBison - Add Leads In Campaign": "ignore",
+  "Decision Maker Status": "ignore",
+  "HTTP API": "ignore",
+  "HTTP API (2)": "ignore",
+  "HTTP API (3)": "ignore",
+  "HTTP API (4)": "ignore",
+  // Person columns, owned by the people map.
+  "Full Name": "ignore",
+  "First Name": "ignore",
+  "Last Name": "ignore",
+  "Job Title": "ignore",
+  "Person City": "ignore",
+  "Person State": "ignore",
+  "Person Country": "ignore",
+  "Person Linkedin Url": "ignore",
+  "LinkedIn Username (Dedupe)": "ignore",
+  "Phone (AI Ark)": "ignore",
+  "Phone Type (3)": "ignore",
+  "Employee Phone": "ignore",
+  "Employee Phone (2)": "ignore",
+  "Normalized Phone Number": "ignore",
+  "Phone Type": "ignore",
+  "Phone Type (2)": "ignore",
+  "Created At": "ignore",
+  "Updated At": "ignore",
+  "Use AI Is Decision Maker": "ignore",
+  "Use AI Confidence": "ignore",
+  "Use AI Reasoning": "ignore",
+  "Use AI Firm Size Estimate": "ignore",
+  "Use AI Linkedin Title Found": "ignore",
+  "decision maker": "ignore",
+  // The raw legal name ("Leeds Law Firm, PLLC") is the identity: it is
+  // consistent per firm, while "Formatted Company Name" is an LLM cleanup
+  // that varies between rows of the same firm and sometimes truncates
+  // ("Bottini, Bottini & Oswald, PC" -> "Bottini"). Kept in custom_data for
+  // outreach copy.
+  "Company Name": "company_name",
+  "Formatted Company Name": "custom_data",
+  // "Domain" is QuickEnrich's own root domain, identical to "URL/Domain"
+  // and 'Normalize "URL/Domain"' on every row. It is bare (no protocol, no
+  // path, no UTM params). On 23 of 250 rows the website lookup failed and
+  // returned the same unrelated GoDaddy site builder page for 19 different
+  // firms, which QuickEnrich reduces to "godaddysites.com". That host is on
+  // JUNK_DOMAINS, so those rows get no domain (identified by LinkedIn
+  // instead) rather than all merging into one company. "Website (LookUp)"
+  // is deliberately NOT mapped to website_url: push derives the domain from
+  // website_url when domain is empty, and its full host
+  // ("lawofficesof...godaddysites.com") would undo that scrub.
+  "Domain": "domain",
+  "URL/Domain": "ignore",
+  "Normalize \"URL/Domain\"": "ignore",
+  "Website (LookUp)": "ignore",
+  // Two company LinkedIn columns. "Company LinkedIn" (https, one per firm)
+  // comes with the company row; "Company LinkedIn URL" (http) comes from
+  // the website lookup and inherits its failures (it points the same 19
+  // firms at one law office's page), so it is dropped.
+  "Company LinkedIn": "linkedin_url",
+  "Company LinkedIn URL": "ignore",
+  "Employees": "employee_count",
+  "Company Industry": "industry",
+  "Company Description": "description",
+  // "Company City" is empty on 20 rows and "Company City Fallback" fills
+  // those with the literal placeholder "your city", so the fallback is
+  // junk and is ignored.
+  "Company City": "city",
+  "Company City Fallback": "ignore",
+  "Company State": "state",
+  "Company Country": "country",
+  // The firm's practice area, from the search that built the list.
+  // "Practice Area" is "UNKNOWN" on 191 of 250 rows, and "Updated Practice
+  // Area" turns every one of those into "car accidents", so it reads as a
+  // default rather than a finding. Both are kept, in custom_data rather
+  // than `niche`, which is the campaign niche set at import time.
+  "Updated Practice Area": "custom_data",
+  "Practice Area": "custom_data",
+};
+
 export const BUILTIN_PROVIDERS: ProviderPreset[] = [
   {
     sourceKey: "aiark",
@@ -328,6 +444,68 @@ export const BUILTIN_PROVIDERS: ProviderPreset[] = [
     altColumnMap: {},
   },
   {
+    sourceKey: "quickenrich",
+    displayName: "QuickEnrich",
+    targetTable: "people",
+    // Verified against a real QuickEnrich Google Maps export
+    // ("Quickenrich-google-maps-less-than-10-export-*.csv", 250 rows, 74
+    // columns). Despite the name it is NOT a place listing like OutScraper's:
+    // it is a person+company join of decision makers at small firms found
+    // on Google Maps, one person per row with the firm's company block
+    // repeated alongside. It is an export of a QuickEnrich table, so most of
+    // the 74 columns are enrichment step status cells, and every header is
+    // mapped explicitly (see QUICKENRICH_COMPANY_COLUMN_MAP above for why).
+    // There is no email column in this export.
+    columnMap: {
+      ...QUICKENRICH_COMPANY_COLUMN_MAP,
+      "Full Name": "full_name",
+      "First Name": "first_name",
+      "Last Name": "last_name",
+      "Job Title": "job_title",
+      "Person City": "city",
+      "Person State": "state",
+      "Person Country": "country",
+      "Person Linkedin Url": "linkedin_url",
+      "LinkedIn Username (Dedupe)": "linkedin_username",
+      "Company Name": "company_name",
+      // The person's employer domain, used to link the person to the
+      // company row (see lib/import/push.ts).
+      "Domain": "domain",
+      // Two person phone sources, each already in E.164 ("+12193635485")
+      // and each with its own line type column. The AI Ark phone is filled
+      // on 206/250 rows; the second lookup ("Normalized Phone Number",
+      // E.164 form of the mixed-format "Employee Phone (2)", which also
+      // holds "N/A") covers 128, including the 44 rows AI Ark missed. Only
+      // one column can own `phone` (the mapping step keeps one header per
+      // field), so the second number and its type go to custom_data.
+      "Phone (AI Ark)": "phone",
+      "Phone Type (3)": "phone_type",
+      "Normalized Phone Number": "custom_data",
+      "Phone Type (2)": "custom_data",
+      // The table's AI decision maker check, kept for qualification.
+      "Use AI Is Decision Maker": "custom_data",
+      "Use AI Confidence": "custom_data",
+      "Use AI Reasoning": "custom_data",
+      "Use AI Firm Size Estimate": "custom_data",
+      "Use AI Linkedin Title Found": "custom_data",
+      "Created At": "custom_data",
+      "Updated At": "custom_data",
+      // Company block, owned by the company-side map.
+      "Employees": "ignore",
+      "Company Industry": "ignore",
+      "Company Description": "ignore",
+      "Company City": "ignore",
+      "Company State": "ignore",
+      "Company Country": "ignore",
+      "Company LinkedIn": "ignore",
+    },
+    // A companies-only import of the same file (one company per firm after
+    // dedupe) uses the same company-side map.
+    altColumnMap: QUICKENRICH_COMPANY_COLUMN_MAP,
+    companyColumnMap: QUICKENRICH_COMPANY_COLUMN_MAP,
+    companySyncDefault: true,
+  },
+  {
     sourceKey: "clay",
     displayName: "Clay",
     targetTable: "companies",
@@ -560,6 +738,7 @@ export const CANONICAL_SOURCE_KEYS = [
   "blitz",
   "apollo",
   "google-maps",
+  "quickenrich",
   "store-leads",
   "leadfox",
   "builtwith",
