@@ -20,6 +20,7 @@ const MULTI_PARAMS = [
   "country",
   "emailStatus",
   "phoneType",
+  "esp",
 ] as const;
 const SINGLE_PARAMS = ["q", "empmin", "empmax"] as const;
 
@@ -298,6 +299,16 @@ export function FilterSlip({
             excluded={getExcluded("phoneType")}
             onToggle={(id) => toggleInclude("phoneType", id)}
             onToggleExclude={(id) => toggleExclude("phoneType", id)}
+          />
+        </FilterPopover>
+        <FilterPopover label="ESP" count={facetCount("esp")}>
+          <FilterChipGroup
+            title="ESP (email provider)"
+            options={toOptions(options.mxProviders)}
+            selected={getAll("esp")}
+            excluded={getExcluded("esp")}
+            onToggle={(id) => toggleInclude("esp", id)}
+            onToggleExclude={(id) => toggleExclude("esp", id)}
           />
         </FilterPopover>
         <FilterPopover label="Has contact info" count={presenceCount}>

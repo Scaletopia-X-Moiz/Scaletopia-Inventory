@@ -10,6 +10,7 @@ import { PeopleDrawerTrigger } from "@/components/companies/people-drawer-trigge
 import { EmailStatusBadge } from "@/components/people/email-status-badge";
 import { PhoneStatusBadge } from "@/components/people/phone-status-badge";
 import { formatValue } from "@/components/companies/enrichment-list";
+import { mxProviderLabel } from "@/lib/data/mx-provider";
 import { ScrollableTable } from "@/components/shared/scrollable-table";
 
 function formatLastUpdated(value: string | null): string {
@@ -31,6 +32,7 @@ const HEADERS = [
   "Domain",
   "LinkedIn",
   "Email",
+  "ESP",
   "Phone",
   "Industry",
   "Employees",
@@ -143,6 +145,7 @@ export function CompaniesTable({
                   />
                 </span>
               </CompanyCell>
+              <CompanyCell href={`/companies/${row.id}`}>{row.mxProvider ? mxProviderLabel(row.mxProvider) : "—"}</CompanyCell>
               <CompanyCell href={`/companies/${row.id}`} mono>
                 <span className="inline-flex items-center gap-1.5">
                   {row.phone ?? "—"}
