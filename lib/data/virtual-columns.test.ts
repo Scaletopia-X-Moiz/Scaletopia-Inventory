@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import {
+  applyVirtualColumnTypeOverride,
   canOverrideVirtualColumnType,
   MULTI_SELECT_VALUE_CAP,
   filterSet,
@@ -13,6 +14,7 @@ import {
   TYPE_OVERRIDE_OPTIONS,
   type ActiveVirtualColumn,
   type VirtualColumnFilter,
+  type VirtualColumnType,
   type VirtualFilterSet,
 } from "@/lib/data/virtual-columns";
 
@@ -518,8 +520,18 @@ describe("vf/vc URL param round-trip (ticket #34)", () => {
 describe("filter-column type override (ticket #39)", () => {
   it("offers Text, Number and Date as override targets, and switches the operator list per type", () => {
     expect(TYPE_OVERRIDE_OPTIONS).toEqual(["text", "number", "date"]);
-    expect(operatorsForType("number").map((o) => o.id)).toEqual(["is", "is_not", "gt", "lt", "between"]);
-    expect(operatorsForType("date").map((o) => o.id)).toEqual(["on", "before", "after", "between"]);
+    // gte/lte ("at least"/"at most") and on_or_after/on_or_before ("on or
+    // after"/"on or before") round out gt/lt and before/after with inclusive
+    // bounds (ticket #39 fix round 1).
+    expect(operatorsForType("number").map((o) => o.id)).toEqual(["is", "is_not", "gt", "lt", "gte", "lte", "between"]);
+    expect(operatorsForType("date").map((o) => o.id)).toEqual([
+      "on",
+      "before",
+      "after",
+      "on_or_before",
+      "on_or_after",
+      "between",
+    ]);
     expect(operatorsForType("text").map((o) => o.id)).toEqual([
       "is",
       "is_not",
@@ -564,6 +576,57 @@ describe("filter-column type override (ticket #39)", () => {
       JSON.stringify([{ key: "monthly_revenue", type: "number", operator: "is", value: "not-a-number" }])
     );
     expect(parseVirtualFiltersParam(params)).toBeUndefined();
+  });
+
+  it("round-trips the new inclusive Number/Date operators (gte/lte, on_or_after/on_or_before) on the vf param", () => {
+    const filters: VirtualColumnFilter[] = [
+      { key: "monthly_revenue", type: "number", operator: "gte", value: 10000 },
+      { key: "monthly_revenue", type: "number", operator: "lte", value: 50000 },
+      { key: "signed_up_at", type: "date", operator: "on_or_after", value: "2025-01-01" },
+      { key: "signed_up_at", type: "date", operator: "on_or_before", value: "2025-12-31" },
+    ];
+    const params = new URLSearchParams();
+    params.set("vf", serializeVirtualFiltersParam(filterSet(...filters))!);
+    expect(parseVirtualFiltersParam(params)).toEqual(filterSet(...filters));
+  });
+
+  it("drops gte/lte/on_or_after/on_or_before conditions whose value has the wrong shape, same as gt/lt/before/after", () => {
+    const params = new URLSearchParams();
+    params.set(
+      "vf",
+      JSON.stringify([
+        { key: "a", type: "number", operator: "gte", value: "50" }, // string, not number
+        { key: "b", type: "date", operator: "on_or_before", value: "nope" }, // not an ISO date
+        { key: "c", type: "number", operator: "lte", value: 7 }, // valid — survives
+      ])
+    );
+    expect(parseVirtualFiltersParam(params)).toEqual(filterSet({ key: "c", type: "number", operator: "lte", value: 7 }));
+  });
+
+  describe("applyVirtualColumnTypeOverride", () => {
+    it("clears operator/value when the type actually changes, leaving key/source/quantifier untouched", () => {
+      const condition = {
+        key: "monthly_revenue",
+        type: "text" as VirtualColumnType,
+        operator: "contains",
+        value: "10k",
+        source: "company" as const,
+        quantifier: "all" as const,
+      };
+      expect(applyVirtualColumnTypeOverride(condition, "number")).toEqual({
+        key: "monthly_revenue",
+        type: "number",
+        operator: "",
+        value: undefined,
+        source: "company",
+        quantifier: "all",
+      });
+    });
+
+    it("is a no-op (returns the same reference) when the type doesn't change", () => {
+      const condition = { key: "monthly_revenue", type: "number" as VirtualColumnType, operator: "gt", value: 10 };
+      expect(applyVirtualColumnTypeOverride(condition, "number")).toBe(condition);
+    });
   });
 });
 

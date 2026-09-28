@@ -15,12 +15,16 @@ export type VirtualColumnOperator =
   | "is_not_empty"
   | "gt"
   | "lt"
+  | "gte"
+  | "lte"
   | "between"
   | "is_true"
   | "is_false"
   | "on"
   | "before"
-  | "after";
+  | "after"
+  | "on_or_after"
+  | "on_or_before";
 
 export interface VirtualColumnFilter {
   /** The custom_data key this filter reads, e.g. "lead_score". */
@@ -106,21 +110,29 @@ export const TEXT_OPERATORS: VirtualColumnOperatorMeta[] = [
 
 /** Number: `between` carries a [min, max] numeric tuple; the rest a single
  * number. Values are stored as real JSON numbers (not strings) so the SQL
- * `enrichment_numeric(f->'value')` read casts them directly (ticket #35). */
+ * `enrichment_numeric(f->'value')` read casts them directly (ticket #35).
+ * `gte`/`lte` (at least / at most) round out `gt`/`lt` with inclusive bounds
+ * (ticket #39). */
 export const NUMBER_OPERATORS: VirtualColumnOperatorMeta[] = [
   { id: "is", label: "is", requiresValue: true },
   { id: "is_not", label: "is not", requiresValue: true },
   { id: "gt", label: "greater than", requiresValue: true },
   { id: "lt", label: "less than", requiresValue: true },
+  { id: "gte", label: "at least", requiresValue: true },
+  { id: "lte", label: "at most", requiresValue: true },
   { id: "between", label: "between", requiresRange: true },
 ];
 
 /** Date: ISO `YYYY-MM-DD` strings, compared chronologically SQL-side via
- * enrichment_date_text (ticket #35). `between` carries a [from, to] tuple. */
+ * enrichment_date_text (ticket #35). `between` carries a [from, to] tuple.
+ * `on_or_before`/`on_or_after` round out `before`/`after` with inclusive
+ * bounds (ticket #39). */
 export const DATE_OPERATORS: VirtualColumnOperatorMeta[] = [
   { id: "on", label: "on", requiresValue: true },
   { id: "before", label: "before", requiresValue: true },
   { id: "after", label: "after", requiresValue: true },
+  { id: "on_or_before", label: "on or before", requiresValue: true },
+  { id: "on_or_after", label: "on or after", requiresValue: true },
   { id: "between", label: "between", requiresRange: true },
 ];
 
@@ -180,6 +192,24 @@ export const TYPE_OVERRIDE_OPTIONS: VirtualColumnType[] = ["text", "number", "da
  * discovered type — see TYPE_OVERRIDE_OPTIONS. */
 export function canOverrideVirtualColumnType(type: VirtualColumnType): boolean {
   return TYPE_OVERRIDE_OPTIONS.includes(type);
+}
+
+/** Applies a type override to a filter condition's editable fields: switching
+ * type invalidates `operator` (the operator list differs per type) and
+ * `value` (its shape/validity differs per type too), so both are cleared
+ * whenever the type actually changes. `key`/`source`/`quantifier` (and
+ * anything else on the caller's condition shape) are left untouched — it's
+ * still the same underlying field, just reinterpreted (ticket #39).
+ *
+ * A no-op switch (nextType === the condition's current type) returns the
+ * same object reference unchanged, so a caller can invoke this unconditionally
+ * on every dropdown change and use `!==` to decide whether anything actually
+ * needs to be committed, instead of duplicating the equality check itself. */
+export function applyVirtualColumnTypeOverride<
+  T extends { type: VirtualColumnType | string; operator: string; value?: VirtualColumnFilter["value"] },
+>(condition: T, nextType: VirtualColumnType): T {
+  if (nextType === condition.type) return condition;
+  return { ...condition, type: nextType, operator: "", value: undefined };
 }
 
 /** Maps an enrichment field's discovered type (lib/data/enrichment-fields.ts)

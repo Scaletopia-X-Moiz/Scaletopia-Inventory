@@ -6,6 +6,7 @@ import { Building2, Check, ChevronDown, Plus, Search, Users, X } from "lucide-re
 import { cn } from "@/lib/utils";
 import {
   ADDABLE_ENRICHMENT_TYPES,
+  applyVirtualColumnTypeOverride,
   canOverrideVirtualColumnType,
   isLowCardinalityTextField,
   operatorsForType,
@@ -755,6 +756,17 @@ const INPUT_TYPE: Record<VirtualColumnType, "text" | "number" | "date"> = {
   date: "date",
 };
 
+/** Sentence-case labels for the type-override dropdown (ticket #39 review
+ * nit) — the raw VirtualColumnType values are lowercase identifiers, not
+ * display copy. */
+const TYPE_OVERRIDE_LABEL: Record<VirtualColumnType, string> = {
+  text: "Text",
+  number: "Number",
+  boolean: "Boolean",
+  list: "List",
+  date: "Date",
+};
+
 /** The raw input strings a condition's value control holds (`a` for a single
  * value / range low end, `b` for a range high end). Kept as strings (what the
  * DOM inputs produce) and coerced to the typed value at edit time. */
@@ -908,6 +920,13 @@ function ConditionEditor({
   // selfEntity so lookups/matching use the real (source, key) identity
   // (ticket #30).
   const conditionSource = condition.source ?? selfEntity;
+  // The type the field was actually discovered as (same lookup changeColumn
+  // uses), so the type-override dropdown can flag which option is the
+  // as-imported one rather than making every option look equally arbitrary
+  // (ticket #39 review nit). `undefined` when discovery hasn't resolved the
+  // field yet or it's a stale key no longer in the sample.
+  const discoveredField = fields?.find((f) => f.key === condition.key && f.source === conditionSource);
+  const discoveredType = discoveredField ? ADDABLE_ENRICHMENT_TYPES[discoveredField.type] : undefined;
   const authoritativeValues =
     columnType === "text" && fields !== null
       ? (fields.find((f) => f.key === condition.key && f.source === conditionSource)?.sampleValues ?? [])
@@ -953,12 +972,13 @@ function ConditionEditor({
 
   /** Overrides the condition's type away from what the field was discovered
    * as (ticket #39 — e.g. treat a Text "monthly sales revenue" field as
-   * Number so it gets greater-than/less-than). Resets operator/value since
-   * the operator list (and value shape) differs per type; key/source/
-   * quantifier are unaffected — this is still the same underlying field. */
+   * Number so it gets greater-than/less-than). The reset (operator/value
+   * cleared, key/source/quantifier untouched) is the pure, unit-tested
+   * applyVirtualColumnTypeOverride helper; a no-op switch returns the same
+   * object back, so it's skipped rather than pushed as a spurious edit. */
   function changeType(nextType: VirtualColumnType) {
-    if (nextType === condition.type) return;
-    onChange({ ...condition, type: nextType, operator: "", value: undefined });
+    const next = applyVirtualColumnTypeOverride(condition, nextType);
+    if (next !== condition) onChange(next);
   }
 
   function changeOperator(op: string) {
@@ -1048,7 +1068,8 @@ function ConditionEditor({
         >
           {TYPE_OVERRIDE_OPTIONS.map((t) => (
             <option key={t} value={t}>
-              {t}
+              {TYPE_OVERRIDE_LABEL[t]}
+              {discoveredType === t ? " (detected)" : ""}
             </option>
           ))}
         </select>
