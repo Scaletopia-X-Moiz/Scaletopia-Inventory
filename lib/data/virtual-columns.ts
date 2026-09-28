@@ -181,11 +181,16 @@ export function operatorsForType(type: VirtualColumnType): VirtualColumnOperator
  * Number operators like greater-than/less-than, without re-importing). Text,
  * Number and Date only: Boolean and List stay fixed to their discovered type,
  * since a value-less boolean predicate or an array-shaped list value doesn't
- * carry over the same way. Overriding the type is a pure filter-UI concern , 
- * the condition's `type` field already drives both operator selection (this
- * file) and the SQL predicate's dispatch (virtual-columns.sql's
- * virtual_filter_predicate_matches reads `f->>'type'` straight off the same
- * payload), so no new field or SQL change is needed to support it. */
+ * carry over the same way.
+ *
+ * The override itself needs no SQL change: the condition's `type` field
+ * already drives both operator selection (this file) and the SQL
+ * predicate's dispatch (virtual-columns.sql's virtual_filter_predicate_matches
+ * reads `f->>'type'` straight off the same payload). The gte/lte and
+ * on_or_after/on_or_before operators this type list exposes are a separate
+ * matter: those did need a real SQL change (a new comparison branch per
+ * operator, plus a perf-motivated function split), see
+ * lib/data/ticket-39-number-date-inclusive-operators.sql. */
 export const TYPE_OVERRIDE_OPTIONS: VirtualColumnType[] = ["text", "number", "date"];
 
 /** Whether a filter condition's type can be switched away from its
