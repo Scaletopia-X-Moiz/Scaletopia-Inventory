@@ -27,14 +27,34 @@
 -- 60x slower. It relies on the index below. person_push_status_counts keeps
 -- the simpler joined-row form (t25_esp_filter_v3...): the id-set form timed
 -- out there. Rollback also needs: DROP INDEX CONCURRENTLY companies_mx_provider_id_idx;
+--
+-- Fix applied the same day (migration t25_esp_filter_v5_people_plpgsql_custom_plan):
+-- people_matching_virtual_filters is now LANGUAGE plpgsql with
+-- SET plan_cache_mode = force_custom_plan, and RETURN QUERY runs the same query
+-- as before. PostgREST passes `filters` as a runtime value, so the sql body was
+-- always planned generically and nothing folded: ESP filters timed out (30s+)
+-- and the push filter took about 11s. Planned per call with the value, ESP
+-- calls take 0.1-0.3s and the push filter 0.2s, with identical id sets. The
+-- rollback file needs no change: CREATE OR REPLACE there resets language and SET.
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS companies_mx_provider_id_idx ON public.companies (mx_provider, id);
 
 CREATE OR REPLACE FUNCTION public.people_matching_virtual_filters(filters jsonb DEFAULT '{}'::jsonb)
  RETURNS TABLE(id uuid)
- LANGUAGE sql
+ LANGUAGE plpgsql
  STABLE
+ SET plan_cache_mode TO 'force_custom_plan'
 AS $function$
+#variable_conflict use_column
+BEGIN
+  -- Ticket #25 fix: plpgsql + force_custom_plan so the query below is planned
+  -- per call with the actual `filters` value. PostgREST passes filters as a
+  -- runtime value (json_to_record over the request body), so the old LANGUAGE
+  -- sql body was always planned generically: no filter branch folded away,
+  -- the companies join ran once per person (about 14s with no ESP, 30s+
+  -- timeouts with one). Planned with the value, the no-ESP branches fold as
+  -- designed and the ESP id sets are hashed. The query is unchanged.
+  RETURN QUERY
   WITH params AS (
     SELECT
       NULLIF(trim(both from (filters->>'search')), '') AS search,
@@ -188,7 +208,8 @@ AS $function$
       )
       ELSE true
     END
-  ORDER BY p.id
+  ORDER BY p.id;
+END
 $function$
 
 CREATE OR REPLACE FUNCTION public.companies_matching_virtual_filters(filters jsonb DEFAULT '{}'::jsonb)
