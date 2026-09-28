@@ -55,7 +55,7 @@ $$;
 -- enrichment formatting parses instead of falling through to junk: "$12,000",
 -- " 5000 ", "12,000.50" all read as their plain numeric value. Stripped once
 -- into the WHEN's own condition and again in its THEN (rather than hoisted
--- into a nested CASE) to keep this a single flat CASE — see the file header
+-- into a nested CASE) to keep this a single flat CASE, see the file header
 -- on why a nested CASE inside a per-row-called function is avoided here. A
 -- range like "$500K-$1M" still comes out NULL: stripping only removes
 -- currency symbols/commas/whitespace, so the letters and the middle "-"
@@ -278,7 +278,7 @@ LANGUAGE sql IMMUTABLE AS $$
 $$;
 
 -- `gte`/`lte` (at least / at most) round out `gt`/`lt` with inclusive bounds
--- (ticket #39) — same IS NOT NULL guard as every other branch, just >= / <=.
+-- (ticket #39), same IS NOT NULL guard as every other branch, just >= / <=.
 CREATE OR REPLACE FUNCTION number_filter_matches(data jsonb, f jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
   SELECT CASE f->>'operator'
@@ -385,7 +385,7 @@ LANGUAGE sql IMMUTABLE AS $$
 $$;
 
 -- `on_or_after`/`on_or_before` round out `after`/`before` with inclusive
--- bounds (ticket #39) — same IS NOT NULL guard as every other branch, just
+-- bounds (ticket #39), same IS NOT NULL guard as every other branch, just
 -- >= / <=.
 CREATE OR REPLACE FUNCTION date_filter_matches(data jsonb, f jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$

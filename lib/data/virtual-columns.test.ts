@@ -563,7 +563,7 @@ describe("filter-column type override (ticket #39)", () => {
       "vf",
       JSON.stringify([
         { key: "a", type: "currency", operator: "gt", value: 10 }, // not a real VirtualColumnType
-        { key: "b", type: "number", operator: "gt", value: 10 }, // valid — survives
+        { key: "b", type: "number", operator: "gt", value: 10 }, // valid, survives
       ])
     );
     expect(parseVirtualFiltersParam(params)).toEqual(filterSet({ key: "b", type: "number", operator: "gt", value: 10 }));
@@ -597,7 +597,7 @@ describe("filter-column type override (ticket #39)", () => {
       JSON.stringify([
         { key: "a", type: "number", operator: "gte", value: "50" }, // string, not number
         { key: "b", type: "date", operator: "on_or_before", value: "nope" }, // not an ISO date
-        { key: "c", type: "number", operator: "lte", value: 7 }, // valid — survives
+        { key: "c", type: "number", operator: "lte", value: 7 }, // valid, survives
       ])
     );
     expect(parseVirtualFiltersParam(params)).toEqual(filterSet({ key: "c", type: "number", operator: "lte", value: 7 }));

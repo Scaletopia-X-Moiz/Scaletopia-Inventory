@@ -757,7 +757,7 @@ const INPUT_TYPE: Record<VirtualColumnType, "text" | "number" | "date"> = {
 };
 
 /** Sentence-case labels for the type-override dropdown (ticket #39 review
- * nit) — the raw VirtualColumnType values are lowercase identifiers, not
+ * nit), the raw VirtualColumnType values are lowercase identifiers, not
  * display copy. */
 const TYPE_OVERRIDE_LABEL: Record<VirtualColumnType, string> = {
   text: "Text",
@@ -971,7 +971,7 @@ function ConditionEditor({
   }
 
   /** Overrides the condition's type away from what the field was discovered
-   * as (ticket #39 — e.g. treat a Text "monthly sales revenue" field as
+   * as (ticket #39, e.g. treat a Text "monthly sales revenue" field as
    * Number so it gets greater-than/less-than). The reset (operator/value
    * cleared, key/source/quantifier untouched) is the pure, unit-tested
    * applyVirtualColumnTypeOverride helper; a no-op switch returns the same

@@ -177,19 +177,19 @@ export function operatorsForType(type: VirtualColumnType): VirtualColumnOperator
 
 /** Types a user can switch a filter condition's column to from the filter
  * builder itself, overriding the type the enrichment field was discovered as
- * (ticket #39 — "monthly sales revenue" imported as Text should still get
+ * (ticket #39, "monthly sales revenue" imported as Text should still get
  * Number operators like greater-than/less-than, without re-importing). Text,
  * Number and Date only: Boolean and List stay fixed to their discovered type,
  * since a value-less boolean predicate or an array-shaped list value doesn't
- * carry over the same way. Overriding the type is a pure filter-UI concern —
+ * carry over the same way. Overriding the type is a pure filter-UI concern , 
  * the condition's `type` field already drives both operator selection (this
  * file) and the SQL predicate's dispatch (virtual-columns.sql's
  * virtual_filter_predicate_matches reads `f->>'type'` straight off the same
- * payload) — so no new field or SQL change is needed to support it. */
+ * payload), so no new field or SQL change is needed to support it. */
 export const TYPE_OVERRIDE_OPTIONS: VirtualColumnType[] = ["text", "number", "date"];
 
 /** Whether a filter condition's type can be switched away from its
- * discovered type — see TYPE_OVERRIDE_OPTIONS. */
+ * discovered type, see TYPE_OVERRIDE_OPTIONS. */
 export function canOverrideVirtualColumnType(type: VirtualColumnType): boolean {
   return TYPE_OVERRIDE_OPTIONS.includes(type);
 }
@@ -198,7 +198,7 @@ export function canOverrideVirtualColumnType(type: VirtualColumnType): boolean {
  * type invalidates `operator` (the operator list differs per type) and
  * `value` (its shape/validity differs per type too), so both are cleared
  * whenever the type actually changes. `key`/`source`/`quantifier` (and
- * anything else on the caller's condition shape) are left untouched — it's
+ * anything else on the caller's condition shape) are left untouched, it's
  * still the same underlying field, just reinterpreted (ticket #39).
  *
  * A no-op switch (nextType === the condition's current type) returns the
