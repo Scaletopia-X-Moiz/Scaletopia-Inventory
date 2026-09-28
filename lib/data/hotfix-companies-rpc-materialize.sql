@@ -19,8 +19,8 @@
 -- query shape changes, from "scan in id order while filtering" to "filter,
 -- then sort the results by id".
 --
--- Not yet applied to production. This file is the fix to run in the
--- Supabase SQL editor; hotfix-companies-rpc-materialize-rollback.sql
+-- Applied to production 2026-09-28 (migration companies_rpc_materialize_matched_ids).
+-- hotfix-companies-rpc-materialize-rollback.sql
 -- restores the current live definition if this needs to be reverted.
 
 CREATE OR REPLACE FUNCTION public.companies_matching_virtual_filters(filters jsonb DEFAULT '{}'::jsonb)
