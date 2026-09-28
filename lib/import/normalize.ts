@@ -28,6 +28,11 @@ export const JUNK_DOMAINS = new Set([
   "squarespace.com",
   "wordpress.com",
   "blogspot.com",
+  // GoDaddy's site builder root. Every GoDaddy-built site lives on a
+  // subdomain of it, so as a bare domain it identifies no one company.
+  // QuickEnrich exports reduce a failed website lookup to it (see the
+  // quickenrich preset in lib/import/providers.ts).
+  "godaddysites.com",
   "linkedin.com",
   "twitter.com",
   "instagram.com",

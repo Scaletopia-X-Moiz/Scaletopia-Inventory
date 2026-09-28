@@ -117,6 +117,14 @@ describe("scrubJunkDomain", () => {
     expect(scrubJunkDomain("wix.com")).toBeNull();
   });
 
+  it("returns null for godaddysites.com (site builder root, as QuickEnrich reduces a failed website lookup)", () => {
+    expect(scrubJunkDomain("godaddysites.com")).toBeNull();
+  });
+
+  it("keeps a real subdomain of a site builder (only the bare root is junk)", () => {
+    expect(scrubJunkDomain("somefirm.godaddysites.com")).toBe("somefirm.godaddysites.com");
+  });
+
   it("passes through a legitimate domain", () => {
     expect(scrubJunkDomain("acme.com")).toBe("acme.com");
   });
