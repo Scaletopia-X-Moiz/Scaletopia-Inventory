@@ -65,69 +65,68 @@ $$;
 -- pull the whole operator dispatch out into this small, flat, IMMUTABLE
 -- helper, so number_filter_matches itself (below) goes back to being a
 -- two-call, zero-branch body, well under whatever threshold the planner
--- uses. `row_value` is the row's already-cast numeric (the caller computes
--- it once via enrichment_numeric and hands it in), so this function never
--- reads `data` and needs no key lookup of its own. Every arm stays a single
+-- uses. `row_value` is the row's raw jsonb value. It is cast inside each
+-- arm so the argument the caller passes stays a cheap `data -> key`
+-- expression, which keeps this helper inlinable (Postgres will not inline a
+-- function whose multiply-referenced parameter receives an expensive
+-- argument, and an enrichment_numeric(...) call is expensive). Every arm stays a single
 -- flat comparison, no CASE-inside-CASE, no SubLink, matching the file's
 -- inlining rules even though (like list_contains_matches) this particular
 -- helper may itself stay opaque, an opaque call from an already-inlined,
 -- near-trivial caller is the same cheap shape list_filter_matches already
 -- proved out.
-CREATE OR REPLACE FUNCTION number_compare_matches(row_value numeric, op text, val jsonb) RETURNS boolean
+CREATE OR REPLACE FUNCTION number_compare_matches(row_value jsonb, op text, val jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
   SELECT CASE op
-    WHEN 'is' THEN row_value = enrichment_numeric(val)
-    WHEN 'is_not' THEN row_value <> enrichment_numeric(val)
-    WHEN 'gt' THEN row_value > enrichment_numeric(val)
-    WHEN 'lt' THEN row_value < enrichment_numeric(val)
-    WHEN 'gte' THEN row_value >= enrichment_numeric(val)
-    WHEN 'lte' THEN row_value <= enrichment_numeric(val)
-    WHEN 'between' THEN row_value BETWEEN enrichment_numeric(val->0) AND enrichment_numeric(val->1)
+    WHEN 'is' THEN enrichment_numeric(row_value) = enrichment_numeric(val)
+    WHEN 'is_not' THEN enrichment_numeric(row_value) <> enrichment_numeric(val)
+    WHEN 'gt' THEN enrichment_numeric(row_value) > enrichment_numeric(val)
+    WHEN 'lt' THEN enrichment_numeric(row_value) < enrichment_numeric(val)
+    WHEN 'gte' THEN enrichment_numeric(row_value) >= enrichment_numeric(val)
+    WHEN 'lte' THEN enrichment_numeric(row_value) <= enrichment_numeric(val)
+    WHEN 'between' THEN enrichment_numeric(row_value) BETWEEN enrichment_numeric(val->0) AND enrichment_numeric(val->1)
     ELSE false
   END
 $$;
 
--- Thin dispatcher (ticket #39 fix round 2): reads the row's numeric value
--- once via enrichment_numeric for the NULL guard, once more to hand to
--- number_compare_matches (a FROM subquery would let it read `data` only
--- once, but a FROM clause is exactly what blocks Postgres's function
--- inliner, see enrichment_numeric's comment above, so two calls is the
--- flattest shape available). The NULL guard on the left of the AND makes
+-- Thin dispatcher (ticket #39 fix round 2): casts the row value via
+-- enrichment_numeric for the NULL guard, then hands the raw jsonb to
+-- number_compare_matches (no FROM subquery, since a FROM clause blocks
+-- Postgres's function inliner, see enrichment_numeric's comment above). The NULL guard on the left of the AND makes
 -- the whole expression false whenever the row value doesn't cast, no
 -- matter what number_compare_matches itself returns.
 CREATE OR REPLACE FUNCTION number_filter_matches(data jsonb, f jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
   SELECT enrichment_numeric(data -> (f->>'key')) IS NOT NULL
-    AND number_compare_matches(enrichment_numeric(data -> (f->>'key')), f->>'operator', f->'value')
+    AND number_compare_matches(data -> (f->>'key'), f->>'operator', f->'value')
 $$;
 
 -- PERF SPLIT (ticket #39 fix round 2): same reasoning as number_compare_matches
 -- above, adding on_or_after/on_or_before took date_filter_matches to 6
 -- operator arms (was 4), the exact arm count that broke text_filter_matches's
--- inlining on production. `row_value` is the row's already-cast date text
--- (enrichment_date_text, computed once by the caller), so this stays a small,
--- flat, IMMUTABLE helper with no lookup of its own.
-CREATE OR REPLACE FUNCTION date_compare_matches(row_value text, op text, val jsonb) RETURNS boolean
+-- inlining on production. `row_value` is the row's raw jsonb value, cast
+-- inside each arm for the same inlining reason as number_compare_matches
+-- (the caller passes only a cheap `data -> key` expression).
+CREATE OR REPLACE FUNCTION date_compare_matches(row_value jsonb, op text, val jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
   SELECT CASE op
-    WHEN 'on' THEN row_value = enrichment_date_text(val)
-    WHEN 'before' THEN row_value < enrichment_date_text(val)
-    WHEN 'after' THEN row_value > enrichment_date_text(val)
-    WHEN 'on_or_before' THEN row_value <= enrichment_date_text(val)
-    WHEN 'on_or_after' THEN row_value >= enrichment_date_text(val)
-    WHEN 'between' THEN row_value BETWEEN enrichment_date_text(val->0) AND enrichment_date_text(val->1)
+    WHEN 'on' THEN enrichment_date_text(row_value) = enrichment_date_text(val)
+    WHEN 'before' THEN enrichment_date_text(row_value) < enrichment_date_text(val)
+    WHEN 'after' THEN enrichment_date_text(row_value) > enrichment_date_text(val)
+    WHEN 'on_or_before' THEN enrichment_date_text(row_value) <= enrichment_date_text(val)
+    WHEN 'on_or_after' THEN enrichment_date_text(row_value) >= enrichment_date_text(val)
+    WHEN 'between' THEN enrichment_date_text(row_value) BETWEEN enrichment_date_text(val->0) AND enrichment_date_text(val->1)
     ELSE false
   END
 $$;
 
 -- Thin dispatcher (ticket #39 fix round 2), mirrors number_filter_matches
--- above: enrichment_date_text is called twice (once for the NULL guard, once
--- to hand the value to date_compare_matches) rather than once through a FROM
--- subquery, since a FROM clause would block Postgres's function inliner
--- outright (see enrichment_numeric's comment). The NULL guard makes the
+-- above: enrichment_date_text runs for the NULL guard, then the raw jsonb
+-- goes to date_compare_matches (no FROM subquery, since a FROM clause would
+-- block Postgres's function inliner, see enrichment_numeric's comment). The NULL guard makes the
 -- whole expression false whenever the row value doesn't parse as an ISO date.
 CREATE OR REPLACE FUNCTION date_filter_matches(data jsonb, f jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
   SELECT enrichment_date_text(data -> (f->>'key')) IS NOT NULL
-    AND date_compare_matches(enrichment_date_text(data -> (f->>'key')), f->>'operator', f->'value')
+    AND date_compare_matches(data -> (f->>'key'), f->>'operator', f->'value')
 $$;
