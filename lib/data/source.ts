@@ -14,6 +14,8 @@ const SOURCE_ALIASES: Record<string, string> = {
   "apollo-scraped": "apollo-scraped",
   "store-leads": "store-leads",
   "clay-people": "clay",
+  // Import source key for QuickEnrich exports (lib/import/providers.ts).
+  quickenrich: "quickenrich",
 };
 
 const CANONICAL_LABELS: Record<string, string> = {
@@ -23,6 +25,7 @@ const CANONICAL_LABELS: Record<string, string> = {
   "apollo-scraped": "Apollo (scraped)",
   "store-leads": "Store Leads",
   clay: "Clay",
+  quickenrich: "QuickEnrich",
 };
 
 /** Splits a raw source string on `,` or `&`, trims, dedupes, and maps each

@@ -44,7 +44,7 @@ WHERE tablename = '{table}' AND indexdef LIKE '%UNIQUE%'
 ### Step 1: Validate Inputs
 
 **Source tag must be from canonical set:**
-- `aiark`, `blitz`, `apollo`, `google-maps`, `store-leads`, `builtwith`, `clutch`, `crunchbase`, `yelp`, `salesnav`, `apollo`, `manual-csv`
+- `aiark`, `blitz`, `apollo`, `google-maps`, `quickenrich`, `store-leads`, `builtwith`, `clutch`, `crunchbase`, `yelp`, `salesnav`, `apollo`, `manual-csv`
 
 If unknown provider, ASK — don't invent.
 
