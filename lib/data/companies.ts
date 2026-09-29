@@ -4,6 +4,11 @@ import { normalizeSourceTokens, sourceLabel } from "@/lib/data/source";
 import { countryLabel } from "@/lib/data/country";
 import { industryLabel } from "@/lib/data/industry";
 import { emailStatusLabel } from "@/lib/data/email-status";
+import {
+  isMxProviderFilterActive,
+  mxProviderExcludeOrClause,
+  mxProviderLabel,
+} from "@/lib/data/mx-provider";
 import { EMPLOYEE_BUCKETS, employeeBucketOf } from "@/lib/data/employee-size";
 import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
 import { sortByLastUpdatedDesc } from "@/lib/data/sort";
@@ -36,6 +41,9 @@ export interface CompanyListFilters {
   phone?: SingleSelectFilter;
   emailStatus?: IncludeExclude;
   phoneType?: IncludeExclude;
+  /** ESP (companies.mx_provider) include/exclude, ticket #25. Exclude keeps
+   * companies with no ESP recorded, matching the SQL RPCs. */
+  mxProvider?: IncludeExclude;
   /** Restrict to companies a push run touched — the companies linked (via
    * people.company_id) to the people tagged in `push_job_records` for this job
    * (#123). This is the People→company link a GHL Companies-triggered push
@@ -86,6 +94,8 @@ export interface CompanyListRow {
   email: string | null;
   emailStatus: string | null;
   emailVerifiedAt: string | null;
+  /** ESP, raw companies.mx_provider (google/microsoft/other/none). */
+  mxProvider: string | null;
   niche: string | null;
   sources: string[];
   qualityTier: string | null;
@@ -121,6 +131,7 @@ export interface CompanyFilterOptions {
   employeeBuckets: { id: string; label: string }[];
   emailStatuses: FilterOption[];
   phoneTypes: FilterOption[];
+  mxProviders: FilterOption[];
 }
 
 interface RawCompanyRow {
@@ -142,6 +153,7 @@ interface RawCompanyRow {
   email: string | null;
   email_status: string | null;
   email_verified_at: string | null;
+  mx_provider: string | null;
   source: string | null;
   niche: string | null;
   quality_tier: string | null;
@@ -149,7 +161,7 @@ interface RawCompanyRow {
 }
 
 const LIST_COLUMNS =
-  "id,company_name,brand_name,domain,website_url,linkedin_url,industry,employee_count,city,state,country,phone,phone_type,phone_status,phone_verified_at,email,email_status,email_verified_at,source,niche,quality_tier,last_updated";
+  "id,company_name,brand_name,domain,website_url,linkedin_url,industry,employee_count,city,state,country,phone,phone_type,phone_status,phone_verified_at,email,email_status,email_verified_at,mx_provider,source,niche,quality_tier,last_updated";
 
 function employeeBucketOrClause(bucketIds: string[]): string {
   const buckets = EMPLOYEE_BUCKETS.filter((b) => bucketIds.includes(b.id));
@@ -239,7 +251,21 @@ function applyCompanyFilters(query: any, filters: CompanyListFilters): any {
   q = applyPresenceFilter(q, "phone", filters.phone);
   q = applyScalarIncludeExclude(q, "email_status", filters.emailStatus);
   q = applyScalarIncludeExclude(q, "phone_type", filters.phoneType);
+  q = applyMxProviderFilter(q, filters.mxProvider);
 
+  return q;
+}
+
+/** ESP filter (ticket #25). Include is a plain `.in`; exclude uses an `or`
+ * that keeps NULL-ESP companies, so this PostgREST path and the SQL RPC path
+ * (companies_matching_virtual_filters, used once a virtual or push-status
+ * filter is also active) return the same companies. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyMxProviderFilter(query: any, filter: IncludeExclude | undefined): any {
+  if (!isMxProviderFilterActive(filter)) return query;
+  let q = query;
+  if (filter!.exclude.length) q = q.or(mxProviderExcludeOrClause("mx_provider", filter!.exclude));
+  if (filter!.include.length) q = q.in("mx_provider", filter!.include);
   return q;
 }
 
@@ -336,6 +362,7 @@ function toListRow(row: RawCompanyRow): CompanyListRow {
     email: row.email,
     emailStatus: row.email_status,
     emailVerifiedAt: row.email_verified_at,
+    mxProvider: row.mx_provider,
     niche: row.niche,
     sources: normalizeSourceTokens(row.source),
     qualityTier: row.quality_tier,
@@ -1050,6 +1077,9 @@ interface CompanyFilterOptionsRpcResult {
   countries: FacetIdCount[];
   emailStatuses: FacetIdCount[];
   phoneTypes: FacetIdCount[];
+  /** Added by the T25 migration; optional so a DB without it degrades to an
+   * empty ESP facet instead of a crash. */
+  mxProviders?: FacetIdCount[];
 }
 
 /** Serializes CompanyListFilters into the jsonb shape company_filter_options
@@ -1073,6 +1103,7 @@ export function toFilterOptionsRpcPayload(filters: CompanyListFilters): Record<s
     country: filters.country ?? { include: [], exclude: [] },
     emailStatus: filters.emailStatus ?? { include: [], exclude: [] },
     phoneType: filters.phoneType ?? { include: [], exclude: [] },
+    mxProvider: filters.mxProvider ?? { include: [], exclude: [] },
     virtualFilters: filters.virtualFilters ?? { combinator: "and", groups: [] },
     pushStatus: pushStatusRpcPayload(filters.pushStatus),
   };
@@ -1119,6 +1150,9 @@ export async function getCompanyFilterOptions(
       .sort(sortByCountDesc),
     phoneTypes: result.phoneTypes
       .map(({ id, count }) => ({ id, label: id, count }))
+      .sort(sortByCountDesc),
+    mxProviders: (result.mxProviders ?? [])
+      .map(({ id, count }) => ({ id, label: mxProviderLabel(id), count }))
       .sort(sortByCountDesc),
   };
 }

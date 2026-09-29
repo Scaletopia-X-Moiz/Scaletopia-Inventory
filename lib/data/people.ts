@@ -4,6 +4,7 @@ import { normalizeSourceTokens, sourceLabel } from "@/lib/data/source";
 import { countryLabel } from "@/lib/data/country";
 import { industryLabel } from "@/lib/data/industry";
 import { emailStatusLabel } from "@/lib/data/email-status";
+import { isMxProviderFilterActive, mxProviderLabel } from "@/lib/data/mx-provider";
 import { EMPLOYEE_BUCKETS, employeeBucketOf } from "@/lib/data/employee-size";
 import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
 import { sortByLastUpdatedDesc } from "@/lib/data/sort";
@@ -36,6 +37,13 @@ export interface PersonListFilters {
   phone?: SingleSelectFilter;
   emailStatus?: IncludeExclude;
   phoneType?: IncludeExclude;
+  /** ESP include/exclude, ticket #25. People have no ESP column: this reads
+   * the linked company's companies.mx_provider, so it can only be evaluated
+   * in SQL (people_matching_virtual_filters LEFT JOINs companies). An active
+   * ESP filter therefore sends the query down the RPC path, like a virtual or
+   * push-status filter does; see resolveVirtualFilterIds. Exclude keeps
+   * people with no ESP (no company, or a company with no MX lookup). */
+  mxProvider?: IncludeExclude;
   jobTitle?: string;
   /** How the `jobTitle` include terms match: "contains" (substring, default)
    * or "equals" (whole value, case-insensitive). */
@@ -92,6 +100,8 @@ export interface PersonListRow {
   companyName: string | null;
   domain: string | null;
   companyLinkedinUrl: string | null;
+  /** ESP of the linked company (companies.mx_provider), null without one. */
+  mxProvider: string | null;
   city: string | null;
   state: string | null;
   country: string | null;
@@ -124,6 +134,7 @@ export interface PersonFilterOptions {
   employeeBuckets: { id: string; label: string }[];
   emailStatuses: FilterOption[];
   phoneTypes: FilterOption[];
+  mxProviders: FilterOption[];
 }
 
 interface RawPersonRow {
@@ -148,10 +159,13 @@ interface RawPersonRow {
   phone_verified_at: string | null;
   company_name: string | null;
   company_linkedin_url: string | null;
+  /** Linked company's ESP, embedded (left join) as `esp` so it can't clash
+   * with FullPersonRow's own `companies` embed. */
+  esp?: { mx_provider: string | null } | null;
 }
 
 const LIST_COLUMNS =
-  "id,company_id,full_name,job_title,email,phone,linkedin_url,domain,city,state,country,source,tags,last_updated,email_status,email_verified_at,phone_type,phone_status,phone_verified_at,company_name,company_linkedin_url";
+  "id,company_id,full_name,job_title,email,phone,linkedin_url,domain,city,state,country,source,tags,last_updated,email_status,email_verified_at,phone_type,phone_status,phone_verified_at,company_name,company_linkedin_url,esp:companies(mx_provider)";
 
 function employeeBucketOrClause(bucketIds: string[]): string {
   const buckets = EMPLOYEE_BUCKETS.filter((b) => bucketIds.includes(b.id));
@@ -303,6 +317,18 @@ function chunkIds(ids: string[], size: number): string[][] {
  * lib/data/companies.ts. */
 const RPC_PAGE_SIZE = 1000;
 
+/** True when a filter the PostgREST builder can't express is active, so the
+ * matched set must come from people_matching_virtual_filters: a virtual
+ * filter, a push-status filter, or (ticket #25) an ESP filter, which lives on
+ * the linked company. */
+export function needsMatchingRpc(filters: PersonListFilters): boolean {
+  return (
+    isFilterSetActive(filters.virtualFilters) ||
+    !!filters.pushStatus ||
+    isMxProviderFilterActive(filters.mxProvider)
+  );
+}
+
 /** Resolves the id set filters.virtualFilters (or filters.pushStatus) narrows
  * to via the shared SQL predicate (lib/data/virtual-columns.sql), or `null`
  * when neither a virtual filter nor a push filter is active — the no-op case
@@ -320,7 +346,7 @@ const RPC_PAGE_SIZE = 1000;
  * instead of the whole table. Mirrors resolveVirtualFilterIds in
  * lib/data/companies.ts. */
 async function resolveVirtualFilterIds(filters: PersonListFilters): Promise<string[] | null> {
-  if (!isFilterSetActive(filters.virtualFilters) && !filters.pushStatus) return null;
+  if (!needsMatchingRpc(filters)) return null;
   const payload = toFilterOptionsRpcPayload(filters);
 
   const first = await supabaseAdmin
@@ -450,6 +476,7 @@ function toListRow(row: RawPersonRow): PersonListRow {
     companyName: row.company_name,
     domain: row.domain,
     companyLinkedinUrl: row.company_linkedin_url,
+    mxProvider: row.esp?.mx_provider ?? null,
     city: row.city,
     state: row.state,
     country: row.country,
@@ -1137,6 +1164,9 @@ interface PersonFilterOptionsRpcResult {
   countries: FacetIdCount[];
   emailStatuses: FacetIdCount[];
   phoneTypes: FacetIdCount[];
+  /** Added by the T25 migration; optional so a DB without it degrades to an
+   * empty ESP facet instead of a crash. */
+  mxProviders?: FacetIdCount[];
 }
 
 /** Serializes PersonListFilters into the jsonb shape person_filter_options
@@ -1168,6 +1198,7 @@ export function toFilterOptionsRpcPayload(filters: PersonListFilters): Record<st
     country: filters.country ?? { include: [], exclude: [] },
     emailStatus: filters.emailStatus ?? { include: [], exclude: [] },
     phoneType: filters.phoneType ?? { include: [], exclude: [] },
+    mxProvider: filters.mxProvider ?? { include: [], exclude: [] },
     virtualFilters: filters.virtualFilters ?? { combinator: "and", groups: [] },
     pushStatus: pushStatusRpcPayload(filters.pushStatus),
   };
@@ -1214,6 +1245,9 @@ export async function getPersonFilterOptions(
       .sort(sortByCountDesc),
     phoneTypes: result.phoneTypes
       .map(({ id, count }) => ({ id, label: id, count }))
+      .sort(sortByCountDesc),
+    mxProviders: (result.mxProviders ?? [])
+      .map(({ id, count }) => ({ id, label: mxProviderLabel(id), count }))
       .sort(sortByCountDesc),
   };
 }

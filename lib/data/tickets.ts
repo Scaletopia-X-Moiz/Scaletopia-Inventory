@@ -4,9 +4,9 @@ import type { Role } from "@/lib/auth/dal";
 import type { TicketPriority } from "@/lib/tickets/priority";
 
 export type TicketCategory = "bug" | "feature_request" | "improvement";
-export type TicketStatus = "open" | "in_progress" | "done" | "awaiting_reply";
+export type TicketStatus = "open" | "in_progress" | "testing" | "done" | "awaiting_reply";
 export type { TicketPriority };
-export type TicketTab = "open" | "done" | "all";
+export type TicketTab = "open" | "in_progress" | "testing" | "done" | "all";
 
 export interface TicketListFilters {
   tab: TicketTab;
@@ -80,8 +80,9 @@ function toTicketRow(raw: RawTicketRow): TicketRow {
 /**
  * Lists tickets scoped by role and tab. Members only ever see their own
  * tickets (created_by = viewerId); admin/dev see everything. The "open" tab
- * bundles open + in_progress so newly-started work doesn't disappear from
- * the default view; "done" and "all" are literal.
+ * bundles open + awaiting_reply (work not yet started, or parked on the
+ * requester); "in_progress", "testing" and "done" are literal; "all" is
+ * everything.
  */
 export async function getTickets(
   filters: TicketListFilters,
@@ -98,14 +99,42 @@ export async function getTickets(
   }
 
   if (filters.tab === "open") {
-    query = query.in("status", ["open", "in_progress", "awaiting_reply"]);
-  } else if (filters.tab === "done") {
-    query = query.eq("status", "done");
+    query = query.in("status", ["open", "awaiting_reply"]);
+  } else if (filters.tab !== "all") {
+    query = query.eq("status", filters.tab);
   }
 
   const { data, error } = await query;
   if (error) throw error;
   return ((data ?? []) as unknown as RawTicketRow[]).map(toTicketRow);
+}
+
+/** Per-tab ticket counts for the tab strip, scoped the same way as getTickets. */
+export async function getTicketCounts(
+  viewerRole: Role,
+  viewerId: string
+): Promise<Record<TicketTab, number>> {
+  let query = supabaseAdmin.from("tickets").select("status");
+  if (viewerRole === "member") {
+    query = query.eq("created_by", viewerId);
+  }
+
+  const { data, error } = await query;
+  if (error) throw error;
+
+  const counts: Record<TicketTab, number> = {
+    open: 0,
+    in_progress: 0,
+    testing: 0,
+    done: 0,
+    all: 0,
+  };
+  for (const { status } of (data ?? []) as { status: TicketStatus }[]) {
+    counts.all += 1;
+    if (status === "open" || status === "awaiting_reply") counts.open += 1;
+    else counts[status] += 1;
+  }
+  return counts;
 }
 
 /**

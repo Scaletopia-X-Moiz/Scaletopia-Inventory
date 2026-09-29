@@ -7,6 +7,7 @@ import { virtualColumnIdentity } from "@/lib/data/virtual-columns";
 import { EmailStatusBadge } from "@/components/people/email-status-badge";
 import { PhoneStatusBadge } from "@/components/people/phone-status-badge";
 import { formatValue } from "@/components/companies/enrichment-list";
+import { mxProviderLabel } from "@/lib/data/mx-provider";
 import { ScrollableTable } from "@/components/shared/scrollable-table";
 
 function formatLastUpdated(value: string | null): string {
@@ -23,6 +24,7 @@ const HEADERS = [
   "Job Title",
   "LinkedIn URL",
   "Email",
+  "ESP",
   "Phone",
   "Company",
   "Company Domain",
@@ -97,6 +99,7 @@ export function PeopleTable({
                   />
                 </span>
               </PersonCell>
+              <PersonCell href={`/people/${row.id}`}>{row.mxProvider ? mxProviderLabel(row.mxProvider) : "—"}</PersonCell>
               <PersonCell href={`/people/${row.id}`} mono>
                 <span className="inline-flex items-center gap-1.5">
                   {row.phone ?? "—"}

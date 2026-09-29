@@ -18,6 +18,7 @@ interface CompanyFilterOptions {
   employeeBuckets: { id: string; label: string }[];
   emailStatuses: FilterOption[];
   phoneTypes: FilterOption[];
+  mxProviders: FilterOption[];
   [key: string]: unknown;
 }
 
@@ -29,6 +30,7 @@ const EMPTY: CompanyFilterOptions = {
   employeeBuckets: [],
   emailStatuses: [],
   phoneTypes: [],
+  mxProviders: [],
 };
 
 // Facet counts depend on the active filters (see getCompanyFilterOptions), so
@@ -40,12 +42,14 @@ export function FilterSlipClient({ clientOptions }: { clientOptions: ClientOptio
   const facetParams = new URLSearchParams(searchParams);
   facetParams.delete("page");
   const paramsStr = facetParams.toString();
+  const [loadedFor, setLoadedFor] = useState<string | null>(cache.has(paramsStr) ? paramsStr : null);
   const [options, setOptions] = useState<CompanyFilterOptions>(cache.get(paramsStr) ?? EMPTY);
 
   useEffect(() => {
     const cached = cache.get(paramsStr);
     if (cached) {
       setOptions(cached);
+      setLoadedFor(paramsStr);
       return;
     }
 
@@ -58,6 +62,7 @@ export function FilterSlipClient({ clientOptions }: { clientOptions: ClientOptio
       .then((data) => {
         cache.set(paramsStr, data);
         setOptions(data);
+        setLoadedFor(paramsStr);
       })
       .catch((err) => {
         if (err.name !== "AbortError") {
@@ -68,5 +73,5 @@ export function FilterSlipClient({ clientOptions }: { clientOptions: ClientOptio
     return () => controller.abort();
   }, [paramsStr]);
 
-  return <FilterSlip options={options} clientOptions={clientOptions} />;
+  return <FilterSlip options={options} loading={loadedFor !== paramsStr} clientOptions={clientOptions} />;
 }

@@ -20,15 +20,19 @@ const MULTI_PARAMS = [
   "country",
   "emailStatus",
   "phoneType",
+  "esp",
 ] as const;
 const SINGLE_PARAMS = ["q", "empmin", "empmax"] as const;
 
 export function FilterSlip({
   options,
+  loading = false,
   clientOptions,
 }: {
   options: CompanyFilterOptions;
   clientOptions: ClientOption[];
+  /** Facet options are still being fetched. */
+  loading?: boolean;
 }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -195,6 +199,7 @@ export function FilterSlip({
 
         <FilterPopover label="Niche" count={facetCount("niche")}>
           <FilterChipGroup
+          loading={loading}
             title="Niche"
             options={toOptions(options.niches)}
             selected={getAll("niche")}
@@ -205,6 +210,7 @@ export function FilterSlip({
         </FilterPopover>
         <FilterPopover label="Source" count={facetCount("source")}>
           <FilterChipGroup
+          loading={loading}
             title="Source"
             options={toOptions(options.sources)}
             selected={getAll("source")}
@@ -215,6 +221,7 @@ export function FilterSlip({
         </FilterPopover>
         <FilterPopover label="Industry" count={facetCount("industry")}>
           <FilterChipGroup
+          loading={loading}
             title="Industry"
             options={toOptions(options.industries)}
             selected={getAll("industry")}
@@ -225,6 +232,7 @@ export function FilterSlip({
         </FilterPopover>
         <FilterPopover label="Employee size" count={getAll("employee").length + (searchParams.get("empmin") || searchParams.get("empmax") ? 1 : 0)}>
           <FilterChipGroup
+          loading={loading}
             title="Employee size"
             options={options.employeeBuckets.map((b) => ({ id: b.id, label: b.label }))}
             selected={getAll("employee")}
@@ -272,6 +280,7 @@ export function FilterSlip({
         </FilterPopover>
         <FilterPopover label="Country" count={facetCount("country")}>
           <FilterChipGroup
+          loading={loading}
             title="Country"
             options={toOptions(options.countries)}
             selected={getAll("country")}
@@ -282,6 +291,7 @@ export function FilterSlip({
         </FilterPopover>
         <FilterPopover label="Email status" count={facetCount("emailStatus")}>
           <FilterChipGroup
+          loading={loading}
             title="Email status"
             options={toOptions(options.emailStatuses)}
             selected={getAll("emailStatus")}
@@ -292,12 +302,24 @@ export function FilterSlip({
         </FilterPopover>
         <FilterPopover label="Phone type" count={facetCount("phoneType")}>
           <FilterChipGroup
+          loading={loading}
             title="Phone type"
             options={toOptions(options.phoneTypes)}
             selected={getAll("phoneType")}
             excluded={getExcluded("phoneType")}
             onToggle={(id) => toggleInclude("phoneType", id)}
             onToggleExclude={(id) => toggleExclude("phoneType", id)}
+          />
+        </FilterPopover>
+        <FilterPopover label="ESP" count={facetCount("esp")}>
+          <FilterChipGroup
+          loading={loading}
+            title="ESP (email provider)"
+            options={toOptions(options.mxProviders)}
+            selected={getAll("esp")}
+            excluded={getExcluded("esp")}
+            onToggle={(id) => toggleInclude("esp", id)}
+            onToggleExclude={(id) => toggleExclude("esp", id)}
           />
         </FilterPopover>
         <FilterPopover label="Has contact info" count={presenceCount}>
