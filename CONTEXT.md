@@ -84,6 +84,16 @@ skipped, the same way an emailless Person is skipped. This is independent of
 whether the company's linked People have been pushed via the People-table
 EmailBison push.
 
+### Import job
+A queued, durable, resumable import of one CSV into one or two target tables
+(its **stages**: companies, then people for a company-sync import). Confirming
+an import enqueues it and returns immediately; a background worker processes it
+in resumable ticks and writes one `import_history` row per finished stage. At
+most one Import job runs at a time (queued jobs wait their turn, FIFO). Separate
+from a **Push job** (`push_jobs`), which pushes existing People/Companies to
+GHL/EmailBison — the two queues never block each other. See
+docs/adr/0006-import-job-queue.md.
+
 ### Empty (enrichment value)
 For filtering purposes, an enrichment value counts as empty when it is `null`,
 `""`, whitespace-only, an empty array, the sentinel `"-"`, or an **unrendered

@@ -13,8 +13,8 @@ import {
 } from "@/lib/import/providers";
 import { fuzzyMatchColumn } from "@/lib/import/normalize";
 import { parseCSV, applyColumnMap, filterMappedNonEmptyRows, serializeCSV } from "@/lib/import/csv";
-import { summarizeFailures } from "@/lib/import/failure-messages";
-import { Upload, History, CheckCircle, AlertCircle, Loader2, Download, ChevronRight, RefreshCw, Plus } from "lucide-react";
+import { Upload, History, ListChecks, CheckCircle, AlertCircle, Loader2, Download, ChevronRight, RefreshCw, Plus } from "lucide-react";
+import { ImportQueueView, downloadFailedCsv } from "./import-queue-view";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
@@ -25,6 +25,7 @@ interface ParsedCSV {
   sampleRows: Record<string, string>[];
   allText: string;
   rowCount: number;
+  fileName?: string;
 }
 
 interface ColumnMapping {
@@ -46,23 +47,6 @@ interface WizardMeta {
   client: string;
   niche: string;
   date: string;
-}
-
-interface PushProgress {
-  phase: string;
-  done: number;
-  total: number;
-  message?: string;
-}
-
-interface PushResult {
-  inputCount: number;
-  dedupedCount: number;
-  insertedCount: number;
-  updatedCount: number;
-  failedCount: number;
-  failedRecords: Record<string, unknown>[];
-  historyId: string | null;
 }
 
 interface HistoryRow {
@@ -264,7 +248,7 @@ function StepUpload({
 
   async function handleFile(file: File) {
     const text = await file.text();
-    setCsv(parseCSVPreview(text));
+    setCsv({ ...parseCSVPreview(text), fileName: file.name });
   }
 
   function onDrop(e: React.DragEvent) {
@@ -1123,228 +1107,9 @@ function StepSummary({
           onClick={onConfirm}
           className="rounded-lg bg-stamp px-5 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-40 transition-opacity"
         >
-          Confirm Push
+          Queue Import
         </button>
       </div>
-    </div>
-  );
-}
-
-const PHASE_LABELS: Record<string, string> = {
-  normalizing: "Normalizing records…",
-  preflight: "Checking existing records…",
-  partitioning: "Partitioning insert / update…",
-  inserting: "Inserting new records…",
-  updating: "Updating existing records…",
-  done: "Done!",
-  error: "Error",
-};
-
-function StepProgress({
-  progress,
-  uploadNote,
-  stageLabel,
-}: {
-  progress: PushProgress | null;
-  uploadNote?: string | null;
-  stageLabel?: string | null;
-}) {
-  const phase = progress?.phase ?? "normalizing";
-  const pct =
-    progress && progress.total > 0
-      ? Math.round((progress.done / progress.total) * 100)
-      : 0;
-
-  return (
-    <div className="flex flex-col gap-6">
-      <div>
-        <h3 className="text-base font-semibold text-ink">Importing…</h3>
-        <p className="mt-1 text-sm text-ink-soft">Please keep this tab open.</p>
-        {stageLabel && (
-          <p className="mt-2 text-xs font-medium uppercase tracking-wide text-stamp">{stageLabel}</p>
-        )}
-        {uploadNote && (
-          <p className="mt-2 text-sm text-stamp">{uploadNote}</p>
-        )}
-      </div>
-
-      <div className="flex flex-col gap-4">
-        {["normalizing", "preflight", "partitioning", "inserting", "updating", "done"].map((p) => {
-          const phases = ["normalizing", "preflight", "partitioning", "inserting", "updating", "done"];
-          const currentIdx = phases.indexOf(phase);
-          const thisIdx = phases.indexOf(p);
-          const isDone = thisIdx < currentIdx || phase === "done";
-          const isCurrent = p === phase && phase !== "done";
-
-          return (
-            <div key={p} className="flex items-center gap-3">
-              <div className={cn(
-                "flex h-6 w-6 shrink-0 items-center justify-center rounded-full",
-                isDone ? "bg-green-500" : isCurrent ? "bg-stamp" : "bg-rule"
-              )}>
-                {isDone ? (
-                  <CheckCircle size={14} className="text-white" />
-                ) : isCurrent ? (
-                  <Loader2 size={14} className="text-white animate-spin" />
-                ) : (
-                  <span className="text-xs text-ink-mute">{thisIdx + 1}</span>
-                )}
-              </div>
-              <span className={cn(
-                "text-sm",
-                isDone ? "text-ink" : isCurrent ? "font-medium text-ink" : "text-ink-mute"
-              )}>
-                {PHASE_LABELS[p]}
-              </span>
-              {isCurrent && progress && progress.total > 0 && (
-                <span className="ml-auto text-xs text-ink-mute">
-                  {progress.done.toLocaleString()} / {progress.total.toLocaleString()}
-                </span>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {progress && progress.total > 0 && (
-        <div className="h-2 w-full rounded-full bg-rule overflow-hidden">
-          <div
-            className="h-full rounded-full bg-stamp transition-all duration-300"
-            style={{ width: `${pct}%` }}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ResultStatGrid({ result }: { result: PushResult }) {
-  return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-      {[
-        { label: "Input", value: result.inputCount, color: "text-ink" },
-        { label: "Inserted", value: result.insertedCount, color: "text-green-600" },
-        { label: "Updated", value: result.updatedCount, color: "text-blue-600" },
-        { label: "Failed", value: result.failedCount, color: result.failedCount > 0 ? "text-red-500" : "text-ink-mute" },
-      ].map(({ label, value, color }) => (
-        <div key={label} className="rounded-lg border border-rule bg-paper px-4 py-3 text-center">
-          <p className={cn("text-2xl font-bold tabular-nums", color)}>{value.toLocaleString()}</p>
-          <p className="mt-0.5 text-xs text-ink-mute">{label}</p>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// A handful of one-off failures (a bad row here or there) aren't worth
-// interrupting the user over — the download-CSV link already covers that.
-// This is for the case a meaningful chunk of the batch didn't make it in,
-// where the person importing needs to know *why* in plain language before
-// they decide whether to fix the file and re-run.
-const SIGNIFICANT_FAILURE_MIN_COUNT = 10;
-const SIGNIFICANT_FAILURE_MIN_RATIO = 0.1;
-
-function isSignificantFailure(failedCount: number, inputCount: number): boolean {
-  if (failedCount < SIGNIFICANT_FAILURE_MIN_COUNT) return false;
-  return failedCount / Math.max(inputCount, 1) >= SIGNIFICANT_FAILURE_MIN_RATIO;
-}
-
-function FailureSummaryBanner({ result }: { result: PushResult }) {
-  if (!isSignificantFailure(result.failedCount, result.inputCount)) return null;
-
-  const reasons = summarizeFailures(result.failedRecords);
-
-  return (
-    <div className="flex items-start gap-3 rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-3">
-      <AlertCircle size={18} className="mt-0.5 shrink-0 text-red-500" />
-      <div className="flex flex-col gap-1.5">
-        <p className="text-sm font-medium text-ink">
-          {result.failedCount.toLocaleString()} of {result.inputCount.toLocaleString()} records
-          didn&apos;t import.
-        </p>
-        <ul className="flex flex-col gap-0.5 text-sm text-ink-soft">
-          {reasons.map((r) => (
-            <li key={r.message}>
-              {r.message} <span className="text-ink-mute">({r.count.toLocaleString()} records)</span>
-            </li>
-          ))}
-        </ul>
-        <p className="text-xs text-ink-mute">
-          Download the failed records below, fix the issue in your file, and re-import them.
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function StepReport({
-  result,
-  companyResult,
-  onReset,
-}: {
-  result: PushResult;
-  // Present only for a two-stage (company-sync) import — when set, both
-  // stages' results are shown side by side instead of just `result`.
-  companyResult?: PushResult | null;
-  onReset: () => void;
-}) {
-  const combinedInput = result.inputCount + (companyResult?.inputCount ?? 0);
-
-  return (
-    <div className="flex flex-col gap-6">
-      <div className="flex items-center gap-3">
-        <CheckCircle size={24} className="text-green-500 shrink-0" />
-        <div>
-          <h3 className="text-base font-semibold text-ink">Import Complete</h3>
-          <p className="text-sm text-ink-soft">{combinedInput.toLocaleString()} records processed.</p>
-        </div>
-      </div>
-
-      {companyResult && (
-        <div className="flex flex-col gap-2">
-          <p className="text-xs font-medium text-ink-soft uppercase tracking-wide">Companies</p>
-          <ResultStatGrid result={companyResult} />
-          <FailureSummaryBanner result={companyResult} />
-          {companyResult.failedCount > 0 && (
-            <button
-              onClick={() => downloadFailedCsv(companyResult.failedRecords, "import_failed_companies.csv")}
-              className="flex items-center gap-2 self-start rounded-lg border border-rule px-4 py-2 text-sm text-ink hover:bg-hover transition-colors"
-            >
-              <Download size={14} />
-              Download failed company records ({companyResult.failedCount})
-            </button>
-          )}
-        </div>
-      )}
-
-      <div className="flex flex-col gap-2">
-        {companyResult && (
-          <p className="text-xs font-medium text-ink-soft uppercase tracking-wide">People</p>
-        )}
-        <ResultStatGrid result={result} />
-        <FailureSummaryBanner result={result} />
-        {result.failedCount > 0 && (
-          <button
-            onClick={() =>
-              downloadFailedCsv(
-                result.failedRecords,
-                companyResult ? "import_failed_people.csv" : "import_failed.csv"
-              )
-            }
-            className="flex items-center gap-2 self-start rounded-lg border border-rule px-4 py-2 text-sm text-ink hover:bg-hover transition-colors"
-          >
-            <Download size={14} />
-            Download failed records ({result.failedCount})
-          </button>
-        )}
-      </div>
-
-      <button
-        onClick={onReset}
-        className="self-start rounded-lg bg-stamp px-5 py-2 text-sm font-medium text-white hover:opacity-90 transition-opacity"
-      >
-        Import Another
-      </button>
     </div>
   );
 }
@@ -1352,43 +1117,6 @@ function StepReport({
 // ────────────────────────────────────────────────────────────────────────────
 // History tab
 // ────────────────────────────────────────────────────────────────────────────
-
-function csvCellValue(v: unknown): string {
-  return typeof v === "object" && v !== null ? JSON.stringify(v) : String(v ?? "");
-}
-
-function downloadFailedCsv(records: Record<string, unknown>[], filename = "failed_records.csv") {
-  if (!records.length) return;
-  // Collect the union of keys across every row (rows can have different shapes —
-  // e.g. a synthetic `_import_error` marker), not just the first row's keys, so
-  // no column is silently dropped. Surface the diagnostic columns first so the
-  // reason a row failed is immediately visible instead of buried at the end.
-  const seen = new Set<string>();
-  for (const r of records) for (const k of Object.keys(r)) seen.add(k);
-  const priority = ["_failure_reason", "_import_error", "_partial"];
-  const headers = [
-    ...priority.filter((k) => seen.has(k)),
-    ...[...seen].filter((k) => !priority.includes(k)),
-  ];
-  const lines = [
-    headers.join(","),
-    ...records.map((r) =>
-      headers.map((h) => {
-        const v = csvCellValue(r[h]);
-        return v.includes(",") || v.includes('"') || v.includes("\n")
-          ? `"${v.replace(/"/g, '""')}"`
-          : v;
-      }).join(",")
-    ),
-  ];
-  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
 
 function HistoryTab() {
   const [rows, setRows] = useState<HistoryRow[]>([]);
@@ -1607,25 +1335,21 @@ function HistoryTab() {
 // Wizard shell
 // ────────────────────────────────────────────────────────────────────────────
 
-type Step = "upload" | "mapping" | "metadata" | "summary" | "progress" | "report";
+type Step = "upload" | "mapping" | "metadata" | "summary" | "progress" | "queued" | "report";
 
-// Vercel Route Handlers on the Hobby tier cap request bodies at ~4.5MB.
-// Above this threshold we relay the CSV through Supabase Storage instead of
-// posting it directly, so the upload bypasses the Vercel function entirely.
-const DIRECT_UPLOAD_MAX_BYTES = 4 * 1024 * 1024;
-
-const STEPS: Step[] = ["upload", "mapping", "metadata", "summary", "progress", "report"];
+const STEPS: Step[] = ["upload", "mapping", "metadata", "summary", "progress", "queued", "report"];
 const STEP_LABELS: Record<Step, string> = {
   upload: "Upload",
   mapping: "Columns",
   metadata: "Tags",
   summary: "Review",
-  progress: "Importing",
+  progress: "Queuing",
+  queued: "Queued",
   report: "Done",
 };
 
 export default function ImportPage() {
-  const [activeTab, setActiveTab] = useState<"import" | "history">("import");
+  const [activeTab, setActiveTab] = useState<"import" | "queue" | "history">("import");
   const [step, setStep] = useState<Step>("upload");
 
   const [csv, setCsv] = useState<ParsedCSV | null>(null);
@@ -1641,13 +1365,8 @@ export default function ImportPage() {
     date: new Date().toISOString().slice(0, 10),
   });
 
-  const [progress, setProgress] = useState<PushProgress | null>(null);
-  const [uploadNote, setUploadNote] = useState<string | null>(null);
-  const [result, setResult] = useState<PushResult | null>(null);
-  // Only set for a two-stage (company-sync) import — the companies stage's
-  // result, shown alongside `result` (the people stage) in the final report.
-  const [companyResult, setCompanyResult] = useState<PushResult | null>(null);
-  const [stageLabel, setStageLabel] = useState<string | null>(null);
+  // Id of the job the last confirm enqueued, shown on the "queued" step.
+  const [queuedJobId, setQueuedJobId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
 
@@ -1664,155 +1383,63 @@ export default function ImportPage() {
       niche: "",
       date: new Date().toISOString().slice(0, 10),
     });
-    setProgress(null);
-    setUploadNote(null);
-    setResult(null);
-    setCompanyResult(null);
-    setStageLabel(null);
+    setQueuedJobId(null);
     setErrorMsg(null);
     setStep("upload");
   }, []);
 
-  // Runs ONE push (one target table, one column map) against the existing
-  // single-target `/api/import/stream` endpoint end-to-end: filters empty
-  // rows, uploads (direct or via storage relay for large files), and drains
-  // the SSE stream to its terminal `done`/`error` event. Used directly for a
-  // normal single-target import, and called TWICE in sequence (companies
-  // then people) for a company-sync import — see `runImport` below. Reused
-  // as-is between both call sites; the only difference between them is which
-  // `targetTable`/`columnMap`/`sourceKey` gets passed in.
-  async function pushTarget({
-    headers,
-    rows,
-    columnMap,
-    targetTable,
-    sourceKey,
-    tags,
-  }: {
-    headers: string[];
-    rows: Record<string, string>[];
-    columnMap: Record<string, string>;
-    targetTable: TargetTable;
-    sourceKey: string;
-    tags: [string, string, string];
-  }): Promise<PushResult> {
-    const metadata = { targetTable, sourceKey, tags, columnMap };
+  // Uploads the CSV to the csv-imports bucket via a signed upload URL. Every
+  // import goes through storage now (not just large ones): the queued job's
+  // worker re-reads the file on every tick, so it has to outlive this request.
+  // Returns the object path to hand to /api/import-jobs.
+  async function uploadCsv(csvText: string): Promise<string> {
+    const signRes = await fetch("/api/import/storage-upload", {
+      method: "POST",
+    });
 
-    // Filter out rows that would be discarded server-side anyway (no
-    // populated identity field after mapping) so we don't waste upload
-    // payload size on rows that can never survive `applyColumnMap`.
-    // BUG D: pass the target so people rows with only a company_name are treated
-    // as empty here too (kept consistent with the server's applyColumnMap).
-    const nonEmptyRows = filterMappedNonEmptyRows(rows, columnMap, targetTable);
-    const filteredText = serializeCSV(headers, nonEmptyRows);
-    const byteLength = new TextEncoder().encode(filteredText).length;
-
-    let response: Response;
-
-    if (byteLength > DIRECT_UPLOAD_MAX_BYTES) {
-      setUploadNote(
-        "Large file detected — uploading via secure storage, this may take a bit longer."
-      );
-
-      try {
-        const signRes = await fetch("/api/import/storage-upload", {
-          method: "POST",
-        });
-
-        if (!signRes.ok) {
-          const text = await signRes.text();
-          throw new Error(text || `HTTP ${signRes.status}`);
-        }
-
-        const { path, signedUrl } = (await signRes.json()) as {
-          path: string;
-          token: string;
-          signedUrl: string;
-        };
-
-        // Mirrors the wire format used by supabase-js's
-        // `uploadToSignedUrl` (PUT with a multipart body containing an
-        // empty-named file field). We hit the signed URL directly with
-        // fetch instead of instantiating a Supabase client, since we have
-        // no anon/public key to give a browser-side client and the token
-        // embedded in the signed URL (already appended server-side by
-        // `createSignedUploadUrl`) is all the auth this endpoint needs.
-        const uploadBody = new FormData();
-        uploadBody.append("cacheControl", "3600");
-        uploadBody.append("", new Blob([filteredText], { type: "text/csv" }));
-
-        const uploadRes = await fetch(signedUrl, {
-          method: "PUT",
-          body: uploadBody,
-        });
-
-        if (!uploadRes.ok) {
-          const text = await uploadRes.text();
-          throw new Error(text || `Storage upload failed: HTTP ${uploadRes.status}`);
-        }
-
-        response = await fetch("/api/import/stream", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path, metadata: JSON.stringify(metadata) }),
-        });
-      } finally {
-        setUploadNote(null);
-      }
-    } else {
-      const formData = new FormData();
-      const blob = new Blob([filteredText], { type: "text/csv" });
-      formData.append("file", blob, "import.csv");
-      formData.append("metadata", JSON.stringify(metadata));
-
-      response = await fetch("/api/import/stream", {
-        method: "POST",
-        body: formData,
-      });
+    if (!signRes.ok) {
+      const text = await signRes.text();
+      throw new Error(text || `HTTP ${signRes.status}`);
     }
 
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(text || `HTTP ${response.status}`);
+    const { path, signedUrl } = (await signRes.json()) as {
+      path: string;
+      token: string;
+      signedUrl: string;
+    };
+
+    // Mirrors the wire format used by supabase-js's
+    // `uploadToSignedUrl` (PUT with a multipart body containing an
+    // empty-named file field). We hit the signed URL directly with
+    // fetch instead of instantiating a Supabase client, since we have
+    // no anon/public key to give a browser-side client and the token
+    // embedded in the signed URL (already appended server-side by
+    // `createSignedUploadUrl`) is all the auth this endpoint needs.
+    const uploadBody = new FormData();
+    uploadBody.append("cacheControl", "3600");
+    uploadBody.append("", new Blob([csvText], { type: "text/csv" }));
+
+    const uploadRes = await fetch(signedUrl, {
+      method: "PUT",
+      body: uploadBody,
+    });
+
+    if (!uploadRes.ok) {
+      const text = await uploadRes.text();
+      throw new Error(text || `Storage upload failed: HTTP ${uploadRes.status}`);
     }
 
-    const reader = response.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop()!;
-
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
-        let event: { phase: string; done?: number; total?: number; message?: string; result?: PushResult };
-        try {
-          event = JSON.parse(line.slice(6));
-        } catch {
-          continue;
-        }
-        if (event.phase === "error") {
-          throw new Error(event.message ?? "Unknown error");
-        }
-        if (event.phase === "done" && event.result) {
-          return event.result;
-        }
-        setProgress(event as PushProgress);
-      }
-    }
-
-    throw new Error("Import stream ended unexpectedly without a result");
+    return path;
   }
 
+  // Enqueues the import as a background job and returns right away — the
+  // worker (app/api/internal/import-worker) does the actual push. A
+  // company-sync import is ONE job with two ordered stages (companies, then
+  // people), so the ordering guarantee people's domain-based company_id lookup
+  // relies on holds even if this tab is closed between them.
   async function runImport(finalMeta: WizardMeta, csvData: ParsedCSV) {
     setStep("progress");
-    setCompanyResult(null);
-    setStageLabel(null);
-
+    setErrorMsg(null);
 
     const { headers, rows } = parseCSV(csvData.allText);
     const tags = [finalMeta.client, finalMeta.niche, finalMeta.date] as [string, string, string];
@@ -1825,57 +1452,57 @@ export default function ImportPage() {
       }
     }
 
-    try {
-      if (finalMeta.companySyncEnabled) {
-        // Two-stage push: companies MUST finish (fully committed to the DB)
-        // before people starts, since the people push's own domain-based
-        // company_id lookup (fetchCompanyIdByDomain in lib/import/push.ts)
-        // re-queries the companies table fresh at push time — no separate
-        // linking step needed as long as this ordering holds.
-        const companyColumnMap: Record<string, string> = {};
-        for (const m of finalMeta.companyColumnMappings) {
-          if (m.supabaseField && m.supabaseField !== "ignore") {
-            companyColumnMap[m.csvHeader] = m.supabaseField;
-          }
+    const stages: { targetTable: TargetTable; columnMap: Record<string, string> }[] = [];
+    if (finalMeta.companySyncEnabled) {
+      const companyColumnMap: Record<string, string> = {};
+      for (const m of finalMeta.companyColumnMappings) {
+        if (m.supabaseField && m.supabaseField !== "ignore") {
+          companyColumnMap[m.csvHeader] = m.supabaseField;
         }
-
-        setStageLabel("Stage 1 of 2: Companies");
-        setProgress(null);
-        const companiesResult = await pushTarget({
-          headers,
-          rows,
-          columnMap: companyColumnMap,
-          targetTable: "companies",
-          sourceKey,
-          tags,
-        });
-        setCompanyResult(companiesResult);
-
-        setStageLabel("Stage 2 of 2: People");
-        setProgress(null);
-        const peopleResult = await pushTarget({
-          headers,
-          rows,
-          columnMap: personColumnMap,
-          targetTable: "people",
-          sourceKey,
-          tags,
-        });
-
-        setResult(peopleResult);
-        setStep("report");
-      } else {
-        const singleResult = await pushTarget({
-          headers,
-          rows,
-          columnMap: personColumnMap,
-          targetTable: finalMeta.targetTable,
-          sourceKey,
-          tags,
-        });
-        setResult(singleResult);
-        setStep("report");
       }
+      stages.push({ targetTable: "companies", columnMap: companyColumnMap });
+      stages.push({ targetTable: "people", columnMap: personColumnMap });
+    } else {
+      stages.push({ targetTable: finalMeta.targetTable, columnMap: personColumnMap });
+    }
+
+    try {
+      // Filter out rows that would be discarded server-side anyway (no
+      // populated identity field after mapping) so we don't waste upload
+      // payload size on rows that can never survive `applyColumnMap`. The
+      // worker applies each stage's own map to this one file, so keep a row if
+      // it survives ANY stage's map, in original order.
+      // BUG D: pass the target so people rows with only a company_name are
+      // treated as empty here too (kept consistent with the server's
+      // applyColumnMap).
+      const keep = new Set<Record<string, string>>();
+      for (const stage of stages) {
+        for (const row of filterMappedNonEmptyRows(rows, stage.columnMap, stage.targetTable)) {
+          keep.add(row);
+        }
+      }
+      const nonEmptyRows = rows.filter((row) => keep.has(row));
+      const path = await uploadCsv(serializeCSV(headers, nonEmptyRows));
+
+      const res = await fetch("/api/import-jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path,
+          fileName: csvData.fileName ?? "import.csv",
+          rowCount: nonEmptyRows.length,
+          sourceKey,
+          tags,
+          stages,
+        }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { jobId?: string; error?: string };
+      if (!res.ok || !body.jobId) {
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+
+      setQueuedJobId(body.jobId);
+      setStep("queued");
     } catch (e) {
       setErrorMsg(e instanceof Error ? e.message : "Unknown error");
       setStep("report");
@@ -1893,7 +1520,7 @@ export default function ImportPage() {
           <div className="mx-auto max-w-3xl">
             {/* Tab bar */}
             <div className="mb-6 flex gap-1 rounded-lg border border-rule bg-paper p-1">
-              {(["import", "history"] as const).map((tab) => (
+              {(["import", "queue", "history"] as const).map((tab) => (
                 <button
                   key={tab}
                   onClick={() => setActiveTab(tab)}
@@ -1904,18 +1531,20 @@ export default function ImportPage() {
                       : "text-ink-soft hover:text-ink"
                   )}
                 >
-                  {tab === "import" ? <Upload size={14} /> : <History size={14} />}
-                  {tab === "import" ? "Import" : "History"}
+                  {tab === "import" ? <Upload size={14} /> : tab === "queue" ? <ListChecks size={14} /> : <History size={14} />}
+                  {tab === "import" ? "Import" : tab === "queue" ? "Queue" : "History"}
                 </button>
               ))}
             </div>
 
             {activeTab === "history" ? (
               <HistoryTab key={activeTab} />
+            ) : activeTab === "queue" ? (
+              <ImportQueueView key={activeTab} />
             ) : (
               <div className="rounded-xl border border-rule bg-card overflow-hidden">
                 {/* Step breadcrumb */}
-                {step !== "progress" && step !== "report" && (
+                {step !== "progress" && step !== "queued" && step !== "report" && (
                   <div className="border-b border-rule px-6 py-3">
                     <div className="flex items-center gap-1 text-xs">
                       {(["upload", "mapping", "metadata", "summary"] as Step[]).map((s, i) => {
@@ -2019,26 +1648,57 @@ export default function ImportPage() {
                   )}
 
                   {step === "progress" && (
-                    <StepProgress progress={progress} uploadNote={uploadNote} stageLabel={stageLabel} />
+                    <div className="flex flex-col items-center gap-3 py-10">
+                      <Loader2 size={24} className="animate-spin text-stamp" />
+                      <h3 className="text-base font-semibold text-ink">Queuing your import…</h3>
+                      <p className="text-sm text-ink-soft">Uploading the file. This only takes a moment.</p>
+                    </div>
                   )}
 
-                  {step === "report" && (
-                    errorMsg ? (
-                      <div className="flex flex-col gap-4">
-                        <div className="flex items-center gap-3">
-                          <AlertCircle size={24} className="text-red-500 shrink-0" />
-                          <div>
-                            <h3 className="text-base font-semibold text-ink">Import Failed</h3>
-                            <p className="text-sm text-ink-soft">{errorMsg}</p>
-                          </div>
+                  {step === "queued" && (
+                    <div className="flex flex-col gap-6">
+                      <div className="flex items-center gap-3">
+                        <CheckCircle size={24} className="text-green-500 shrink-0" />
+                        <div>
+                          <h3 className="text-base font-semibold text-ink">
+                            Import queued{queuedJobId ? ` (#${queuedJobId.slice(0, 8)})` : ""}
+                          </h3>
+                          <p className="text-sm text-ink-soft">
+                            You can start another import now. Imports run one at a time in the background, so you can
+                            close this tab and follow progress in the Queue tab.
+                          </p>
                         </div>
-                        <button onClick={reset} className="self-start rounded-lg border border-rule px-4 py-2 text-sm text-ink hover:bg-hover transition-colors">
-                          Try Again
+                      </div>
+                      <div className="flex flex-wrap gap-3">
+                        <button
+                          onClick={reset}
+                          className="rounded-lg bg-stamp px-5 py-2 text-sm font-medium text-white hover:opacity-90 transition-opacity"
+                        >
+                          Start another import
+                        </button>
+                        <button
+                          onClick={() => setActiveTab("queue")}
+                          className="rounded-lg border border-rule px-5 py-2 text-sm text-ink hover:bg-hover transition-colors"
+                        >
+                          View queue
                         </button>
                       </div>
-                    ) : result ? (
-                      <StepReport result={result} companyResult={companyResult} onReset={reset} />
-                    ) : null
+                    </div>
+                  )}
+
+                  {step === "report" && errorMsg && (
+                    <div className="flex flex-col gap-4">
+                      <div className="flex items-center gap-3">
+                        <AlertCircle size={24} className="text-red-500 shrink-0" />
+                        <div>
+                          <h3 className="text-base font-semibold text-ink">Couldn&apos;t queue the import</h3>
+                          <p className="text-sm text-ink-soft">{errorMsg}</p>
+                        </div>
+                      </div>
+                      <button onClick={reset} className="self-start rounded-lg border border-rule px-4 py-2 text-sm text-ink hover:bg-hover transition-colors">
+                        Try Again
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
