@@ -15,6 +15,7 @@ export function FilterChipGroup({
   excluded,
   onToggle,
   onToggleExclude,
+  loading = false,
 }: {
   title: string;
   options: ChipOption[];
@@ -22,11 +23,16 @@ export function FilterChipGroup({
   excluded?: string[];
   onToggle: (id: string) => void;
   onToggleExclude?: (id: string) => void;
+  /** True while the facet options are still being fetched, so an empty list
+   * reads as "loading" rather than "no data". */
+  loading?: boolean;
 }) {
   return (
     <div className="flex flex-col gap-2">
       <p className="text-xs font-medium text-ink-soft">{title}</p>
-      {options.length === 0 ? (
+      {options.length === 0 && loading ? (
+        <p className="text-xs text-ink-soft/70">Loading…</p>
+      ) : options.length === 0 ? (
         <p className="text-xs text-ink-soft/70">No {title.toLowerCase()} data for the current filters.</p>
       ) : (
         <div className="flex flex-wrap gap-1.5">
