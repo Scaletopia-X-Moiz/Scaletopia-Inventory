@@ -6,6 +6,7 @@ import {
   createEmailBisonCampaign,
   type CreateEmailBisonCampaignInput,
 } from "@/lib/emailbison/campaigns";
+import { DEFAULT_CAMPAIGN_SETTINGS } from "@/lib/emailbison/campaign-settings";
 
 const CLIENT_A = { id: "client-a", apiKey: "key-a", workspaceId: "https://a.emailbison.com" };
 const CLIENT_B = { id: "client-b", apiKey: "key-b", workspaceId: "https://b.emailbison.com" };
@@ -171,6 +172,9 @@ function fullSuccessFetch(callLog: string[]): typeof fetch {
     if (u.endsWith("/api/campaigns") && method === "POST") {
       return jsonResponse(201, { data: { id: 100, name: "New Campaign", status: "draft" } });
     }
+    if (u.endsWith(`/api/campaigns/${NEW_CAMPAIGN_ID}/update`)) {
+      return jsonResponse(200, { data: { id: 100, name: "New Campaign" } });
+    }
     if (u.endsWith(`/api/campaigns/${NEW_CAMPAIGN_ID}/attach-sender-emails`)) {
       return jsonResponse(200, { data: { success: true, message: "ok" } });
     }
@@ -190,7 +194,7 @@ function fullSuccessFetch(callLog: string[]): typeof fetch {
 /** Ordered list of the chain's steps after createCampaign, mirroring
  * createEmailBisonCampaign's documented sequence. Used by fetchFailingAt to
  * let every step before the failure point succeed normally. */
-const CHAIN_STEP_SUFFIXES = ["/attach-sender-emails", "/schedule", "/sequence-steps", "/resume"];
+const CHAIN_STEP_SUFFIXES = ["/update", "/attach-sender-emails", "/schedule", "/sequence-steps", "/resume"];
 
 /** A fetchImpl that resolves createCampaign and every chain step before
  * `failAtSuffix` normally, fails `failAtSuffix` itself with a non-transient
@@ -213,9 +217,10 @@ function fetchFailingAt(failAtSuffix: string): typeof fetch {
     const stepIndex = CHAIN_STEP_SUFFIXES.findIndex((suffix) => u.endsWith(suffix));
     if (stepIndex !== -1 && stepIndex < failIndex) {
       // A step before the failure point — resolve it as the happy-path fetch would.
-      if (stepIndex === 0) return jsonResponse(200, { data: { success: true, message: "ok" } });
-      if (stepIndex === 1) return jsonResponse(201, { data: { id: 5 } });
-      if (stepIndex === 2) return jsonResponse(201, { data: { id: 9, sequence_steps: [{ id: 1 }] } });
+      if (stepIndex === 0) return jsonResponse(200, { data: { id: 100, name: "New Campaign" } });
+      if (stepIndex === 1) return jsonResponse(200, { data: { success: true, message: "ok" } });
+      if (stepIndex === 2) return jsonResponse(201, { data: { id: 5 } });
+      if (stepIndex === 3) return jsonResponse(201, { data: { id: 9, sequence_steps: [{ id: 1 }] } });
       return jsonResponse(200, { data: { success: true, message: "ok" } });
     }
     if (stepIndex !== -1 && stepIndex > failIndex) {
@@ -255,6 +260,70 @@ describe("createEmailBisonCampaign", () => {
       `POST ${CLIENT_A.workspaceId}/api/campaigns/100/sequence-steps`,
       `PATCH ${CLIENT_A.workspaceId}/api/campaigns/100/resume`,
     ]);
+  });
+
+  it("PATCHes the settings right after create and before attach when settings are given", async () => {
+    const callLog: string[] = [];
+    const fetchImpl = fullSuccessFetch(callLog);
+
+    await createEmailBisonCampaign(
+      CLIENT_A,
+      buildCreateInput({ launch: false, settings: { ...DEFAULT_CAMPAIGN_SETTINGS, maxEmailsPerDay: 50, maxNewLeadsPerDay: 20 } }),
+      { fetchImpl }
+    );
+
+    expect(callLog).toEqual([
+      `POST ${CLIENT_A.workspaceId}/api/campaigns`,
+      `PATCH ${CLIENT_A.workspaceId}/api/campaigns/100/update`,
+      `POST ${CLIENT_A.workspaceId}/api/campaigns/100/attach-sender-emails`,
+      `POST ${CLIENT_A.workspaceId}/api/campaigns/100/schedule`,
+      `POST ${CLIENT_A.workspaceId}/api/campaigns/100/sequence-steps`,
+    ]);
+  });
+
+  it("sends the new settings fields in the settings PATCH body", async () => {
+    const inner = fullSuccessFetch([]);
+    const bodies: unknown[] = [];
+    const fetchImpl = ((url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") bodies.push(JSON.parse(String(init.body)));
+      return inner(url, init);
+    }) as typeof inner;
+
+    await createEmailBisonCampaign(
+      CLIENT_A,
+      buildCreateInput({
+        launch: false,
+        settings: {
+          ...DEFAULT_CAMPAIGN_SETTINGS,
+          includeAutoRepliesInStats: false,
+          maxSendsPerReceivingDomain: 40,
+          sequencePrioritization: "new_leads",
+        },
+      }),
+      { fetchImpl }
+    );
+
+    expect(bodies[0]).toMatchObject({
+      include_auto_replies_in_stats: false,
+      daily_max_sends_per_receiving_domain: 40,
+      sequence_prioritization: "new_leads",
+    });
+  });
+
+  it("makes no settings call when settings are omitted", async () => {
+    const callLog: string[] = [];
+    await createEmailBisonCampaign(CLIENT_A, buildCreateInput({ launch: false }), { fetchImpl: fullSuccessFetch(callLog) });
+    expect(callLog.some((entry) => entry.endsWith("/update"))).toBe(false);
+  });
+
+  it("stops the chain and names updating settings when the settings PATCH fails", async () => {
+    const fetchImpl = fetchFailingAt("/update");
+
+    await expect(
+      createEmailBisonCampaign(CLIENT_A, buildCreateInput({ launch: true, settings: { ...DEFAULT_CAMPAIGN_SETTINGS } }), {
+        fetchImpl,
+      })
+    ).rejects.toThrow("Campaign created but updating settings failed");
   });
 
   it("stops the chain and names attaching senders when attach-sender-emails fails", async () => {

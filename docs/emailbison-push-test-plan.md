@@ -248,6 +248,23 @@ Guards the `succeeded >= 1` auto-launch gate.
 - Verify: 0 attach (all no-email) → the campaign is **NOT launched** (stays
   draft). A launched-but-empty campaign is the failure.
 
+### EB-17 — Campaign settings on create (T31)
+Guards the "Campaign settings" section and the settings PATCH.
+- Campaign step: **+ Create a campaign**, expand **Campaign settings**: defaults
+  are 1000 / 1000 / plain text, open tracking, spam protection, unsubscribe off /
+  "Include auto replies in stats" ON / max per receiving domain 25 / "Prioritize
+  followups (default)". Set max emails/day to `0` → **Create
+  campaign** is disabled with an inline error; restore a valid value. Also try
+  receiving domain `0` and `1001` (disabled) and `1000` (ok).
+- Create `T31 test - delete me` with 50 / 20 / plain text + open tracking +
+  spam protection + unsubscribe on, auto replies OFF, receiving domain 40,
+  "Prioritize new leads". Close the dialog before adding leads.
+- Verify: `GET /api/campaigns/{id}` shows 50 / 20 / plain_text / open_tracking /
+  can_unsubscribe true, include_auto_replies_in_stats false,
+  daily_max_sends_per_receiving_domain 40, sequence_prioritization new_leads.
+  (LinkedIn settings are not exposed by the API and have no UI here.) (`reputation_building` is not echoed by the API.)
+  Delete the campaign afterwards.
+
 ---
 
 # SEQUENCE 7 — Cross-workspace (OPTIONAL — needs a 2nd EB client/workspace)

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 import type { ClientRow } from "@/lib/data/clients";
+import { DEFAULT_CAMPAIGN_SETTINGS } from "@/lib/emailbison/campaign-settings";
 
 const { getUser } = vi.hoisted(() => ({ getUser: vi.fn() }));
 vi.mock("@/lib/auth/dal", () => ({ getUser }));
@@ -132,9 +133,48 @@ describe("POST /api/clients/[id]/emailbison-campaigns", () => {
         senderEmailIds: testPostBody.senderEmailIds,
         schedule: testPostBody.schedule,
         steps: testPostBody.sequenceSteps,
+        settings: undefined,
         launch: testPostBody.launch,
       }
     );
+  });
+
+  it("forwards parsed settings to the orchestrator", async () => {
+    createEmailBisonCampaign.mockResolvedValue({ id: "1", name: "Q4 outreach" });
+    const settings = { maxEmailsPerDay: 50, maxNewLeadsPerDay: 20, plainText: true, openTracking: true };
+    const res = await POST(makePostRequest({ ...testPostBody, settings }), makeParams());
+    expect(res.status).toBe(200);
+    expect(createEmailBisonCampaign.mock.calls.at(-1)?.[1].settings).toEqual({
+      ...DEFAULT_CAMPAIGN_SETTINGS,
+      ...settings,
+    });
+  });
+
+  it("forwards the new settings fields and rejects invalid ones", async () => {
+    createEmailBisonCampaign.mockResolvedValue({ id: "1", name: "Q4 outreach" });
+    const settings = {
+      includeAutoRepliesInStats: false,
+      maxSendsPerReceivingDomain: 40,
+      sequencePrioritization: "new_leads",
+    };
+    const ok = await POST(makePostRequest({ ...testPostBody, settings }), makeParams());
+    expect(ok.status).toBe(200);
+    expect(createEmailBisonCampaign.mock.calls.at(-1)?.[1].settings).toEqual({ ...DEFAULT_CAMPAIGN_SETTINGS, ...settings });
+
+    createEmailBisonCampaign.mockClear();
+    for (const bad of [{ maxSendsPerReceivingDomain: 1001 }, { sequencePrioritization: "x" }]) {
+      const res = await POST(makePostRequest({ ...testPostBody, settings: bad }), makeParams());
+      expect(res.status).toBe(400);
+    }
+    expect(createEmailBisonCampaign).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 without calling EmailBison when settings are invalid", async () => {
+    createEmailBisonCampaign.mockClear();
+    const res = await POST(makePostRequest({ ...testPostBody, settings: { maxEmailsPerDay: 0 } }), makeParams());
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("Invalid campaign settings");
+    expect(createEmailBisonCampaign).not.toHaveBeenCalled();
   });
 
   it("returns 502 with the step-specific message when the orchestrator fails", async () => {

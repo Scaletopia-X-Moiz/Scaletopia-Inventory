@@ -3,6 +3,7 @@ import {
   EmailBisonApiError,
   listCampaigns,
   createCampaign,
+  updateCampaignSettings,
   attachSenderEmails,
   createCampaignSchedule,
   createSequenceSteps,
@@ -15,6 +16,7 @@ import {
   type EmailBisonSequenceVariantStep,
 } from "@/lib/emailbison/client";
 import type { EmailBisonCredentials } from "@/lib/emailbison/types";
+import type { EmailBisonCampaignSettingsInput } from "@/lib/emailbison/campaign-settings";
 
 /** Hard cap on pages walked per fetch. `hasMore` is derived from
  * `meta.current_page`/`meta.last_page` (lib/emailbison/client.ts), whose
@@ -137,6 +139,9 @@ export interface CreateEmailBisonCampaignInput {
   schedule: EmailBisonCampaignScheduleInput;
   steps: CreateEmailBisonSequenceStepInput[];
   sequenceTitle?: string;
+  /** Campaign settings (limits, tracking, unsubscribe). When omitted the
+   * campaign keeps EmailBison's defaults and no settings call is made. */
+  settings?: EmailBisonCampaignSettingsInput;
   launch: boolean;
 }
 
@@ -151,8 +156,8 @@ function variantLabel(index: number): string {
 }
 
 /** Orchestrates EmailBison's multi-call campaign-creation flow (issue #94's
- * "Seam" decision): createCampaign -> attachSenderEmails ->
- * createCampaignSchedule -> createSequenceSteps -> (one create + link per
+ * "Seam" decision): createCampaign -> (updateCampaignSettings, when
+ * `input.settings` is given) -> attachSenderEmails -> createCampaignSchedule -> createSequenceSteps -> (one create + link per
  * extra split-test variant) -> (resumeCampaign, only when `input.launch` is
  * true). This is the single place that knows this sequence — route handlers
  * and UI stay thin and never call the individual client.ts functions
@@ -190,6 +195,17 @@ export async function createEmailBisonCampaign(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new EmailBisonApiError(`Creating campaign failed: ${message}`);
+  }
+
+  // Settings can't ride on the create call (POST /api/campaigns takes only
+  // `name`), so they go in a follow-up PATCH. Done first so a bad payload
+  // fails fast, leaving the emptiest possible partial campaign.
+  if (input.settings) {
+    try {
+      await updateCampaignSettings(client, campaign.id, input.settings, deps);
+    } catch (err) {
+      throw new EmailBisonApiError(stepFailureMessage("updating settings", err));
+    }
   }
 
   try {

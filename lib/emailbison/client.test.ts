@@ -14,6 +14,7 @@ import {
   getSequenceSteps,
   updateSequenceVariants,
   resumeCampaign,
+  updateCampaignSettings,
   requestWithRetry,
   EmailBisonApiError,
   EMAILBISON_RETRY_MAX_RETRIES,
@@ -924,5 +925,64 @@ describe("resumeCampaign", () => {
       .mockResolvedValue(jsonResponse(200, { data: { success: false, message: "already sending" } }));
 
     await expect(resumeCampaign(CREDENTIALS, "camp_1", { fetchImpl })).rejects.toThrow(EmailBisonApiError);
+  });
+});
+
+describe("updateCampaignSettings", () => {
+  const SETTINGS = {
+    maxEmailsPerDay: 50,
+    maxNewLeadsPerDay: 20,
+    plainText: true,
+    openTracking: true,
+    reputationBuilding: false,
+    canUnsubscribe: true,
+    includeAutoRepliesInStats: false,
+    maxSendsPerReceivingDomain: 10,
+    sequencePrioritization: "new_leads" as const,
+  };
+
+  it("PATCHes the update endpoint with the snake_case settings body", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { data: { id: 1 } }));
+
+    await updateCampaignSettings(CREDENTIALS, "camp_1", SETTINGS, { fetchImpl });
+
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${CREDENTIALS.workspaceId}/api/campaigns/camp_1/update`);
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(init.body)).toEqual({
+      max_emails_per_day: 50,
+      max_new_leads_per_day: 20,
+      plain_text: true,
+      open_tracking: true,
+      reputation_building: false,
+      can_unsubscribe: true,
+      include_auto_replies_in_stats: false,
+      daily_max_sends_per_receiving_domain: 10,
+      sequence_prioritization: "new_leads",
+    });
+  });
+
+  it("tolerates a trailing slash on the workspace URL", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { data: { id: 1 } }));
+
+    await updateCampaignSettings({ ...CREDENTIALS, workspaceId: "https://dedi.emailbison.com/" }, "camp_1", SETTINGS, {
+      fetchImpl,
+    });
+
+    expect(fetchImpl.mock.calls[0][0]).toBe("https://dedi.emailbison.com/api/campaigns/camp_1/update");
+  });
+
+  it("throws a typed error on a non-2xx response", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(422, { data: { success: false, message: "max emails per day must be at least 1" } }));
+
+    await expect(updateCampaignSettings(CREDENTIALS, "camp_1", SETTINGS, { fetchImpl })).rejects.toThrow(EmailBisonApiError);
+  });
+
+  it("throws a typed error on a 200 with a { data: { success: false } } body", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { data: { success: false, message: "nope" } }));
+
+    await expect(updateCampaignSettings(CREDENTIALS, "camp_1", SETTINGS, { fetchImpl })).rejects.toThrow(EmailBisonApiError);
   });
 });

@@ -6,6 +6,7 @@ import {
   type CreateEmailBisonCampaignInput,
 } from "@/lib/emailbison/campaigns";
 import { EmailBisonApiError } from "@/lib/emailbison/client";
+import { parseCampaignSettings } from "@/lib/emailbison/campaign-settings";
 import { getUser } from "@/lib/auth/dal";
 
 export const dynamic = "force-dynamic";
@@ -64,7 +65,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     return Response.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const { name, senderEmailIds, schedule, sequenceSteps, launch } = body;
+  const { name, senderEmailIds, schedule, sequenceSteps, launch, settings } = body;
+
+  const parsedSettings = parseCampaignSettings(settings);
+  if (!parsedSettings.ok) {
+    return Response.json({ error: parsedSettings.error }, { status: 400 });
+  }
 
   try {
     const campaign = await createEmailBisonCampaign(
@@ -78,6 +84,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         senderEmailIds: senderEmailIds as string[],
         schedule: schedule as CreateEmailBisonCampaignInput["schedule"],
         steps: sequenceSteps as CreateEmailBisonCampaignInput["steps"],
+        // Only when the caller sent settings: otherwise no extra PATCH.
+        settings: settings === undefined ? undefined : parsedSettings.value,
         launch: launch as boolean,
       }
     );

@@ -8,6 +8,12 @@ import { showToast } from "@/components/shared/toast";
 import { fetchActiveClients } from "@/lib/data/active-clients-client";
 import { useRegisterDialogOpen } from "@/components/shared/dialog-stack";
 import { SenderEmailPicker } from "@/components/emailbison/sender-email-picker";
+import { CampaignSettingsFields } from "@/components/emailbison/campaign-settings-fields";
+import {
+  DEFAULT_CAMPAIGN_SETTINGS,
+  campaignSettingsFormErrors,
+  type EmailBisonCampaignSettingsInput,
+} from "@/lib/emailbison/campaign-settings";
 import type { EmailBisonCampaign, EmailBisonCustomVariable } from "@/lib/emailbison/client";
 import type { EmailBisonCustomVariableEntry, EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
@@ -174,6 +180,7 @@ interface CreateCampaignForm {
   endTime: string;
   timezone: string;
   steps: SequenceStepForm[];
+  settings: EmailBisonCampaignSettingsInput;
 }
 
 function newCreateCampaignForm(): CreateCampaignForm {
@@ -185,6 +192,7 @@ function newCreateCampaignForm(): CreateCampaignForm {
     endTime: "17:00",
     timezone: "America/New_York",
     steps: [newSequenceStep()],
+    settings: { ...DEFAULT_CAMPAIGN_SETTINGS },
   };
 }
 
@@ -293,6 +301,7 @@ export function PushToEmailBisonCampaignButton({
   const createFormValid =
     createForm.name.trim().length > 0 &&
     createForm.senderEmailIds.length > 0 &&
+    campaignSettingsFormErrors(createForm.settings).length === 0 &&
     createForm.steps.length > 0 &&
     createForm.steps.every(
       (s) =>
@@ -562,6 +571,7 @@ export function PushToEmailBisonCampaignButton({
             endTime: createForm.endTime,
             timezone: createForm.timezone,
           },
+          settings: createForm.settings,
           sequenceSteps: createForm.steps.map((step, i) => ({
             emailSubject: step.variants[0].emailSubject,
             emailBody: step.variants[0].emailBody,
@@ -914,6 +924,11 @@ export function PushToEmailBisonCampaignButton({
                         ) : null}
                       </div>
                     </div>
+
+                    <CampaignSettingsFields
+                      value={createForm.settings}
+                      onChange={(settings) => setCreateForm((f) => ({ ...f, settings }))}
+                    />
 
                     <div>
                       <p className="text-xs font-semibold text-ink">Sequence steps</p>

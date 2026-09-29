@@ -1,5 +1,6 @@
 import "server-only";
 import type { EmailBisonCredentials, EmailBisonLeadPayload } from "@/lib/emailbison/types";
+import { toWireCampaignSettings, type EmailBisonCampaignSettingsInput } from "@/lib/emailbison/campaign-settings";
 
 export const EMAILBISON_RETRY_MAX_RETRIES = 5;
 const EMAILBISON_RETRY_BASE_DELAY_MS = 500;
@@ -1080,4 +1081,30 @@ export async function resumeCampaign(
   const { status, json } = await requestPatchWithRetry(fetchImpl, credentials, `/api/campaigns/${campaignId}/resume`);
   assertOk(status, json, "campaign resume");
   assertSuccessBody(json, "campaign resume");
+}
+
+/** Updates a campaign's settings (`PATCH /api/campaigns/{id}/update`) —
+ * live-confirmed 2026-09-29 on the Testing workspace: `200` with the full
+ * campaign in `{ data: {...} }`; out-of-range values come back `422` with
+ * `{ data: { success: false, message, errors } }` (assertOk catches that;
+ * assertSuccessBody covers a 2xx carrying the same shape). Not a
+ * create-time call: `POST /api/campaigns` accepts only `name`, so the
+ * orchestrator runs this right after createCampaign. Note EmailBison silently
+ * ignores `unsubscribe_text` here and never echoes `reputation_building`
+ * (api-research.md "Campaign settings"). */
+export async function updateCampaignSettings(
+  credentials: EmailBisonCredentials,
+  campaignId: string,
+  settings: EmailBisonCampaignSettingsInput,
+  deps: EmailBisonClientDeps = {}
+): Promise<void> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const { status, json } = await requestPatchWithRetry(
+    fetchImpl,
+    credentials,
+    `/api/campaigns/${campaignId}/update`,
+    toWireCampaignSettings(settings)
+  );
+  assertOk(status, json, "campaign settings update");
+  assertSuccessBody(json, "campaign settings update");
 }

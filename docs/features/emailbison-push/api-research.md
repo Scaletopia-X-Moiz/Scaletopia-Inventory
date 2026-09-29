@@ -97,6 +97,60 @@ person was never pushed to the workspace before.
   always use the upsert endpoint.
 - ~~Whether there's a list-campaigns endpoint~~ — **Yes**, `GET /api/campaigns`.
 
+## Campaign settings (T31, live-verified 2026-09-29, Testing workspace)
+
+`POST /api/campaigns` accepts only `name`. Settings go in a follow-up
+`PATCH /api/campaigns/{id}/update` (JSON, every field optional). `200` returns the full
+campaign in `{ data: {...} }`; `GET /api/campaigns/{id}` returns the same fields.
+
+| Wire field | Default | Live result |
+|---|---|---|
+| `max_emails_per_day` | 1000 | persisted; 1..50000, must be >= `max_new_leads_per_day` |
+| `max_new_leads_per_day` | 1000 | persisted; 1..50000 |
+| `plain_text` | false | persisted |
+| `open_tracking` | false | persisted |
+| `can_unsubscribe` | false | persisted |
+| `reputation_building` | false | PATCH returns 200, but the field is **not present in any GET/PATCH response**, so it cannot be verified |
+| `unsubscribe_text` | null | **200 but silently ignored**: stayed `null` for every value tried (plain text, `{UNSUBSCRIBE_LINK}`, 300 chars) |
+
+- Violations return `422` with `{ data: { success: false, message, errors } }` (0, > 50000,
+  or emails/day < leads/day).
+- `unsubscribe_text` was dropped from our settings type and mapper (EmailBison ignores it,
+  see the table); re-add it only if EmailBison starts honouring it.
+- Three more settings are on the campaign GET and are **writable** via the same PATCH
+  (live-verified 2026-09-29 on the Testing workspace with throwaway campaigns 1133/1134,
+  never launched, deleted, GET 404). Added to the create-campaign UI in T31 round 3 (v1
+  decision by the product owner):
+
+  | Wire field | Default | Live result |
+  |---|---|---|
+  | `include_auto_replies_in_stats` | true | persisted (false round-trips on GET) |
+  | `sequence_prioritization` | `"followups"` | persisted; only `"followups"` and `"new_leads"` accepted, anything else 422 "The selected sequence prioritization is invalid." |
+  | `daily_max_sends_per_receiving_domain` | 25 | persisted (10 round-trips); 422 below 1 and above 1000 |
+
+  Re-verified round 3 (campaign 1141, deleted, 404): `false` / `1000` / `new_leads` all
+  round-trip together on GET; `1` is accepted, `0` and `1001` return 422. In EmailBison's UI
+  the labels are "Include auto replies in stats" (not retroactive), "Maximum emails per
+  receiving domain", and "How should sequences be prioritized?" (`followups` = "Prioritize
+  followups (default)", `new_leads` = "Prioritize new leads").
+
+- **LinkedIn Integration Settings: NOT exposed by the public API (round 3, 2026-09-29).** A
+  fresh campaign GET returns exactly these keys: id, uuid, sequence_id, name, type, status,
+  completion_percentage, emails_sent, opened, unique_opens, replied, unique_replies, bounced,
+  unsubscribed, interested, total_leads_contacted, max_emails_per_day, max_new_leads_per_day,
+  plain_text, open_tracking, total_leads, can_unsubscribe, unsubscribe_text,
+  include_auto_replies_in_stats, sequence_prioritization, daily_max_sends_per_receiving_domain,
+  created_at, updated_at, tags. Nothing LinkedIn-related. PATCHing `linkedin`,
+  `linkedin_integration`, `linkedin_enabled`, `linkedin_settings`,
+  `linkedin_integration_enabled`, `enable_linkedin`, `use_linkedin`, `linkedin_account_id`,
+  `linkedin_connection_request`, `linkedin_steps` all return 200 (unknown keys are silently
+  ignored) and none appears on the following GET. The repo and the EmailBison CLI reference
+  contain no LinkedIn campaign field. No UI was added; it can only be set in EmailBison's UI
+  unless EmailBison documents an endpoint (a human should ask EmailBison support).
+
+- Delete is async: `DELETE /api/campaigns/{id}` returns `200` "queued for deletion"; the
+  GET flips to `404` within a few seconds.
+
 ## Still open — needs a live token before implementing
 
 - Exact base-URL-per-workspace scheme — is every client's workspace subdomain fixed, or
