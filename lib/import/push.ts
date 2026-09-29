@@ -623,6 +623,59 @@ async function bulkUpdate(
   return { updated, failed };
 }
 
+/**
+ * Normalizes and dedupes raw mapped records into the exact list an import
+ * processes. Pure and order-preserving: the same input always yields the same
+ * output in the same order, which is what lets a resumable import re-run this
+ * on every tick and slice the result by a saved offset (T22).
+ *
+ * `deriveNames` fills a missing people `full_name` from first/last name
+ * (ticket 74). `pushRecords` and the import worker want it; `preflightRecords`
+ * has never done it and its counts don't depend on it.
+ */
+export function prepareImportRecords(
+  records: Record<string, unknown>[],
+  targetTable: "companies" | "people",
+  { deriveNames = true }: { deriveNames?: boolean } = {}
+): Record<string, unknown>[] {
+  const normalized = records.map((rec) => {
+    const out = { ...rec };
+
+    const rawDomain = out.domain as string | null | undefined;
+    const rawLinkedin = out.linkedin_url as string | null | undefined;
+    const rawWebsite = out.website_url as string | null | undefined;
+
+    const normalizedDomain = scrubJunkDomain(normalizeDomain(rawDomain));
+    const normalizedLinkedin = normalizeLinkedInUrl(rawLinkedin);
+
+    // If no explicit domain, try to derive from website_url
+    const derivedDomain =
+      normalizedDomain ?? scrubJunkDomain(normalizeDomain(rawWebsite));
+
+    out.domain = derivedDomain;
+    out.linkedin_url = normalizedLinkedin;
+
+    // Ticket 74: when a people source (e.g. Manual CSV) provides First
+    // Name / Last Name but no explicit Full Name column, full_name would
+    // otherwise land as null — blank in the People list and unfindable via
+    // the name search box (lib/data/search.ts only searches
+    // full_name/email). Never overwrites an explicit Full Name value.
+    if (deriveNames && targetTable === "people") {
+      out.full_name = deriveFullName(
+        out.full_name as string | null | undefined,
+        out.first_name as string | null | undefined,
+        out.last_name as string | null | undefined
+      );
+    }
+
+    return out;
+  });
+
+  return targetTable === "companies"
+    ? dedupeCompanies(normalized)
+    : dedupePeople(normalized);
+}
+
 export interface PreflightResult {
   inputCount: number;
   dedupedCount: number;
@@ -636,21 +689,9 @@ export async function preflightRecords(
 ): Promise<PreflightResult> {
   const inputCount = records.length;
 
-  const normalized = records.map((rec) => {
-    const out = { ...rec };
-    const rawDomain = out.domain as string | null | undefined;
-    const rawLinkedin = out.linkedin_url as string | null | undefined;
-    const rawWebsite = out.website_url as string | null | undefined;
-    const normalizedDomain = scrubJunkDomain(normalizeDomain(rawDomain));
-    const normalizedLinkedin = normalizeLinkedInUrl(rawLinkedin);
-    const derivedDomain = normalizedDomain ?? scrubJunkDomain(normalizeDomain(rawWebsite));
-    out.domain = derivedDomain;
-    out.linkedin_url = normalizedLinkedin;
-    return out;
-  });
-
-  const deduped =
-    targetTable === "companies" ? dedupeCompanies(normalized) : dedupePeople(normalized);
+  // Preflight has never derived full_name (it doesn't affect the counts it
+  // reports), so keep skipping it here rather than change what it returns.
+  const deduped = prepareImportRecords(records, targetTable, { deriveNames: false });
   const dedupedCount = deduped.length;
 
   const existingKeys =
@@ -671,6 +712,236 @@ export async function preflightRecords(
   return { inputCount, dedupedCount, insertCount, updateCount };
 }
 
+/** Records handled per resumable chunk. Bounds each `import_bulk_update_*` RPC
+ * call (which receives its whole array in one statement) and each in-memory
+ * existing-keys refresh, and is the granularity at which a tick can stop for
+ * its deadline. */
+export const IMPORT_TICK_CHUNK = 2000;
+
+export interface ImportTickOptions {
+  records: Record<string, unknown>[];
+  targetTable: "companies" | "people";
+  sourceKey: string;
+  tags: [string, string, string];
+  /** Index into the DEDUPED list to resume from (0 for a fresh stage). */
+  offset: number;
+  /** Epoch ms. The tick stops after the chunk in flight once this passes. */
+  deadline: number;
+  chunkSize?: number;
+  /** Fired after preflight and after each chunk; the worker uses it as the
+   * lease heartbeat. `done`/`total` are deduped-list positions. */
+  onProgress?: ProgressCallback;
+  /** Optional live sink, updated after every chunk (and once the deduped
+   * count is known). Lets a caller that catches a mid-tick throw still record
+   * the work that already landed (BUG E). */
+  partial?: ImportTickResult;
+  /** Awaited once after dedupe (before the key fetch, cursor unchanged) and
+   * again after every chunk, with this tick's cumulative deltas. The worker
+   * persists cursor + counts here so a hard kill loses at most one chunk and
+   * the progress bar moves during the first tick. A throw propagates out of
+   * the tick. */
+  onCheckpoint?: (state: ImportTickResult) => Promise<void>;
+  /** Polled before each chunk (including the first). Returning true ends the
+   * tick early (the worker uses it when it has lost its lease). */
+  shouldStop?: () => boolean;
+  /** Conservative floor, in ms, for how long one chunk may take. A new chunk is
+   * only started when `now + max(minChunkMs, 1.5 x slowest chunk so far)` fits
+   * before `deadline`, leaving headroom for the DB statement timeout. The first
+   * chunk always runs. Default 0. */
+  minChunkMs?: number;
+}
+
+export interface ImportTickResult {
+  dedupedCount: number;
+  /** Deduped-list index the next tick should resume from. */
+  nextOffset: number;
+  done: boolean;
+  /** This tick's deltas only, not running totals. */
+  inserted: number;
+  updated: number;
+  failedRecords: Record<string, unknown>[];
+}
+
+/** Adds the lookup keys of a record that was just inserted to the in-memory
+ * existing-keys set, mirroring what fetchExistingCompanies/People would have
+ * loaded for it. Only the keys those fetchers load are added: adding e.g. an
+ * `email:` key for a company would make later companies match on an email the
+ * real existing set never contains. */
+function addInsertedKeys(
+  rec: Record<string, unknown>,
+  targetTable: "companies" | "people",
+  existingKeys: Set<string>
+): void {
+  const domain = typeof rec.domain === "string" ? rec.domain : null;
+  const linkedin = typeof rec.linkedin_url === "string" ? rec.linkedin_url : null;
+  const email = typeof rec.email === "string" ? rec.email.toLowerCase() : null;
+  if (targetTable === "companies" && domain) existingKeys.add(`domain:${domain}`);
+  if (linkedin) existingKeys.add(`linkedin:${linkedin}`);
+  if (targetTable === "people" && email) existingKeys.add(`email:${email}`);
+}
+
+function recordSignature(rec: Record<string, unknown>): string {
+  return [rec.domain, rec.linkedin_url, rec.email]
+    .map((v) => (typeof v === "string" ? v : ""))
+    .join("|");
+}
+
+/**
+ * Runs one resumable slice of an import (T22): prepare (normalize + dedupe) the
+ * records, fetch existing keys ONCE, then process `deduped[offset…]` in
+ * fixed-size chunks until the list is exhausted or `deadline` passes. Always
+ * processes at least one chunk so a tick can't stall on an already-expired
+ * deadline.
+ *
+ * Crash recovery is at-least-once per chunk (the cursor is persisted after each
+ * chunk via `onCheckpoint`, so a rerun is at most one chunk). Rows that have a
+ * lookup key (domain / linkedin_url for companies; email / linkedin_url for
+ * people) are re-applied as updates on a rerun: they are "existing" by then,
+ * which is safe and can only shift counts toward "updated". Rows with NO key
+ * (a company with only company_name, a person with only a name) can never match
+ * `existingKeys`, so a rerun of the crashed chunk INSERTS THEM AGAIN. Those are
+ * not idempotent; this is a known limitation (see ADR 0006).
+ */
+export async function runImportTick(opts: ImportTickOptions): Promise<ImportTickResult> {
+  const { records, targetTable, sourceKey, tags, offset, deadline, onProgress, partial } = opts;
+  const chunkSize = opts.chunkSize ?? IMPORT_TICK_CHUNK;
+
+  const deduped = prepareImportRecords(records, targetTable);
+  const dedupedCount = deduped.length;
+  if (partial) partial.dedupedCount = dedupedCount;
+
+  onProgress?.({ phase: "preflight", done: offset, total: dedupedCount });
+
+  const existingKeys =
+    targetTable === "companies"
+      ? await fetchExistingCompanies(deduped)
+      : await fetchExistingPeople(deduped);
+
+  // Populated only for targetTable === "people"; passed through to bulkInsert
+  // and bulkUpdate so they can derive the person canonical columns from the
+  // linked company's own already-canonical fields without a second full
+  // companies-table fetch.
+  const companyById = new Map<string, PersonCompanyRow>();
+  const knownClients = new Set<string>();
+  let companyByDomain = new Map<string, PersonCompanyRow>();
+
+  if (targetTable === "people") {
+    companyByDomain = await fetchCompanyIdByDomain();
+    for (const company of companyByDomain.values()) {
+      companyById.set(company.id, company);
+      if (company.client) knownClients.add(company.client.trim().toLowerCase());
+    }
+  }
+
+  let inserted = 0;
+  let updated = 0;
+  const failedRecords: Record<string, unknown>[] = [];
+  let position = Math.min(offset, dedupedCount);
+  if (partial) partial.nextOffset = position;
+
+  let slowestChunkMs = 0;
+  let chunksRun = 0;
+  const checkpoint = async () => {
+    if (!opts.onCheckpoint) return;
+    await opts.onCheckpoint({
+      dedupedCount,
+      nextOffset: position,
+      done: position >= dedupedCount,
+      inserted,
+      updated,
+      failedRecords: [...failedRecords],
+    });
+  };
+  // Early checkpoint: total is known as soon as dedupe is done, so the
+  // progress bar has a denominator during the whole first tick.
+  await checkpoint();
+
+  while (position < dedupedCount) {
+    if (opts.shouldStop?.()) break;
+    if (chunksRun > 0) {
+      const estimate = Math.max(opts.minChunkMs ?? 0, slowestChunkMs * 1.5);
+      if (Date.now() + estimate > deadline) break;
+    }
+    const chunkStartedAt = Date.now();
+    const chunk = deduped.slice(position, position + chunkSize);
+
+    if (targetTable === "people") {
+      for (const rec of chunk) {
+        const domain = typeof rec.domain === "string" ? rec.domain : null;
+        rec.company_id = domain ? companyByDomain.get(domain)?.id ?? null : null;
+      }
+    }
+
+    const toInsert: Record<string, unknown>[] = [];
+    const toUpdate: Record<string, unknown>[] = [];
+    for (const rec of chunk) {
+      if (recordExistsKey(rec, existingKeys)) {
+        toUpdate.push(rec);
+      } else {
+        toInsert.push(rec);
+      }
+    }
+
+    const { inserted: ins, failed: insertFailed } = await bulkInsert(
+      toInsert,
+      targetTable,
+      sourceKey,
+      tags,
+      companyById,
+      knownClients
+    );
+    inserted += ins;
+    failedRecords.push(...insertFailed);
+
+    // Rows this chunk just inserted are now existing rows for the chunks that
+    // follow. Skip records that failed to insert (matched by key signature,
+    // since bulkInsert returns copies).
+    const failedSignatures = new Set(insertFailed.map(recordSignature));
+    for (const rec of toInsert) {
+      if (!failedSignatures.has(recordSignature(rec))) {
+        addInsertedKeys(rec, targetTable, existingKeys);
+      }
+    }
+
+    // Skip the RPC for a chunk with nothing to update: per-chunk calls would
+    // otherwise fire an empty `updates` array at the database every chunk.
+    if (toUpdate.length > 0) {
+      const { updated: upd, failed: updateFailed } = await bulkUpdate(
+        toUpdate,
+        targetTable,
+        sourceKey,
+        tags,
+        companyById,
+        knownClients
+      );
+      updated += upd;
+      failedRecords.push(...updateFailed);
+    }
+
+    position += chunk.length;
+    if (partial) {
+      partial.inserted = inserted;
+      partial.updated = updated;
+      partial.failedRecords = [...failedRecords];
+      partial.nextOffset = position;
+    }
+    onProgress?.({ phase: "inserting", done: position, total: dedupedCount });
+    await checkpoint();
+
+    chunksRun += 1;
+    slowestChunkMs = Math.max(slowestChunkMs, Date.now() - chunkStartedAt);
+  }
+
+  return {
+    dedupedCount,
+    nextOffset: position,
+    done: position >= dedupedCount,
+    inserted,
+    updated,
+    failedRecords,
+  };
+}
+
 export async function pushRecords(
   options: PushOptions,
   onProgress: ProgressCallback
@@ -688,116 +959,39 @@ export async function pushRecords(
   let inserted = 0;
   let updated = 0;
   let failedRecords: Record<string, unknown>[] = [];
+  const partial: ImportTickResult = {
+    dedupedCount: 0,
+    nextOffset: 0,
+    done: false,
+    inserted: 0,
+    updated: 0,
+    failedRecords: [],
+  };
 
   try {
     onProgress({ phase: "normalizing", done: 0, total: inputCount });
 
-    const normalized = records.map((rec) => {
-      const out = { ...rec };
-
-      const rawDomain = out.domain as string | null | undefined;
-      const rawLinkedin = out.linkedin_url as string | null | undefined;
-      const rawWebsite = out.website_url as string | null | undefined;
-
-      const normalizedDomain = scrubJunkDomain(normalizeDomain(rawDomain));
-      const normalizedLinkedin = normalizeLinkedInUrl(rawLinkedin);
-
-      // If no explicit domain, try to derive from website_url
-      const derivedDomain =
-        normalizedDomain ?? scrubJunkDomain(normalizeDomain(rawWebsite));
-
-      out.domain = derivedDomain;
-      out.linkedin_url = normalizedLinkedin;
-
-      // Ticket 74: when a people source (e.g. Manual CSV) provides First
-      // Name / Last Name but no explicit Full Name column, full_name would
-      // otherwise land as null — blank in the People list and unfindable via
-      // the name search box (lib/data/search.ts only searches
-      // full_name/email). Never overwrites an explicit Full Name value.
-      if (targetTable === "people") {
-        out.full_name = deriveFullName(
-          out.full_name as string | null | undefined,
-          out.first_name as string | null | undefined,
-          out.last_name as string | null | undefined
-        );
-      }
-
-      return out;
+    // T22: the processing itself now lives in runImportTick (shared with the
+    // queued import worker). This wrapper is the legacy single-shot path — no
+    // deadline, so it runs every chunk in one go — and keeps writing
+    // `import_history` exactly as before.
+    // `partial` is a live sink the tick keeps current after every chunk, so if
+    // it throws mid-way the BUG E catch below still sees what already landed.
+    const tick = await runImportTick({
+      records,
+      targetTable,
+      sourceKey,
+      tags,
+      offset: 0,
+      deadline: Infinity,
+      onProgress,
+      partial,
     });
 
-    const deduped =
-      targetTable === "companies"
-        ? dedupeCompanies(normalized)
-        : dedupePeople(normalized);
-
-    dedupedCount = deduped.length;
-
-    onProgress({ phase: "preflight", done: 0, total: dedupedCount });
-
-    const existingKeys =
-      targetTable === "companies"
-        ? await fetchExistingCompanies(deduped)
-        : await fetchExistingPeople(deduped);
-
-    // Populated only for targetTable === "people"; passed through to bulkInsert
-    // and bulkUpdate so they can derive the person canonical columns from the
-    // linked company's own already-canonical fields without a second full
-    // companies-table fetch.
-    const companyById = new Map<string, PersonCompanyRow>();
-    const knownClients = new Set<string>();
-
-    if (targetTable === "people") {
-      const companyByDomain = await fetchCompanyIdByDomain();
-      for (const company of companyByDomain.values()) {
-        companyById.set(company.id, company);
-        if (company.client) knownClients.add(company.client.trim().toLowerCase());
-      }
-      for (const rec of deduped) {
-        const domain = typeof rec.domain === "string" ? rec.domain : null;
-        rec.company_id = domain ? companyByDomain.get(domain)?.id ?? null : null;
-      }
-    }
-
-    onProgress({ phase: "partitioning", done: dedupedCount, total: dedupedCount });
-
-    const toInsert: Record<string, unknown>[] = [];
-    const toUpdate: Record<string, unknown>[] = [];
-
-    for (const rec of deduped) {
-      if (recordExistsKey(rec, existingKeys)) {
-        toUpdate.push(rec);
-      } else {
-        toInsert.push(rec);
-      }
-    }
-
-    onProgress({ phase: "inserting", done: 0, total: toInsert.length });
-
-    const { inserted: ins, failed: insertFailed } = await bulkInsert(
-      toInsert,
-      targetTable,
-      sourceKey,
-      tags,
-      companyById,
-      knownClients,
-      (done, total) => onProgress({ phase: "inserting", done, total })
-    );
-    inserted = ins;
-    failedRecords = [...insertFailed];
-
-    onProgress({ phase: "updating", done: 0, total: toUpdate.length });
-
-    const { updated: upd, failed: updateFailed } = await bulkUpdate(
-      toUpdate,
-      targetTable,
-      sourceKey,
-      tags,
-      companyById,
-      knownClients,
-      (done, total) => onProgress({ phase: "updating", done, total })
-    );
-    updated = upd;
-    failedRecords = [...failedRecords, ...updateFailed];
+    dedupedCount = tick.dedupedCount;
+    inserted = tick.inserted;
+    updated = tick.updated;
+    failedRecords = tick.failedRecords;
 
     const failedCount = failedRecords.length;
 
@@ -840,6 +1034,10 @@ export async function pushRecords(
     // history instead of vanishing. We still re-throw so the caller surfaces
     // the error to the client. If this history write itself fails, swallow it —
     // the original error is what matters.
+    dedupedCount = partial.dedupedCount;
+    inserted = partial.inserted;
+    updated = partial.updated;
+    failedRecords = partial.failedRecords;
     const errorMarker = {
       _import_error: formatError(err),
       _partial: true,

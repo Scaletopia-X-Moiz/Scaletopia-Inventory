@@ -15,6 +15,7 @@ export interface ActivityRow {
 const ACTION_LABELS: Record<string, string> = {
   "auth.login": "Signed in",
   "auth.logout": "Signed out",
+  "import.enqueue": "Queued import",
   "import.run": "Ran import",
   "clay.push": "Pushed to Clay",
   "verify.reverify": "Reverified (bulk)",
@@ -43,10 +44,20 @@ function summarize(action: string, d: Record<string, unknown>): string {
   switch (action) {
     case "import.run":
       push(d.targetTable && `${d.targetTable}`);
+      push(Number(d.stageCount) > 1 ? `stage ${d.stage}/${d.stageCount}` : undefined);
       push(d.sourceKey && `from ${d.sourceKey}`);
-      push(
-        `${d.insertedCount ?? 0} new · ${d.updatedCount ?? 0} updated · ${d.failedCount ?? 0} failed`
-      );
+      // Legacy failure entries carry no counts; don't invent "0 new · 0 updated".
+      if (d.insertedCount !== undefined || d.updatedCount !== undefined || d.failedCount !== undefined) {
+        push(
+          `${d.insertedCount ?? 0} new · ${d.updatedCount ?? 0} updated · ${d.failedCount ?? 0} failed`
+        );
+      }
+      push(d.error && `error: ${d.error}`);
+      break;
+    case "import.enqueue":
+      push(Array.isArray(d.stages) && d.stages.join(" + "));
+      push(d.sourceKey && `from ${d.sourceKey}`);
+      push(d.fileName);
       break;
     case "clay.push":
       push(d.target);

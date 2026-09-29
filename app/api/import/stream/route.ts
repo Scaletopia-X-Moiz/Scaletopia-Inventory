@@ -1,3 +1,6 @@
+// DEPRECATED (T22): imports are now queued via POST /api/import-jobs and run by
+// app/api/internal/import-worker. The Import wizard no longer calls this route;
+// it stays only as a rollback path and bypasses the one-import-at-a-time mutex.
 import type { NextRequest } from "next/server";
 import { pushRecords, type PushProgress, type PushResult } from "@/lib/import/push";
 import { parseCSV, applyColumnMap } from "@/lib/import/csv";

@@ -3,6 +3,10 @@
     {
       "path": "/api/internal/push-worker",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/internal/import-worker",
+      "schedule": "* * * * *"
     }
   ]
 }
