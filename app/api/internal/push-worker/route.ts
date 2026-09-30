@@ -21,6 +21,8 @@ import {
 } from "@/lib/emailbison/push-to-emailbison";
 import { resumeCampaign } from "@/lib/emailbison/client";
 import { runPeopleGhlPush } from "@/lib/ghl/push-to-ghl";
+import { runGhlActivitySync } from "@/lib/ghl/sync-activity";
+import { enqueueGhlActivitySync } from "@/lib/ghl/enqueue-activity-sync";
 import type { PersonListFilters } from "@/lib/data/people";
 import type { CompanyListFilters } from "@/lib/data/companies";
 import type { EmailBisonCustomVariableEntry, EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
@@ -215,6 +217,41 @@ async function runTick(
     };
   }
 
+  // GHL last-activity sync (docs/features/ghl-last-activity/handoff.md §14).
+  // Extends this dispatch rather than standing up a parallel queue: the sync
+  // is rate-limited against the *same* GHL location as a push to the same
+  // client, so it must share push_jobs' per-client serialization
+  // (claim_next_runnable_job's NOT EXISTS predicate) — a separate queue would
+  // happily run a sync and a push at the same location concurrently and eat
+  // each other's 100-req/10s burst budget. It also inherits the reaper, the
+  // lease heartbeat, the self-chain and the Push Activity panel for free.
+  //
+  // Unlike the push cores it takes no filter snapshot: its working set is
+  // "every contact this client has a platform_contact_id for", which is a
+  // property of the client, not of the view the user was looking at.
+  if (job.platform === "ghl_activity") {
+    const result = await runGhlActivitySync(client, {
+      offset,
+      deadline,
+      onProgress: heartbeat,
+      full: options.full === true,
+    });
+    return {
+      total: result.total,
+      nextOffset: result.nextOffset,
+      done: result.done,
+      // "created" is reused as "contacts whose last activity actually moved"
+      // and "updated" as "contacts the incremental path skipped" — the two
+      // numbers worth seeing in the Push Activity panel for a sync, carried on
+      // the columns that already exist rather than adding sync-only ones.
+      created: result.updated,
+      updated: result.skipped,
+      succeededPersonIds: result.succeededPersonIds,
+      failedPersonIds: result.failedPersonIds,
+      failures: result.failed,
+    };
+  }
+
   if (job.platform === "emailbison_people" || job.platform === "emailbison_companies") {
     const deps = {
       offset,
@@ -358,7 +395,11 @@ async function processJobTick(job: PushJob, workerDeadline: number): Promise<boo
       error: null,
     });
     await logActivity(
-      job.platform === "ghl" ? "ghl.push" : "emailbison.push",
+      job.platform === "ghl_activity"
+        ? "ghl.activity_sync"
+        : job.platform === "ghl"
+          ? "ghl.push"
+          : "emailbison.push",
       {
         target: job.entity,
         action: job.action,
@@ -372,6 +413,30 @@ async function processJobTick(job: PushJob, workerDeadline: number): Promise<boo
       },
       actor
     );
+
+    // A push wrote fresh platform_contact_ids; queue the activity sync that
+    // turns them into last-activity dates, so a user who pushes and then looks
+    // at the column doesn't have to know a second button exists. Only for a
+    // GHL push that actually landed at least one contact, and never for an
+    // activity job itself (which would chain forever). Best-effort: the push
+    // succeeded, so a failed enqueue is logged, not escalated — the manual
+    // Refresh button and the next sync both recover it.
+    if (job.platform === "ghl" && succeeded >= 1) {
+      try {
+        const syncJob = await enqueueGhlActivitySync({
+          clientId: job.clientId,
+          triggeredByUserId: job.triggeredByUserId,
+          triggeredByEmail: job.triggeredByEmail,
+        });
+        console.log(
+          `[push-worker] queued GHL activity sync ${syncJob.id} after push ${job.id} (client=${job.clientId})`
+        );
+      } catch (err) {
+        console.error(
+          `[push-worker] failed to queue GHL activity sync after push ${job.id}: ${errorMessage(err)}`
+        );
+      }
+    }
 
     // Auto-launch the campaign now that leads are attached (moved off create
     // time, where a just-created campaign has zero leads and EmailBison 400s an

@@ -3,6 +3,7 @@ import { parseIncludeExcludeParam } from "@/lib/data/include-exclude";
 import { MX_PROVIDER_PARAM, sanitizeMxProviderFilter } from "@/lib/data/mx-provider";
 import { parseVirtualFiltersParam, parseVirtualColumnsParam } from "@/lib/data/virtual-columns";
 import { parsePushStatusFilter } from "@/lib/data/push-status-filter";
+import { parseLastActivityFilter } from "@/lib/data/last-activity-filter";
 
 function asSingleSelect(value: string | null): SingleSelectFilter | undefined {
   return value === "any" || value === "not_empty" || value === "empty" ? value : undefined;
@@ -37,6 +38,7 @@ export function parsePersonFilters(searchParams: URLSearchParams): PersonListFil
     pushJobId: searchParams.get("pushJobId") ?? undefined,
     pushJobOutcome: asPushJobOutcome(searchParams.get("pushJobOutcome")),
     pushStatus: parsePushStatusFilter(searchParams),
+    lastActivity: parseLastActivityFilter(searchParams),
     virtualFilters: parseVirtualFiltersParam(searchParams),
     virtualColumns: parseVirtualColumnsParam(searchParams),
   };

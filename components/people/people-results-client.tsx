@@ -12,6 +12,7 @@ import { Pagination } from "@/components/companies/pagination";
 import { ExportButton } from "@/components/people/export-button";
 import { PushToClayButton } from "@/components/people/push-to-clay-button";
 import { PushToGhlButton } from "@/components/people/push-to-ghl-button";
+import { RefreshGhlActivityButton } from "@/components/people/refresh-ghl-activity-button";
 import { PushToEmailBisonButton } from "@/components/people/push-to-emailbison-button";
 import { PushToEmailBisonCampaignButton } from "@/components/people/push-to-emailbison-campaign-button";
 import { ReverifyFilteredButton } from "@/components/shared/reverify-filtered-button";
@@ -172,6 +173,7 @@ export function PeopleResultsClient() {
             virtualColumns={virtualColumns}
             onDone={handlePushDone}
           />
+          <RefreshGhlActivityButton onDone={handlePushDone} />
           <PushToEmailBisonButton
             paramsStr={paramsStr}
             total={result.total}

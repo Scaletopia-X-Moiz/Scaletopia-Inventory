@@ -9,6 +9,12 @@ import { SingleSelectGroup } from "@/components/people/single-select-group";
 import { PushJobFilterChip } from "@/components/shared/push-job-filter-chip";
 import { PushStatusFilterPopover } from "@/components/shared/push-status-filter-popover";
 import { parsePushStatusFilter, type PushStatusFilter } from "@/lib/data/push-status-filter";
+import { LastActivityFilterPopover } from "@/components/people/last-activity-filter-popover";
+import {
+  LAST_ACTIVITY_PARAMS,
+  parseLastActivityFilter,
+  type LastActivityFilter,
+} from "@/lib/data/last-activity-filter";
 import type { ClientOption } from "@/lib/data/clients";
 import type { PersonFilterOptions } from "@/lib/data/people";
 
@@ -140,6 +146,25 @@ export function PeopleFilterSlip({
     });
   }
 
+  /** The five activityX params move as one set: a partial filter is not a
+   * filter (buildLastActivityFilter's all-or-nothing rule), so clearing writes
+   * every key out rather than leaving a stale `activityDays` behind a switch
+   * to "is empty". */
+  function setLastActivity(next: LastActivityFilter | undefined) {
+    navigate((params) => {
+      for (const param of LAST_ACTIVITY_PARAMS) params.delete(param);
+      if (!next) return;
+      params.set("activityClient", next.clientId);
+      params.set("activityOp", next.op);
+      if (next.op === "between") {
+        if (next.from) params.set("activityFrom", next.from.slice(0, 10));
+        if (next.to) params.set("activityTo", next.to.slice(0, 10));
+      } else if (next.op === "within_days") {
+        params.set("activityDays", String(next.days));
+      }
+    });
+  }
+
   function commitCustomRange(min: string, max: string) {
     navigate((params) => {
       if (min.trim()) params.set("empmin", min.trim());
@@ -181,9 +206,11 @@ export function PeopleFilterSlip({
     Boolean(searchParams.get("pushClient")) ||
     Boolean(searchParams.get("pushPlatform")) ||
     Boolean(searchParams.get("pushStatus")) ||
+    LAST_ACTIVITY_PARAMS.some((p) => Boolean(searchParams.get(p))) ||
     MULTI_PARAMS.some((p) => searchParams.getAll(p).length > 0 || searchParams.getAll(`${p}_exclude`).length > 0);
 
   const pushStatusValue = parsePushStatusFilter(new URLSearchParams(searchParams.toString()));
+  const lastActivityValue = parseLastActivityFilter(new URLSearchParams(searchParams.toString()));
 
   const toOptions = (entries: { id: string; label: string; count: number }[]): ChipOption[] =>
     entries.map((e) => ({ id: e.id, label: e.label, count: e.count }));
@@ -400,6 +427,11 @@ export function PeopleFilterSlip({
         value={pushStatusValue}
         onChange={setPushStatus}
         countsEndpoint="/api/people/push-status-counts"
+      />
+      <LastActivityFilterPopover
+        clientOptions={clientOptions}
+        value={lastActivityValue}
+        onChange={setLastActivity}
       />
 
       <button

@@ -36,6 +36,51 @@ export function timeAgo(iso: string | null | undefined, now: Date = new Date()):
 }
 
 /**
+ * Relative time the way the GHL Contacts list renders it — used only for the
+ * "Last activity" column, which is a mirror of a number the user can also read
+ * in GHL's own UI, so any drift reads as a bug in our table.
+ *
+ * Two deliberate differences from `timeAgo` above, both verified against the
+ * live GHL UI (docs/features/ghl-last-activity/handoff.md §13.1):
+ *
+ *  1. It TRUNCATES, it does not round. 1.97 years renders "1 year ago", not
+ *     "2 years ago"; 16 days renders "2 weeks ago" (floor(16/7)). Rounding
+ *     puts most rows off by one, which was the entire apparent mismatch that
+ *     made the research look wrong before it was understood.
+ *  2. It has a weeks tier, which `timeAgo` doesn't.
+ *
+ * `timeAgo` is left exactly as-is rather than parameterized: it is what every
+ * other timestamp in the app already renders, and changing its rounding would
+ * silently shift them all.
+ *
+ * Each tier is entered by the largest unit that fits, so there is no gap
+ * between "12 months" and "1 year" (364 days is 11 months, 365 is 1 year).
+ * Empty string for null/unparseable, which every call site renders as blank —
+ * a person with no qualifying message has no last activity, and GHL shows
+ * that cell blank too.
+ */
+export function ghlTimeAgo(iso: string | null | undefined, now: Date = new Date()): string {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+
+  const sec = Math.max(0, Math.floor((now.getTime() - then) / 1000));
+  const min = Math.floor(sec / 60);
+  const hr = Math.floor(min / 60);
+  const day = Math.floor(hr / 24);
+
+  const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? "" : "s"} ago`;
+
+  if (day >= 365) return plural(Math.floor(day / 365), "year");
+  if (day >= 30) return plural(Math.floor(day / 30), "month");
+  if (day >= 7) return plural(Math.floor(day / 7), "week");
+  if (day >= 1) return plural(day, "day");
+  if (hr >= 1) return plural(hr, "hour");
+  if (min >= 1) return plural(min, "minute");
+  return "Just now";
+}
+
+/**
  * Absolute date+time string, e.g. for a `title` tooltip on a relative
  * ("3 hours ago") timestamp. Locale is pinned explicitly (matching the
  * "en-US" convention used for numbers elsewhere in this app) so server and

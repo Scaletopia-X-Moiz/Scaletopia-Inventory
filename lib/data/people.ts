@@ -23,6 +23,8 @@ import {
   type PushStatusCounts,
   type PushStatusFilter,
 } from "@/lib/data/push-status-filter";
+import type { LastActivityFilter } from "@/lib/data/last-activity-filter";
+import { getPeopleLastActivity, resolveLastActivityIds } from "@/lib/data/ghl-activity";
 
 export type SingleSelectFilter = "any" | "not_empty" | "empty";
 
@@ -69,6 +71,15 @@ export interface PersonListFilters {
    * with CompanyListFilters via lib/data/push-status-filter.ts. Only the type
    * and RPC payload key land here (#126) — predicate evaluation is F2/P1. */
   pushStatus?: PushStatusFilter;
+  /** GHL "Last activity" filter (client-scoped: is empty / is not empty /
+   * between / within last N days). People-only — last activity belongs to a
+   * GHL contact, and only people are pushed to GHL as contacts.
+   *
+   * Resolved to an id set off `platform_pushes` (resolveLastActivityIds in
+   * lib/data/ghl-activity.ts) and intersected in app code, exactly like
+   * pushJobId, rather than pushed into the six filter RPCs — see that
+   * function's doc for the reasoning and the facet-count caveat it carries. */
+  lastActivity?: LastActivityFilter;
   /** Virtual-column predicates over custom_data enrichment fields (ticket #33,
    * docs/adr/0002-virtual-column-enrichment-filtering.md). Evaluated by the
    * shared SQL predicate (lib/data/virtual-columns.sql), not the PostgREST
@@ -107,6 +118,11 @@ export interface PersonListRow {
   country: string | null;
   sources: string[];
   lastUpdated: string | null;
+  /** Most recent GHL last-activity date across every client this person was
+   * pushed to, or null when there is none (rendered blank, matching the GHL
+   * Contacts list). Populated per rendered page by getPeopleLastActivity, not
+   * by the list query — see getPeople. */
+  lastActivityAt?: string | null;
   /** custom_data[key] per active virtual column (filters.virtualColumns) —
    * only populated for getPeople, mirroring CompanyListRow.virtualColumnValues
    * in lib/data/companies.ts. */
@@ -434,15 +450,36 @@ async function fetchRowsForRestrictedIds(
  *  - both: intersect the sets; the virtual RPC already carries standard
  *    filters, so the intersection needs only an id lookup. */
 async function resolveRestrictedRows(filters: PersonListFilters): Promise<RawPersonRow[] | null> {
-  const [virtualIds, pushIds] = await Promise.all([
+  const [virtualIds, pushJobIds, activityIds] = await Promise.all([
     resolveVirtualFilterIds(filters),
     resolvePushJobIds(filters),
+    // Third id-restricting dimension (GHL last activity). Same null-means-
+    // inactive contract as the other two, so an inactive filter leaves every
+    // existing path byte-identical.
+    resolveLastActivityIds(filters.lastActivity),
   ]);
-  if (virtualIds === null && pushIds === null) return null;
-  if (pushIds === null) return fetchRowsForVirtualIds(virtualIds as string[]);
-  if (virtualIds === null) return fetchRowsForRestrictedIds(pushIds, filters);
+
+  // pushJobId and lastActivity are both raw id sets with no standard filters
+  // applied, so they intersect with each other first and are then handled as
+  // one "restricted" set — the virtual-filter set is different in kind (the
+  // RPC already baked the standard filters into it).
+  const restrictedIds = intersectIdSets(pushJobIds, activityIds);
+
+  if (virtualIds === null && restrictedIds === null) return null;
+  if (restrictedIds === null) return fetchRowsForVirtualIds(virtualIds as string[]);
+  if (virtualIds === null) return fetchRowsForRestrictedIds(restrictedIds, filters);
   const virtualSet = new Set(virtualIds);
-  return fetchRowsForVirtualIds(pushIds.filter((id) => virtualSet.has(id)));
+  return fetchRowsForVirtualIds(restrictedIds.filter((id) => virtualSet.has(id)));
+}
+
+/** Intersects two optional id sets under the shared "null means this
+ * dimension is inactive" contract: null ∩ X is X, and only two active sets
+ * actually intersect. */
+function intersectIdSets(a: string[] | null, b: string[] | null): string[] | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  const bSet = new Set(b);
+  return a.filter((id) => bSet.has(id));
 }
 
 async function fetchFilteredRows(filters: PersonListFilters): Promise<RawPersonRow[]> {
@@ -619,6 +656,16 @@ export async function getPeople(
     for (const row of pageRows) {
       row.virtualColumnValues = values.get(row.id) ?? {};
     }
+  }
+
+  // "Last activity" column. Scoped to the page's ids, exactly like
+  // getPersonEnrichmentValues above — one small indexed query per rendered
+  // page, and NOT an embed on LIST_COLUMNS, so the no-filter list query's
+  // plan and timing are untouched (a platform_pushes embed would fan out per
+  // person on every path, including the 136k-row export fetch).
+  const lastActivity = await getPeopleLastActivity(pageRows.map((r) => r.id));
+  for (const row of pageRows) {
+    row.lastActivityAt = lastActivity.get(row.id) ?? null;
   }
 
   return {

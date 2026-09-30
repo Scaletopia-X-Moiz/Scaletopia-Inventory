@@ -9,6 +9,7 @@ import { PhoneStatusBadge } from "@/components/people/phone-status-badge";
 import { formatValue } from "@/components/companies/enrichment-list";
 import { mxProviderLabel } from "@/lib/data/mx-provider";
 import { ScrollableTable } from "@/components/shared/scrollable-table";
+import { ActivityDrawerTrigger } from "@/components/people/activity-drawer-trigger";
 
 function formatLastUpdated(value: string | null): string {
   if (!value) return "—";
@@ -29,6 +30,10 @@ const HEADERS = [
   "Company",
   "Company Domain",
   "Company LinkedIn URL",
+  // GHL last activity, rendered as truncated relative time and clickable for
+  // the full message history (docs/features/ghl-last-activity/handoff.md).
+  // Sits before Last Updated so the two date columns read together.
+  "Last activity",
   "Last Updated",
 ];
 
@@ -49,7 +54,7 @@ export function PeopleTable({
 
   return (
     <ScrollableTable>
-      <table className="w-full min-w-[1080px] border-collapse text-sm">
+      <table className="w-full min-w-[1180px] border-collapse text-sm">
         <thead>
           <tr className="border-b border-rule bg-card">
             {HEADERS.map((h) => (
@@ -129,6 +134,11 @@ export function PeopleTable({
               </td>
               <PersonCell href={`/people/${row.id}`}>{row.domain ?? "—"}</PersonCell>
               <ExternalLinkCell url={row.companyLinkedinUrl} />
+              <ActivityDrawerTrigger
+                personId={row.id}
+                personName={row.fullName}
+                lastActivityAt={row.lastActivityAt}
+              />
               <PersonCell href={`/people/${row.id}`} mono>
                 {formatLastUpdated(row.lastUpdated)}
               </PersonCell>
