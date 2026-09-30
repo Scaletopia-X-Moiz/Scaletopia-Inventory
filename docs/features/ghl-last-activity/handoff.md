@@ -614,3 +614,103 @@ this work and unrelated to it. It is worth its own ticket.
    carried an `errorMessage` helper written for this exact class of bug; it is
    now shared as `lib/errors.ts` and used by the sync. A third copy still sits
    in `app/api/internal/import-worker/route.ts`.
+
+---
+
+## 15. STATUS at hand-off (2026-09-30) — read this first
+
+Branch `feat/ghl-last-activity`, 11 commits, **not pushed**. Working tree clean.
+
+### 15.1 Per-task status
+
+| # | Task | Status |
+|---|---|---|
+| 1 | Schema + apply via Supabase | **DONE** — applied, read back, rollback file current |
+| 2 | Sync core `lib/ghl/sync-activity.ts` | **DONE** — 17 tests |
+| 3 | Job wiring + auto-enqueue + endpoint | **DONE** — dispatch, auto-enqueue, refresh route |
+| 4 | Incremental optimisation | **DONE** — hypothesis verified live, then improved (§14.2) |
+| 5 | People-table column | **DONE** |
+| 6 | Drawer | **DONE** |
+| 7 | Filter | **DONE, but by a different route than the brief assumed** — see 15.2 |
+| 8 | Refresh button | **DONE** |
+
+### 15.2 Task 7: NO filter RPC WAS TOUCHED. Nothing to roll back.
+
+The brief expected `people_matching_virtual_filters`, `person_filter_options`
+and `person_push_status_counts` to be rewritten. **They were not. Their live
+definitions are byte-identical to what they were before this branch.** No
+`CREATE OR REPLACE FUNCTION` was ever executed.
+
+Instead the filter resolves an id set directly off `platform_pushes` through
+PostgREST (`resolveLastActivityIds` in `lib/data/ghl-activity.ts`) and
+intersects it in app code inside `resolveRestrictedRows`
+(`lib/data/people.ts`), which is exactly the mechanism the existing `pushJobId`
+filter already uses. Reasons in §14.3. The id set is bounded by one client's
+pushed population, not by `people`.
+
+**What this costs:** filter-slip facet counts are not scoped by an active
+last-activity filter (`pushJobId` has the same gap today). The results-header
+row count IS correct. A fresh agent who wants facet scoping must take on the
+six-RPC change the T25 notes warn about — start at
+`lib/data/ticket-25-esp-filter.sql:23-31`, capture `pg_get_functiondef` first,
+and benchmark the no-filter list call (baseline below) before and after.
+
+### 15.3 Wired end to end vs. scaffolded
+
+Everything is reachable from the UI: the column renders in
+`components/people/people-table.tsx`, the drawer fetches
+`/api/people/[id]/ghl-activity`, the filter writes the five `activity*` URL
+params read by `parsePersonFilters`, and the Refresh button POSTs
+`/api/people/refresh-ghl-activity`, which enqueues a `push_jobs` row with
+`platform = 'ghl_activity'` that `app/api/internal/push-worker/route.ts`
+dispatches. Nothing is scaffolded-but-unreachable.
+
+**Not verified:** no browser click-test, and no completed end-to-end run
+against live GHL (§14.5 item 8).
+
+### 15.4 Database state — confirmed
+
+Two migrations, both **purely additive**, statements re-read from
+`supabase_migrations.schema_migrations` to confirm:
+
+- `20260930164942 ghl_activity` — `CREATE TABLE IF NOT EXISTS ghl_messages`,
+  `ghl_activity_sweeps`, `ghl_activity_queue`; `CREATE INDEX IF NOT EXISTS`
+  ×4; `ALTER TABLE platform_pushes ADD COLUMN IF NOT EXISTS` ×4.
+- `20260930171648 ghl_activity_sweep_cursor` —
+  `ALTER TABLE ghl_activity_sweeps ADD COLUMN IF NOT EXISTS sweep_cursor_ms`.
+
+**No pre-existing table, column, function, index or row was modified or
+deleted.** Every statement is `IF NOT EXISTS` / `ADD COLUMN`. No DROP, no
+ALTER of an existing column, no function replaced.
+
+Test/probe data written during the build was removed: `ghl_messages`,
+`ghl_activity_queue` and `ghl_activity_sweeps` are empty, and the 10
+pre-existing `platform_pushes` rows are untouched with `last_activity_at`
+still NULL.
+
+### 15.5 Test status — honest
+
+- **My three files: 50/50 passing** (`lib/ghl/activity-rules.test.ts`,
+  `lib/ghl/sync-activity.test.ts`, `lib/data/last-activity-filter.test.ts`).
+- **`lib/data/people.test.ts`: 37 failures, NOT verified against a baseline.**
+  This is the one pre-existing suite my change touches (`getPeople` now also
+  calls `getPeopleLastActivity`). Its own `beforeAll` hooks timed out at 10s
+  during the run, which cascades. **A fresh agent must re-run it on a quiet
+  database and compare against `main` before trusting this branch.** It is the
+  single biggest open risk here.
+- Confounder: another agent applied three unrelated migrations to this same
+  live project while I was working (`import_key_lookup_rpcs`,
+  `import_bulk_update_canonical_match`,
+  `import_key_lookup_rpcs_aggregate_results`, 17:25-17:29). The database was
+  under heavy concurrent load and `pg_stat_activity` showed 22 active
+  connections. Those migrations touch import RPCs, not mine, but they make any
+  timing or pass/fail signal from this window unreliable.
+- Lint: clean on every file this branch touches; repo-wide count unchanged.
+
+### 15.6 Baseline for whoever does the RPC work
+
+No-filter People path, median of 5, measured on this project before any change:
+
+- people list page 1 (50 rows, count exact): **1,004 ms**
+- `person_filter_options` with no filters: **12,399 ms** (pre-existing; not
+  caused by this work, worth its own ticket)
