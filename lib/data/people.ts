@@ -651,20 +651,25 @@ export async function getPeople(
     total = count ?? 0;
   }
 
-  if (filters.virtualColumns?.length) {
-    const values = await getPersonEnrichmentValues(pageRows.map((r) => r.id), filters.virtualColumns);
-    for (const row of pageRows) {
-      row.virtualColumnValues = values.get(row.id) ?? {};
-    }
-  }
+  // Both per-page decorations are scoped to the rendered page's ids and are
+  // independent of each other, so they run concurrently rather than adding
+  // their latencies together.
+  //
+  // "Last activity" is fetched here and NOT embedded in LIST_COLUMNS on
+  // purpose: a platform_pushes embed would fan out per person on every path
+  // that selects those columns, including the 136k-row export fetch. As a
+  // scoped-by-id lookup it costs one small indexed query per page and leaves
+  // the list query's plan untouched.
+  const pageIds = pageRows.map((r) => r.id);
+  const [enrichmentValues, lastActivity] = await Promise.all([
+    filters.virtualColumns?.length
+      ? getPersonEnrichmentValues(pageIds, filters.virtualColumns)
+      : Promise.resolve(null),
+    getPeopleLastActivity(pageIds),
+  ]);
 
-  // "Last activity" column. Scoped to the page's ids, exactly like
-  // getPersonEnrichmentValues above — one small indexed query per rendered
-  // page, and NOT an embed on LIST_COLUMNS, so the no-filter list query's
-  // plan and timing are untouched (a platform_pushes embed would fan out per
-  // person on every path, including the 136k-row export fetch).
-  const lastActivity = await getPeopleLastActivity(pageRows.map((r) => r.id));
   for (const row of pageRows) {
+    if (enrichmentValues) row.virtualColumnValues = enrichmentValues.get(row.id) ?? {};
     row.lastActivityAt = lastActivity.get(row.id) ?? null;
   }
 
