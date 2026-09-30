@@ -169,6 +169,15 @@ async function sweepConversations(
   let newestMs: number | null = null;
   let pages = 0;
   let reachedEnd = false;
+  // A pass can finish for three different reasons, and only one of them wants
+  // a resume cursor:
+  //   reachedEnd  — walked to the oldest conversation. Pass complete.
+  //   caughtUp    — paged below the previous run's mark, so every later page is
+  //                 already recorded. Complete FOR ITS PURPOSE: the next sweep
+  //                 must start from the newest again, not resume here.
+  //   neither     — ran out of tick budget (or page cap). THIS is the one that
+  //                 must resume, or a first full sweep never reaches the end.
+  let caughtUp = false;
 
   for (; pages < MAX_SWEEP_PAGES_PER_TICK; ) {
     const page = await fetchConversationPage(credentials, cursor, { fetchImpl });
@@ -205,18 +214,32 @@ async function sweepConversations(
     }
     // Everything on this page is at or below the previous run's mark, so every
     // later page is too — that is the early stop the whole design turns on.
-    if (stopAtMs != null && oldestMs != null && oldestMs <= stopAtMs) break;
+    if (stopAtMs != null && oldestMs != null && oldestMs <= stopAtMs) {
+      caughtUp = true;
+      break;
+    }
     // No usable cursor value (every date null) — stop rather than loop on the
-    // same page forever.
-    if (oldestMs == null) break;
+    // same page forever. Treated as caught-up so we don't persist a cursor
+    // that would resume onto the very page we just failed to advance past.
+    if (oldestMs == null) {
+      caughtUp = true;
+      break;
+    }
     cursor = oldestMs;
 
     if (deadline !== undefined && Date.now() >= deadline) break;
   }
 
-  // A finished pass clears the cursor; an interrupted one hands back where to
-  // pick up. `reachedEnd` and a non-null cursor are mutually exclusive.
-  return { pages, enqueued, newestMs, reachedEnd, nextCursor: reachedEnd ? null : cursor };
+  // Only an interrupted pass hands back a resume point; a pass that reached
+  // the end or caught up with the mark clears it so the next sweep starts
+  // from the newest conversation again.
+  return {
+    pages,
+    enqueued,
+    newestMs,
+    reachedEnd,
+    nextCursor: reachedEnd || caughtUp ? null : cursor,
+  };
 }
 
 /** Reads one contact's full history and writes it. Returns whether the stored

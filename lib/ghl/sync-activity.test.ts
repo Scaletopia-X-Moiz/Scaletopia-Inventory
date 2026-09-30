@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { canSkipContact, runGhlActivitySync } from "@/lib/ghl/sync-activity";
+import { CONVERSATION_PAGE_SIZE } from "@/lib/ghl/conversations";
 import { getSweepState } from "@/lib/data/ghl-activity";
 import type { ClientRow } from "@/lib/data/clients";
 
@@ -478,6 +479,36 @@ describe("runGhlActivitySync", () => {
     // The resumed sweep asked GHL to start after the stored cursor, not from
     // the top (which would be a null startAfterDate).
     expect(requestedCursors[0]).toBe(String(state.sweepCursorMs));
+  });
+
+  it("clears the resume cursor when a sweep catches up with the mark", async () => {
+    // A sweep that pages below the previous run's high-water mark is complete
+    // for its purpose. Persisting a cursor there would make the NEXT sweep
+    // resume mid-location and never see the newest conversations at all —
+    // the opposite of what the mark is for.
+    const rows = await seedPushedPeople(2);
+    const base = Date.parse("2026-09-20T10:00:00.000Z");
+    // A FULL page (100 entries), so the sweep doesn't short-circuit on the
+    // "fewer than a page back means we hit the bottom" check and actually
+    // exercises the catch-up branch. Only the first two are contacts we own.
+    const conversations = Array.from({ length: CONVERSATION_PAGE_SIZE }, (_, i) => ({
+      contactId: i < rows.length ? rows[i].ghlContactId : `not-ours-${i}`,
+      lastMessageDate: base - i * 1000,
+    }));
+
+    await runGhlActivitySync(client, { fetchImpl: stubGhl({ conversations }).fetchImpl });
+    expect((await getSweepState(client.id)).fullSweepCompletedAt).not.toBeNull();
+
+    // Second run: the mark is set, so this sweep stops as soon as its first
+    // page falls entirely at or below it.
+    const second = stubGhl({ conversations });
+    await runGhlActivitySync(client, { fetchImpl: second.fetchImpl });
+    // One page only — it caught up immediately rather than walking on.
+    expect(sweepCalls(second.calls)).toBe(1);
+
+    const state = await getSweepState(client.id);
+    expect(state.sweepCursorMs).toBeNull();
+    expect(state.lastMessageDateMs).toBe(base);
   });
 
   it("full mode skips the sweep entirely and re-reads every pushed contact", async () => {
