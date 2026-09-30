@@ -72,7 +72,10 @@ export function ghlTimeAgo(iso: string | null | undefined, now: Date = new Date(
   const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? "" : "s"} ago`;
 
   if (day >= 365) return plural(Math.floor(day / 365), "year");
-  if (day >= 30) return plural(Math.floor(day / 30), "month");
+  // 30-day months don't tile a 365-day year, so days 360-364 would floor to
+  // "12 months" — a label that reads as a year but isn't one yet. Capped at 11
+  // so the months tier hands off cleanly to the years tier above.
+  if (day >= 30) return plural(Math.min(11, Math.floor(day / 30)), "month");
   if (day >= 7) return plural(Math.floor(day / 7), "week");
   if (day >= 1) return plural(day, "day");
   if (hr >= 1) return plural(hr, "hour");
