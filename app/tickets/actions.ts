@@ -7,12 +7,14 @@ import {
   createTicket,
   deleteTicket,
   getTicketById,
+  setTicketLoomUrl,
   updateTicketContent,
   updateTicketNote,
   updateTicketStatus,
   type TicketCategory,
   type TicketStatus,
 } from "@/lib/data/tickets";
+import { normalizeLoomUrl } from "@/lib/tickets/loom";
 import { PRIORITY_OPTIONS, type TicketPriority } from "@/lib/tickets/priority";
 import {
   deleteTicketAttachment,
@@ -217,6 +219,33 @@ export async function updateTicketStatusAction(
     { ticket_id: id, from: existing.status, to: status },
     user
   );
+  revalidatePath("/tickets");
+  return { success: true };
+}
+
+/** dev only — the Loom walkthrough of the fix; an empty value clears it. */
+export async function updateTicketLoomUrlAction(
+  _prev: ActionState | undefined,
+  formData: FormData
+): Promise<ActionState> {
+  const user = await requireUser();
+  if (!canChangeTicketStatus(user.role)) return { error: "Not allowed." };
+
+  const id = Number(formData.get("id"));
+  const raw = String(formData.get("loom_url") ?? "").trim();
+  if (!Number.isFinite(id)) return { error: "Invalid ticket." };
+
+  let loomUrl: string | null = null;
+  if (raw) {
+    loomUrl = normalizeLoomUrl(raw);
+    if (!loomUrl) return { error: "Paste a valid https://www.loom.com/share/... link." };
+  }
+
+  const existing = await getTicketById(id, user.role, user.id);
+  if (!existing) return { error: "Ticket not found." };
+
+  await setTicketLoomUrl(id, loomUrl);
+  await logActivity("ticket.loom_update", { ticket_id: id }, user);
   revalidatePath("/tickets");
   return { success: true };
 }

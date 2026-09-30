@@ -2,7 +2,7 @@
 
 import { useActionState, useCallback, useEffect, useState } from "react";
 import { Dialog } from "radix-ui";
-import { ExternalLink, Loader2, Trash2, X } from "lucide-react";
+import { ExternalLink, Loader2, Trash2, Video, X } from "lucide-react";
 import { timeAgo } from "@/lib/utils";
 import type { Role } from "@/lib/auth/dal";
 import type { TicketRow } from "@/lib/data/tickets";
@@ -20,6 +20,7 @@ import {
   deleteTicketAction,
   getTicketAttachmentsAction,
   updateTicketContentAction,
+  updateTicketLoomUrlAction,
   updateTicketNoteAction,
   updateTicketStatusAction,
   type ActionState,
@@ -121,6 +122,39 @@ function StatusEditor({ ticket }: { ticket: TicketRow }) {
   );
 }
 
+function LoomEditor({ ticket }: { ticket: TicketRow }) {
+  const [state, action, pending] = useActionState<ActionState | undefined, FormData>(
+    updateTicketLoomUrlAction,
+    undefined
+  );
+
+  return (
+    <form action={action} className="flex flex-col gap-2">
+      <input type="hidden" name="id" value={ticket.id} />
+      <label className="text-xs font-medium text-ink-soft">Loom</label>
+      <div className="flex items-center gap-2">
+        <input
+          key={ticket.loomUrl ?? "none"}
+          name="loom_url"
+          type="url"
+          defaultValue={ticket.loomUrl ?? ""}
+          placeholder="https://www.loom.com/share/..."
+          className={fieldClass}
+        />
+        <button
+          type="submit"
+          disabled={pending}
+          className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-rule px-3 text-xs font-medium text-ink transition-colors hover:bg-hover disabled:opacity-60"
+        >
+          {pending ? <Loader2 size={13} className="animate-spin" /> : null}
+          Save
+        </button>
+      </div>
+      {state?.error && <p className="text-xs text-danger">{state.error}</p>}
+    </form>
+  );
+}
+
 /** Uploads-and-immediately-attaches image/voice-note files to a ticket's
  * note. `value` is always kept empty on purpose — AttachmentPicker /
  * VoiceRecorder are used here purely as one-shot upload widgets, since each
@@ -191,6 +225,31 @@ function WorkLogLink({ issue }: { issue: number | null }) {
       <ExternalLink size={13} />
       View work log on GitHub
     </a>
+  );
+}
+
+function LoomLink({ url }: { url: string | null }) {
+  if (!url) return null;
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noreferrer"
+      className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-rule px-2.5 py-1 text-xs font-medium text-ink transition-colors hover:bg-hover"
+    >
+      <Video size={13} />
+      Watch Loom
+    </a>
+  );
+}
+
+function TicketLinks({ githubIssue, loomUrl }: { githubIssue: number | null; loomUrl: string | null }) {
+  if (githubIssue === null && !loomUrl) return null;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <WorkLogLink issue={githubIssue} />
+      <LoomLink url={loomUrl} />
+    </div>
   );
 }
 
@@ -340,12 +399,13 @@ export function TicketDetailDrawer({ ticket, viewerRole, viewerId, children }: T
                   </div>
                 )}
                 {canChangeStatus && <StatusEditor ticket={ticket} />}
+                {canChangeStatus && <LoomEditor ticket={ticket} />}
                 <NoteEditor
                   ticket={ticket}
                   attachments={attachments?.note ?? []}
                   onAttachmentsChanged={refetchAttachments}
                 />
-                <WorkLogLink issue={ticket.githubIssue} />
+                <TicketLinks githubIssue={ticket.githubIssue} loomUrl={ticket.loomUrl} />
                 <div className="text-xs text-ink-mute">
                   Reported by {ticket.createdByEmail ?? "unknown"} · {timeAgo(ticket.createdAt)}
                 </div>
@@ -389,7 +449,7 @@ export function TicketDetailDrawer({ ticket, viewerRole, viewerId, children }: T
                       <AttachmentList attachments={attachments.note} ticketId={ticket.id} />
                     </div>
                   )}
-                  <WorkLogLink issue={ticket.githubIssue} />
+                  <TicketLinks githubIssue={ticket.githubIssue} loomUrl={ticket.loomUrl} />
                 </div>
                 <div className="text-xs text-ink-mute">
                   {isOwnTicket ? "Reported by you" : `Reported by ${ticket.createdByEmail ?? "unknown"}`} ·{" "}
