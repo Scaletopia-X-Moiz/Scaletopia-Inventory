@@ -407,8 +407,14 @@ read back and verified; purely additive — no existing function rewritten)
   `lib/data/people-search-params.ts` — the filter contract and plumbing.
 
 **Tests** — `lib/ghl/activity-rules.test.ts` (22),
-`lib/ghl/sync-activity.test.ts` (16), `lib/data/last-activity-filter.test.ts`
-(11). GHL is stubbed at the `fetchImpl` seam; Supabase is real.
+`lib/ghl/sync-activity.test.ts` (17), `lib/data/last-activity-filter.test.ts`
+(11). **50/50 passing.** GHL is stubbed at the `fetchImpl` seam; Supabase is
+real, matching this repo's convention.
+
+Lint is clean on every file this branch touches. The one error eslint reports
+in `components/people/people-results-client.tsx` predates this work (the
+existing `load()` effect) and the repo-wide count is unchanged at 37
+problems / 22 errors, verified by stashing the branch and re-running.
 
 Two migrations were applied, both purely additive (no existing function,
 column or index altered): `ghl_activity` and `ghl_activity_sweep_cursor`.
