@@ -358,3 +358,201 @@ display: relative time, TRUNCATED (1.97y -> "1 year ago")
 
 One export call per contact yields both the last-activity date and the full
 message history. The `conversations/search` endpoint is no longer needed.
+
+---
+
+## 14. BUILT (2026-09-30) — feature complete on `feat/ghl-last-activity`
+
+Everything in §1's ask is implemented and applied. This section records what
+was built, every decision that isn't obvious from the code, the
+incremental-sync design, benchmark numbers, and what is still owed.
+
+### 14.1 Files
+
+**Schema** (applied to `swfykpknnfunpapzoudn` as migration `ghl_activity`,
+read back and verified; purely additive — no existing function rewritten)
+- `lib/data/ghl-activity.sql`, `lib/data/ghl-activity-rollback.sql`
+  - `ghl_messages` — history, unique on GHL's own `ghl_message_id`
+  - `platform_pushes` +`last_activity_at` +`last_message_type`
+    +`last_message_direction` +`activity_synced_at`, plus two indexes
+  - `ghl_activity_sweeps` — per-client high-water mark
+  - `ghl_activity_queue` — durable work list
+
+**Sync**
+- `lib/ghl/activity-rules.ts` — the exclusion rule, the body sanitizer, and
+  `computeContactActivity`. Pure, no I/O.
+- `lib/ghl/conversations.ts` — the two endpoint wrappers, both through the
+  existing `requestGetWithRetry`.
+- `lib/ghl/sync-activity.ts` — the sync core.
+- `lib/ghl/enqueue-activity-sync.ts` — queues a `ghl_activity` push job.
+- `lib/data/ghl-activity.ts` — data layer.
+
+**Job wiring**
+- `app/api/internal/push-worker/route.ts` — new `ghl_activity` dispatch
+  branch; auto-enqueue after a successful GHL push; new activity-log action.
+- `app/api/people/refresh-ghl-activity/route.ts` — the Refresh endpoint.
+
+**UI**
+- `components/people/people-table.tsx` — "Last activity" column.
+- `components/people/activity-drawer-trigger.tsx` — the cell + drawer.
+- `components/people/last-activity-filter-popover.tsx` — the filter.
+- `components/people/refresh-ghl-activity-button.tsx` — the Refresh button.
+- `components/people/filter-slip.tsx`, `components/people/people-results-client.tsx` — wiring.
+- `app/api/people/[id]/ghl-activity/route.ts` — the drawer's data.
+- `lib/utils.ts` — `ghlTimeAgo`, the truncating formatter.
+- `lib/data/last-activity-filter.ts`, `lib/data/people.ts`,
+  `lib/data/people-search-params.ts` — the filter contract and plumbing.
+
+**Tests** — `lib/ghl/activity-rules.test.ts` (22),
+`lib/ghl/sync-activity.test.ts` (15), `lib/data/last-activity-filter.test.ts`
+(11). All 48 pass.
+
+### 14.2 The incremental-sync design
+
+The hypothesis in the brief was verified live and then improved on.
+
+**Verified.** `GET /conversations/search?locationId&limit=100&sortBy=last_message_date&sort=desc`
+returns 100 conversations per call, each with `contactId` and
+`lastMessageDate`, and pages on `startAfterDate` with **zero overlap** between
+pages. `page` is confirmed ignored — `page=2` returned a first row identical
+to page 1's. Rate-limit headers on the live response: `x-ratelimit-max: 100`,
+`x-ratelimit-interval-milliseconds: 10000`,
+`x-ratelimit-daily-remaining: 199,604`. The location holds 30,481
+conversations, so a full sweep is ~305 calls.
+
+**The improvement.** The brief's design is one full sweep per run (~305 calls).
+But the sort key *is* the field being watched, so any conversation whose
+activity moved sorts above the previous run's newest value. The sweep
+therefore **stops the moment a page falls entirely at or below the stored
+high-water mark** (`ghl_activity_sweeps.last_message_date_ms`). A steady-state
+run is 1-2 conversation calls, not 305. The full 305-call pass happens once,
+on the first sync of a location; `full_sweep_completed_at` records that it
+happened, and until it has, early stopping is disabled because there is no
+value below which "nothing changed" is a safe assumption.
+
+**The correction the hypothesis was missing.** A GHL push often *dedupes* onto
+an existing contact whose conversation is years old — far below the sweep's
+mark, so an incremental sweep will never surface it. Any contact with
+`activity_synced_at IS NULL` ("cold") is therefore always queued for one
+direct export call, regardless of the sweep. This is a one-time cost per
+contact, and it is what makes the incremental path correct rather than merely
+fast.
+
+**Then three filters before any export call is made:**
+1. The contact must have a `platform_contact_id` we pushed. The location holds
+   30k conversations; we own ~1.3k.
+2. Its swept `lastMessageDate` must differ from the stored `last_activity_at`.
+3. Compared with a **1.5s tolerance**, because `conversations/search`'s
+   `lastMessageDate` is the conversation's update stamp and runs ~1s later
+   than the message's own `dateAdded` that we store (§13.3). Exact comparison
+   would mark every contact as changed forever and silently turn the
+   incremental sync back into a full one. There is a regression test for this.
+
+**Resumability.** Both phases write to `ghl_activity_queue` and the fetch
+phase deletes each batch as it completes, so *the queue is the cursor*: a
+killed invocation resumes by draining what is left, with no offset arithmetic.
+The sweep only runs on a tick that finds the queue empty, so a resumed job
+never re-sweeps.
+
+**Rate limits.** Concurrency is 5 (same as `GHL_PUSH_CONCURRENCY`), giving
+~10 req/s against the 100-per-10s burst ceiling — deliberately half, because a
+sync and a push to the same client share one location budget. 429/5xx and
+`Retry-After` are handled by the existing `requestGetWithRetry`. Worst case
+(first full sweep of every location) is ~305 + 1,300 calls, well inside the
+200,000/day ceiling.
+
+### 14.3 Decisions
+
+- **Extended `push_jobs.platform` with `ghl_activity` rather than cloning the
+  queue.** The deciding reason is rate limiting: `claim_next_runnable_job`
+  serializes per *client*, and a sync and a push to the same client hit the
+  same GHL location's burst budget. A parallel queue would happily run both at
+  once and make them fight. It also inherits the reaper, the lease heartbeat,
+  the self-chain and the Push Activity panel for free. Cost: the sync reuses
+  `created`/`updated` on the job row to mean "moved"/"skipped".
+- **The filter touches NO filter RPC.** It resolves an id set straight off
+  `platform_pushes` through PostgREST and intersects in app code, exactly like
+  the existing `pushJobId` filter. `lib/data/ticket-25-esp-filter.sql:23-31`
+  records that adding a dimension to `people_matching_virtual_filters` cost a
+  ~60x regression on the no-filter call, and that the id-set form then *timed
+  out* inside `person_push_status_counts`. Avoiding those functions entirely is
+  worth more than facet precision. **Consequence:** facet counts in the filter
+  slip are not scoped by an active last-activity filter — the same limitation
+  `pushJobId` already has. The row count in the results header is correct.
+- **The filter is scoped to people pushed to that client.** "Is empty" means
+  "pushed to this sub-account and nothing has happened", not "all 136k people
+  including the ones we never pushed". That is the question the retargeting use
+  case asks, and it keeps the id set in the thousands rather than the hundreds
+  of thousands.
+- **The table column shows the max across all clients**, because the People
+  table has no current client. The filter, which does have one, is per-client.
+- **The column is fetched per rendered page**, not embedded in `LIST_COLUMNS`.
+  An embed would fan out per person on every path including the 136k-row export
+  fetch; a scoped-by-id lookup costs ~280ms for 50 rows and leaves the list
+  query's plan untouched.
+- **Body is stripped to text and capped at 4,000 chars**, with the untouched
+  message kept in `ghl_messages.raw`. The column renders a preview in a 24rem
+  drawer; it is not an email archive. `raw` is what makes capping safe.
+- **Activity events are filtered at write time**, so `ghl_messages` is exactly
+  the set both the date and the drawer are computed from and the two cannot
+  disagree.
+- **The drawer reads our database, never live GHL.** A user may open a dozen
+  rows in a row; a live call each would add a second of latency and burn the
+  location's budget.
+- **`ghlTimeAgo` is a new function, not a change to `timeAgo`.** `timeAgo`
+  rounds and has no weeks tier; it renders every other timestamp in the app and
+  changing it would shift them all.
+- **A missing-scope 401 fails that client's job with an actionable message**
+  and does not crash the worker (§11.1's stale `testing` token). Verified live.
+- **A permanently failing contact is dropped from the queue, not retried
+  forever** — one broken contact must not block the queue. A cold contact stays
+  cold, so the next run retries it anyway.
+
+### 14.4 Benchmarks
+
+No-filter People path, 5 runs each, median (live project, 136,870 people):
+
+| call | before | after |
+|---|---|---|
+| people list page 1 (50 rows, count exact) | 1,004 ms | 1,175 ms |
+| `person_filter_options` (no filters) | 12,399 ms | 12,584 ms |
+
+Both differences are inside this project's run-to-run noise (the list call's
+max ranged 1,018 → 1,782 ms across samples on an unchanged query). **No RPC was
+modified and no column was added to `LIST_COLUMNS`**, so no plan change is
+possible; the numbers confirm it.
+
+New costs, both additive and paid only where used:
+
+| call | median |
+|---|---|
+| per-page last-activity lookup (50 ids) | 299 ms |
+| last-activity filter id-set (one client, "is not empty") | 283 ms |
+
+`person_filter_options`'s ~12s is a **pre-existing** condition, unchanged by
+this work and unrelated to it. It is worth its own ticket.
+
+### 14.5 Still owed / risks
+
+1. **§9's cleanup is still open.** The 10 `@rblaw.net` contacts and their
+   `platform_pushes` rows are still there, on the `testing` client — whose
+   token cannot read conversations. So the one client with real pushed contacts
+   is the one that cannot sync. **Re-issue the `testing` row's Private
+   Integration token** (or repoint it) before this feature does anything useful
+   in production. Verified live: it still returns
+   `401 "The token is not authorized for this scope."`
+2. **A per-client token scope audit is owed** — every sub-account that will use
+   Refresh needs its conversations scope checked the same way.
+3. **Facet counts ignore the last-activity filter** (§14.3). Fixing it means
+   touching the six RPCs, which is the change §14.3 deliberately avoided.
+4. **Only one page of the drawer's history is loaded** (200 messages, newest
+   first). No pagination. Fine for every contact seen so far.
+5. **The mixed-conversation caveat from §12.2 is still a 0-of-30 sample.** The
+   code handles it correctly (an activity event never wins over a real message,
+   and there is a test), but it has not been observed live.
+6. **The first sync of a large location takes ~305 conversation calls plus one
+   export per pushed contact.** Budgeted across worker ticks, but a location
+   with tens of thousands of pushed contacts will span several cron minutes.
+7. **Untested end to end in the browser.** The sync core, rules, filter and
+   schema are covered by tests and a live API probe; the React components were
+   type-checked and linted but not click-tested.
