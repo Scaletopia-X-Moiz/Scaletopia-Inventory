@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import { pushRecords, preflightRecords } from "@/lib/import/push";
+import {
+  pushRecords,
+  preflightRecords,
+  canonicalLinkedIn,
+  KEY_CHUNK_SIZE,
+} from "@/lib/import/push";
 import { normalizeSourceTokens } from "@/lib/data/source";
 
 // All test records use this domain prefix so we can clean up safely.
@@ -104,6 +109,164 @@ describe("preflightRecords", () => {
 
     expect(result.updateCount).toBeGreaterThanOrEqual(1);
     expect(result.insertCount).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ─── key matching (canonical LinkedIn / case-insensitive email / chunks) ────
+
+describe("canonicalLinkedIn", () => {
+  it("strips trailing slashes, case, scheme and www", () => {
+    expect(canonicalLinkedIn("https://www.linkedin.com/company/acme/")).toBe("linkedin.com/company/acme");
+    expect(canonicalLinkedIn("http://www.LinkedIn.com/company/Acme")).toBe("linkedin.com/company/acme");
+    expect(canonicalLinkedIn("https://linkedin.com/company/acme//")).toBe("linkedin.com/company/acme");
+  });
+
+  it("matches the SQL expression used by the indexes and RPCs", async () => {
+    // The RPC echoes back only input keys that match a stored row in
+    // canonical form, so a stored non-canonical URL proves both sides agree.
+    const stored = `HTTP://www.linkedin.com/company/${TEST_PREFIX}Canon-Check//`;
+    await supabaseAdmin.from("companies").insert({ company_name: "Canon Check Co", linkedin_url: stored });
+    const key = canonicalLinkedIn(`https://www.linkedin.com/company/${TEST_PREFIX}canon-check/`);
+    const { data, error } = await supabaseAdmin.rpc("import_match_companies", {
+      p_domains: [],
+      p_linkedins: [key],
+    });
+    expect(error).toBeNull();
+    const linkedinRow = (data as { kind: string; keys: string[] }[]).find((r) => r.kind === "linkedin");
+    expect(linkedinRow?.keys).toEqual([key]);
+  });
+});
+
+describe("preflight/push — existing rows stored in non-canonical form", () => {
+  it("matches a company whose stored LinkedIn has no trailing slash (and updates it, no duplicate)", async () => {
+    const slug = "no-slash-co";
+    // Stored the way most real rows are: no trailing slash.
+    const stored = `https://www.linkedin.com/company/${TEST_PREFIX}${slug}`;
+    const { error } = await supabaseAdmin
+      .from("companies")
+      .insert({ company_name: "No Slash Co", linkedin_url: stored });
+    expect(error).toBeNull();
+
+    // normalizeLinkedInUrl produces the trailing-slash form.
+    const pre = await preflightRecords([{ linkedin_url: `${stored}/` }], "companies");
+    expect(pre.updateCount).toBe(1);
+    expect(pre.insertCount).toBe(0);
+
+    const newTags: [string, string, string] = ["no-slash-client", "no-slash-niche", "2026-09-30"];
+    const push = await pushRecords(
+      { records: [{ linkedin_url: `${stored}/`, company_name: "No Slash Co" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: newTags },
+      noopProgress
+    );
+    expect(push.insertedCount).toBe(0);
+    expect(push.updatedCount).toBe(1);
+
+    const { data } = await supabaseAdmin
+      .from("companies")
+      .select("linkedin_url,tags")
+      .like("linkedin_url", `%${TEST_PREFIX}${slug}%`);
+    expect(data).toHaveLength(1);
+    expect(data![0].tags).toEqual(newTags);
+    // Stored value is not rewritten.
+    expect(data![0].linkedin_url).toBe(stored);
+  });
+
+  it("matches a person whose stored LinkedIn has no trailing slash", async () => {
+    const stored = `https://www.linkedin.com/in/${TEST_PREFIX}no-slash-person`;
+    await supabaseAdmin.from("people").insert({ full_name: "No Slash Person", linkedin_url: stored });
+
+    const pre = await preflightRecords([{ linkedin_url: `${stored}/` }], "people");
+    expect(pre.updateCount).toBe(1);
+
+    const newTags: [string, string, string] = ["ns-client", "ns-niche", "2026-09-30"];
+    const push = await pushRecords(
+      { records: [{ linkedin_url: `${stored}/`, full_name: "No Slash Person" }], targetTable: "people", sourceKey: SOURCE_KEY, tags: newTags },
+      noopProgress
+    );
+    expect(push.insertedCount).toBe(0);
+
+    const { data } = await supabaseAdmin.from("people").select("tags").like("linkedin_url", `%${TEST_PREFIX}no-slash-person%`);
+    expect(data).toHaveLength(1);
+    expect(data![0].tags).toEqual(newTags);
+  });
+
+  it("matches people by email case-insensitively (preflight and update)", async () => {
+    const email = `Mixed.Case.${TEST_PREFIX}@Example.COM`;
+    await supabaseAdmin.from("people").insert({
+      full_name: "Mixed Case Person",
+      email,
+      linkedin_url: testPersonLinkedin("mixed-case-email"),
+    });
+
+    const pre = await preflightRecords(
+      [{ email: email.toLowerCase() }, { email: `NEW.${TEST_PREFIX}@example.com` }],
+      "people"
+    );
+    expect(pre.updateCount).toBe(1);
+    expect(pre.insertCount).toBe(1);
+
+    const newTags: [string, string, string] = ["mc-client", "mc-niche", "2026-09-30"];
+    const push = await pushRecords(
+      { records: [{ email: email.toUpperCase(), full_name: "Mixed Case Person" }], targetTable: "people", sourceKey: SOURCE_KEY, tags: newTags },
+      noopProgress
+    );
+    expect(push.insertedCount).toBe(0);
+    expect(push.updatedCount).toBe(1);
+
+    const { data } = await supabaseAdmin.from("people").select("tags").ilike("email", email.replace(/_/g, "\\_"));
+    expect(data).toHaveLength(1);
+    expect(data![0].tags).toEqual(newTags);
+  });
+
+  it("treats a company with a NEW domain but an EXISTING LinkedIn as existing, and updates that row", async () => {
+    const existingDomain = testDomain("li-existing");
+    const linkedin = testLinkedin("li-existing");
+    await pushRecords(
+      { records: [{ domain: existingDomain, linkedin_url: linkedin, company_name: "LI Existing Co" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: TAGS },
+      noopProgress
+    );
+
+    const newDomain = testDomain("li-existing-new-domain");
+    const pre = await preflightRecords([{ domain: newDomain, linkedin_url: linkedin }], "companies");
+    expect(pre.updateCount).toBe(1);
+    expect(pre.insertCount).toBe(0);
+
+    const newTags: [string, string, string] = ["li-client", "li-niche", "2026-09-30"];
+    const push = await pushRecords(
+      { records: [{ domain: newDomain, linkedin_url: linkedin, company_name: "LI Existing Co", city: "Lisbon" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: newTags },
+      noopProgress
+    );
+    expect(push.insertedCount).toBe(0);
+    expect(push.updatedCount).toBe(1);
+
+    const { data: updated } = await supabaseAdmin.from("companies").select("tags,city,domain").eq("domain", existingDomain).single();
+    expect(updated?.tags).toEqual(newTags);
+    expect(updated?.city).toBe("Lisbon");
+    // The incoming domain is not written onto the matched row, and no new row appears.
+    const { data: none } = await supabaseAdmin.from("companies").select("id").eq("domain", newDomain);
+    expect(none).toHaveLength(0);
+  });
+
+  it("finds existing keys on both sides of a chunk boundary", async () => {
+    const d1 = testDomain("chunk-a");
+    const d2 = testDomain("chunk-b");
+    await pushRecords(
+      { records: [{ domain: d1, company_name: "Chunk A" }, { domain: d2, company_name: "Chunk B" }], targetTable: "companies", sourceKey: SOURCE_KEY, tags: TAGS },
+      noopProgress
+    );
+
+    // KEY_CHUNK_SIZE + 2 distinct domains; the two existing ones sit at the
+    // last slot of chunk 1 and the first slot of chunk 2.
+    const records: Record<string, unknown>[] = [];
+    for (let i = 0; i < KEY_CHUNK_SIZE + 2; i++) {
+      records.push({ domain: testDomain(`chunk-new-${i}`) });
+    }
+    records[KEY_CHUNK_SIZE - 1] = { domain: d1 };
+    records[KEY_CHUNK_SIZE] = { domain: d2 };
+
+    const pre = await preflightRecords(records, "companies");
+    expect(pre.dedupedCount).toBe(KEY_CHUNK_SIZE + 2);
+    expect(pre.updateCount).toBe(2);
+    expect(pre.insertCount).toBe(KEY_CHUNK_SIZE);
   });
 });
 

@@ -3,6 +3,10 @@ import type { NextRequest } from "next/server";
 import { preflightRecords } from "@/lib/import/push";
 
 export const dynamic = "force-dynamic";
+// Preflight is now a handful of indexed key-lookup RPCs (lib/import/push.ts),
+// normally a few seconds even for large imports; 60s leaves headroom for a
+// cold database without hitting the platform default.
+export const maxDuration = 60;
 
 export async function POST(request: NextRequest) {
   let body: {

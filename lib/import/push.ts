@@ -70,105 +70,108 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
-const KEY_PAGE_SIZE = 1000;
-const KEY_PAGE_CONCURRENCY = 12;
+/** Distinct keys per RPC call, and RPC calls in flight at once. 5000 keys is a
+ * ~300KB JSON body and a few hundred ms of index probes server-side — far
+ * below the 30s service_role statement_timeout. */
+export const KEY_CHUNK_SIZE = 5000;
+const KEY_CHUNK_CONCURRENCY = 4;
 
 /**
- * Fetch every row of `columns` from `table` using paginated range requests.
- *
- * The previous implementation chunked the import's domains / linkedin_urls into
- * batches of 2000 and issued `.in(column, batch)` queries. With large imports
- * (~20k rows) those IN-lists produced ~50KB request URLs, which PostgREST is
- * extremely slow to parse — a single push could take over a minute. The
- * existing tables are small (tens of thousands of rows), so it is dramatically
- * faster (and simpler, and more correct) to pull the entire key-set once in
- * small fixed-size pages and test membership locally. This is O(table size)
- * rather than O(import size), and never builds a giant URL.
+ * Canonical LinkedIn key used for matching an import against stored rows.
+ * MUST stay identical to the SQL expression
+ *   regexp_replace(lower(rtrim(linkedin_url, '/')), '^https?://(www\.)?', '')
+ * used by idx_companies_linkedin_canon / idx_people_linkedin_canon and the
+ * import_match_* / import_bulk_update_* RPCs (lib/data/import-key-lookup.sql,
+ * lib/import/migrations.sql). Stored URLs are mostly without the trailing
+ * slash normalizeLinkedInUrl adds, some are http:// and a few mixed-case;
+ * comparing this form on both sides matches all of them without rewriting
+ * stored data.
  */
-async function fetchAllRows(
-  table: "companies" | "people",
-  columns: string
-): Promise<Record<string, unknown>[]> {
-  // `.range()` alone gives Postgres no guaranteed row order, so separate
-  // paginated queries can return rows in different physical order (e.g.
-  // under concurrent writes) and silently skip or duplicate rows across
-  // pages even though the total `count` still checks out. Ordering by `id`
-  // makes pagination deterministic and gapless.
-  const first = await supabaseAdmin
-    .from(table)
-    .select(columns, { count: "exact" })
-    .order("id", { ascending: true })
-    .range(0, KEY_PAGE_SIZE - 1);
+export function canonicalLinkedIn(url: string): string {
+  return url
+    .replace(/\/+$/, "")
+    .toLowerCase()
+    .replace(/^https?:\/\/(www\.)?/, "");
+}
 
-  // A failed page here previously fell through silently (`if (r.data)`),
-  // so a transient timeout/rate-limit on the existing-keys fetch would
-  // quietly drop rows from the dedupe set — causing already-imported
-  // records to be misclassified as new and either duplicate-inserted
-  // (columns with no unique constraint, e.g. linkedin_url) or rejected
-  // with a 23505 unique-violation (columns with one, e.g. domain). Throw
-  // instead so a partial fetch aborts the push rather than corrupting it.
-  if (first.error) {
-    throw new Error(
-      `Failed to fetch existing ${table} rows (page 0): ${formatError(first.error)}`
-    );
+/** Run `fn` over `keys` in chunks of KEY_CHUNK_SIZE, KEY_CHUNK_CONCURRENCY at a time. */
+async function inKeyChunks(
+  keys: string[],
+  fn: (chunk: string[]) => Promise<void>
+): Promise<void> {
+  const chunks = chunkArray(keys, KEY_CHUNK_SIZE);
+  for (const group of chunkArray(chunks, KEY_CHUNK_CONCURRENCY)) {
+    await Promise.all(group.map(fn));
   }
+}
 
-  const rows: Record<string, unknown>[] = first.data
-    ? [...(first.data as unknown as Record<string, unknown>[])]
-    : [];
-  const total = first.count ?? rows.length;
-  if (total <= KEY_PAGE_SIZE) return rows;
-
-  const pageCount = Math.ceil(total / KEY_PAGE_SIZE);
-  // Page 0 already fetched; queue the remaining page start offsets.
-  const pageStarts: number[] = [];
-  for (let p = 1; p < pageCount; p++) pageStarts.push(p * KEY_PAGE_SIZE);
-
-  // Fetch remaining pages with bounded concurrency to avoid exhausting
-  // connections on very large tables.
-  for (const group of chunkArray(pageStarts, KEY_PAGE_CONCURRENCY)) {
-    const results = await Promise.all(
-      group.map((from) =>
-        supabaseAdmin
-          .from(table)
-          .select(columns)
-          .order("id", { ascending: true })
-          .range(from, from + KEY_PAGE_SIZE - 1)
-      )
-    );
-    for (const r of results) {
-      if (r.error) {
-        throw new Error(
-          `Failed to fetch existing ${table} rows: ${formatError(r.error)}`
-        );
+/**
+ * Look up which of `keysByKind` already exist, via a key-matching RPC that
+ * returns `{ kind, keys }` rows (the matching INPUT keys, echoed back). Only
+ * the import's own distinct keys travel to the database, and each lookup is an
+ * index probe — O(import size), independent of table size. (This replaced
+ * downloading the entire table with deep-OFFSET paging, which hit the 30s
+ * statement_timeout at ~390k companies.)
+ *
+ * Any RPC error throws: a partial lookup would misclassify existing records as
+ * new and duplicate-insert them (or hit a 23505 on domain), so the push must
+ * abort instead.
+ */
+async function matchExistingKeys(
+  rpc: "import_match_companies" | "import_match_people",
+  params: Record<string, string>,
+  keysByKind: Record<string, string[]>
+): Promise<Set<string>> {
+  const existingKeys = new Set<string>();
+  const paramNames = Object.values(params);
+  for (const [kind, keys] of Object.entries(keysByKind)) {
+    await inKeyChunks(keys, async (chunk) => {
+      const args: Record<string, string[]> = {};
+      for (const p of paramNames) args[p] = [];
+      args[params[kind]] = chunk;
+      const { data, error } = await supabaseAdmin.rpc(rpc, args);
+      if (error) {
+        throw new Error(`Failed to look up existing keys (${rpc}): ${formatError(error)}`);
       }
-      if (r.data) rows.push(...(r.data as unknown as Record<string, unknown>[]));
-    }
+      for (const row of (data ?? []) as { kind: string; keys: string[] | null }[]) {
+        for (const k of row.keys ?? []) existingKeys.add(`${row.kind}:${k}`);
+      }
+    });
   }
+  return existingKeys;
+}
 
-  if (rows.length !== total) {
-    throw new Error(
-      `Fetched ${rows.length} of ${total} existing ${table} rows — pagination ` +
-        `returned fewer rows than expected, aborting rather than pushing with an incomplete dedupe set`
-    );
-  }
+function distinct(values: (string | null)[]): string[] {
+  return Array.from(new Set(values.filter((v): v is string => !!v)));
+}
 
-  return rows;
+function recordDomain(rec: Record<string, unknown>): string | null {
+  return typeof rec.domain === "string" && rec.domain ? rec.domain : null;
+}
+
+function recordLinkedInKey(rec: Record<string, unknown>): string | null {
+  return typeof rec.linkedin_url === "string" && rec.linkedin_url
+    ? canonicalLinkedIn(rec.linkedin_url)
+    : null;
+}
+
+function recordEmailKey(rec: Record<string, unknown>): string | null {
+  return typeof rec.email === "string" && rec.email ? rec.email.toLowerCase() : null;
 }
 
 async function fetchExistingCompanies(
-  _records: Record<string, unknown>[]
+  records: Record<string, unknown>[]
 ): Promise<Set<string>> {
-  const rows = await fetchAllRows("companies", "domain,linkedin_url");
-
-  // A record is considered existing if its domain OR its linkedin_url is
-  // already present anywhere in the table. Encode both as namespaced keys.
-  const existingKeys = new Set<string>();
-  for (const row of rows) {
-    if (row.domain) existingKeys.add(`domain:${row.domain}`);
-    if (row.linkedin_url) existingKeys.add(`linkedin:${row.linkedin_url}`);
-  }
-  return existingKeys;
+  // A record is considered existing if its domain OR its (canonical)
+  // linkedin_url is already present anywhere in the table.
+  return matchExistingKeys(
+    "import_match_companies",
+    { domain: "p_domains", linkedin: "p_linkedins" },
+    {
+      domain: distinct(records.map(recordDomain)),
+      linkedin: distinct(records.map(recordLinkedInKey)),
+    }
+  );
 }
 
 /** A company row's fields needed to link an imported person to their
@@ -192,48 +195,72 @@ export interface PersonCompanyRow {
  * the person row. Without this, imported people only ever get a loose
  * `domain`/`company_name` text copy with no queryable relation.
  */
-async function fetchCompanyIdByDomain(): Promise<Map<string, PersonCompanyRow>> {
-  const rows = await fetchAllRows(
-    "companies",
-    "id,domain,client,niche,industry_id,employee_count,linkedin_url"
-  );
+async function fetchCompanyIdByDomain(
+  records: Record<string, unknown>[]
+): Promise<Map<string, PersonCompanyRow>> {
+  // Only the companies this import's people actually point at (by domain) —
+  // not the whole table.
   const map = new Map<string, PersonCompanyRow>();
-  for (const row of rows) {
-    if (row.domain && row.id) {
-      map.set(row.domain as string, {
-        id: row.id as string,
-        client: (row.client as string | null) ?? null,
-        niche: (row.niche as string | null) ?? null,
-        industry_id: (row.industry_id as string | null) ?? null,
-        employee_count: (row.employee_count as number | null) ?? null,
-        linkedin_url: (row.linkedin_url as string | null) ?? null,
-      });
+  await inKeyChunks(distinct(records.map(recordDomain)), async (chunk) => {
+    const { data, error } = await supabaseAdmin.rpc("import_companies_by_domain", {
+      p_domains: chunk,
+    });
+    if (error) {
+      throw new Error(`Failed to look up companies by domain: ${formatError(error)}`);
     }
-  }
+    for (const row of (data ?? []) as (PersonCompanyRow & { domain: string | null })[]) {
+      if (row.domain && row.id) {
+        map.set(row.domain, {
+          id: row.id,
+          client: row.client ?? null,
+          niche: row.niche ?? null,
+          industry_id: row.industry_id ?? null,
+          employee_count: row.employee_count ?? null,
+          linkedin_url: row.linkedin_url ?? null,
+        });
+      }
+    }
+  });
   return map;
 }
 
-async function fetchExistingPeople(
-  _records: Record<string, unknown>[]
-): Promise<Set<string>> {
-  const rows = await fetchAllRows("people", "linkedin_url,email");
-
-  const existingKeys = new Set<string>();
-  for (const row of rows) {
-    if (row.linkedin_url) existingKeys.add(`linkedin:${row.linkedin_url}`);
-    if (row.email) existingKeys.add(`email:${String(row.email).toLowerCase()}`);
+/** Lower-cased, trimmed distinct companies.client values — the "known client"
+ * names nichesFromTags strips from a person's source tags. Previously derived
+ * from the full companies download; now a skip-scan RPC over
+ * idx_companies_client. */
+async function fetchKnownClients(): Promise<Set<string>> {
+  const { data, error } = await supabaseAdmin.rpc("import_known_clients");
+  if (error) {
+    throw new Error(`Failed to fetch known clients: ${formatError(error)}`);
   }
-  return existingKeys;
+  const clients = new Set<string>();
+  for (const c of (data ?? []) as string[]) {
+    const k = typeof c === "string" ? c.trim().toLowerCase() : "";
+    if (k) clients.add(k);
+  }
+  return clients;
+}
+
+async function fetchExistingPeople(
+  records: Record<string, unknown>[]
+): Promise<Set<string>> {
+  return matchExistingKeys(
+    "import_match_people",
+    { linkedin: "p_linkedins", email: "p_emails" },
+    {
+      linkedin: distinct(records.map(recordLinkedInKey)),
+      email: distinct(records.map(recordEmailKey)),
+    }
+  );
 }
 
 function recordExistsKey(
   rec: Record<string, unknown>,
   existingKeys: Set<string>
 ): boolean {
-  const domain = typeof rec.domain === "string" ? rec.domain : null;
-  const linkedin =
-    typeof rec.linkedin_url === "string" ? rec.linkedin_url : null;
-  const email = typeof rec.email === "string" ? rec.email.toLowerCase() : null;
+  const domain = recordDomain(rec);
+  const linkedin = recordLinkedInKey(rec);
+  const email = recordEmailKey(rec);
 
   if (domain && existingKeys.has(`domain:${domain}`)) return true;
   if (linkedin && existingKeys.has(`linkedin:${linkedin}`)) return true;
@@ -773,7 +800,9 @@ function addInsertedKeys(
   existingKeys: Set<string>
 ): void {
   const domain = typeof rec.domain === "string" ? rec.domain : null;
-  const linkedin = typeof rec.linkedin_url === "string" ? rec.linkedin_url : null;
+  // Same canonical form recordExistsKey() looks up, so a later record in the
+  // same import matches one inserted earlier.
+  const linkedin = recordLinkedInKey(rec);
   const email = typeof rec.email === "string" ? rec.email.toLowerCase() : null;
   if (targetTable === "companies" && domain) existingKeys.add(`domain:${domain}`);
   if (linkedin) existingKeys.add(`linkedin:${linkedin}`);
@@ -826,11 +855,15 @@ export async function runImportTick(opts: ImportTickOptions): Promise<ImportTick
   let companyByDomain = new Map<string, PersonCompanyRow>();
 
   if (targetTable === "people") {
-    companyByDomain = await fetchCompanyIdByDomain();
+    const [byDomain, clients] = await Promise.all([
+      fetchCompanyIdByDomain(deduped),
+      fetchKnownClients(),
+    ]);
+    companyByDomain = byDomain;
     for (const company of companyByDomain.values()) {
       companyById.set(company.id, company);
-      if (company.client) knownClients.add(company.client.trim().toLowerCase());
     }
+    for (const c of clients) knownClients.add(c);
   }
 
   let inserted = 0;
