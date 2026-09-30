@@ -1,6 +1,9 @@
 # Handoff: GHL "Last activity" in the data inventory
 
-Written 2026-09-29/30 after a research session. Nothing has been built. No repo code was changed. This file is the only artifact.
+Written 2026-09-29/30 after a research session. **Superseded in part by §14:**
+the feature was built on 2026-09-30 (branch `feat/ghl-last-activity`), so the
+"nothing has been built" framing below applies only to §§1-13, which are kept
+as the research record. Start at §14 for what actually exists.
 
 ## 1. The ask (from the ticket + Loom)
 
