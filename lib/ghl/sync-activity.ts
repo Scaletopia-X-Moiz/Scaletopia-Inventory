@@ -1,6 +1,7 @@
 import "server-only";
 import type { ClientRow } from "@/lib/data/clients";
-import { GhlApiError, type GhlCredentials } from "@/lib/ghl/client";
+import type { GhlCredentials } from "@/lib/ghl/client";
+import { errorMessage } from "@/lib/errors";
 import {
   CONVERSATION_PAGE_SIZE,
   fetchContactMessages,
@@ -268,8 +269,10 @@ async function syncOneContact(
 
     return { ok: true, changed: previous !== activity.lastActivityAt };
   } catch (err) {
-    const message = err instanceof GhlApiError || err instanceof Error ? err.message : String(err);
-    return { ok: false, error: message };
+    // errorMessage, not String(err): the write-back path throws supabase-js's
+    // bare {message, code} object, which String()s to "[object Object]" and
+    // hid a real connection-pool failure behind a reason that named nothing.
+    return { ok: false, error: errorMessage(err) };
   }
 }
 
@@ -457,7 +460,7 @@ export async function runGhlActivitySync(
           const reason =
             settled.status === "fulfilled"
               ? (settled.value.result as { ok: false; error: string }).error
-              : String((settled as PromiseRejectedResult).reason);
+              : errorMessage((settled as PromiseRejectedResult).reason);
           failed.push({ name: entry?.ghlContactId ?? "unknown", reason });
           failedPersonIds.push(...personIds);
           // Dropped from the queue even on failure: leaving it would make a

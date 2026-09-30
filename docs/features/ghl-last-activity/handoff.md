@@ -539,7 +539,20 @@ max ranged 1,018 → 1,782 ms across samples on an unchanged query). **No RPC wa
 modified and no column was added to `LIST_COLUMNS`**, so no plan change is
 possible; the numbers confirm it.
 
-New costs, both additive and paid only where used:
+Measured GHL-side cost of a sweep page against the live Internal location
+(8 sequential pages, `startAfterDate` cursor):
+
+| | |
+|---|---|
+| one 100-conversation page | median **451 ms** (min 397, max 680) |
+| conversations in the location | 30,481 → 305 pages |
+| **a full sweep, sequential** | **~138 s** |
+
+138s fits inside one worker tick's 240s budget — but only just, and not on a
+larger location or a slower day. That is the margin the resume cursor exists
+to cover.
+
+New DB costs, both additive and paid only where used:
 
 | call | median |
 |---|---|
@@ -571,5 +584,24 @@ this work and unrelated to it. It is worth its own ticket.
    export per pushed contact.** Budgeted across worker ticks, but a location
    with tens of thousands of pushed contacts will span several cron minutes.
 7. **Untested end to end in the browser.** The sync core, rules, filter and
-   schema are covered by tests and a live API probe; the React components were
+   schema are covered by tests and live API probes; the React components were
    type-checked and linted but not click-tested.
+8. **The live full-pipeline run against Internal was never completed.** Three
+   attempts, each killed by the environment rather than by the code: one by a
+   PostgREST schema-cache reload (my own concurrent DDL), one by exceeding its
+   own 10-minute budget, and one by
+   `Timed out acquiring connection from connection pool` on the Supabase
+   project. The pieces were each verified live — endpoint shapes and cursor
+   semantics, sweep-page latency, and the missing-scope 401 — and the whole
+   pipeline is covered by tests against real Supabase with GHL stubbed, but a
+   single green end-to-end run against live GHL data is still owed. The pool
+   timeout is worth a look on its own; it is not caused by this feature (the
+   sync opens no connections of its own, it goes through the shared
+   supabase-js client) but it will bite the worker the same way.
+
+   That third failure did surface a real bug, since fixed: per-contact failure
+   reasons were logged as `[object Object]`, because supabase-js throws a bare
+   `{message, code}` object that is not an `Error`. The push worker already
+   carried an `errorMessage` helper written for this exact class of bug; it is
+   now shared as `lib/errors.ts` and used by the sync. A third copy still sits
+   in `app/api/internal/import-worker/route.ts`.

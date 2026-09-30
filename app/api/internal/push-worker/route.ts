@@ -23,6 +23,7 @@ import { resumeCampaign } from "@/lib/emailbison/client";
 import { runPeopleGhlPush } from "@/lib/ghl/push-to-ghl";
 import { runGhlActivitySync } from "@/lib/ghl/sync-activity";
 import { enqueueGhlActivitySync } from "@/lib/ghl/enqueue-activity-sync";
+import { errorMessage } from "@/lib/errors";
 import type { PersonListFilters } from "@/lib/data/people";
 import type { CompanyListFilters } from "@/lib/data/companies";
 import type { EmailBisonCustomVariableEntry, EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
@@ -90,41 +91,6 @@ function authorized(request: Request): boolean {
 function selfChainHeaders(): Record<string, string> {
   const workerSecret = process.env.PUSH_WORKER_SECRET;
   return workerSecret ? { "x-worker-secret": workerSecret } : {};
-}
-
-/** Serializes a thrown value to a human-diagnosable string. An `Error` yields
- * its message; a non-Error object (e.g. the bare {message} shape supabase-js
- * can return on an oversized request) is JSON-stringified rather than
- * String()'d, which would otherwise collapse to the useless "[object Object]"
- * that masked a real failure in a push job's error column. */
-function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-
-  // Prefer a compact JSON dump — it preserves fields like {message, code} that
-  // are the whole point of surfacing a non-Error throw.
-  try {
-    const json = JSON.stringify(err);
-    if (json && json !== "{}" && json !== "null") return json;
-  } catch {
-    // circular / non-serializable — fall through to the field/String path
-  }
-
-  // JSON gave us nothing useful (undefined, "{}", empty, or it threw). Try to
-  // pull a recognizable diagnostic field off the object before giving up.
-  if (err && typeof err === "object") {
-    const rec = err as Record<string, unknown>;
-    for (const key of ["message", "code", "error_description", "error", "details"]) {
-      const val = rec[key];
-      if (typeof val === "string" && val.length > 0) return `${key}: ${val}`;
-    }
-  }
-
-  const str = String(err);
-  // String()'ing a plain object yields the diagnostically worthless
-  // "[object Object]" — the exact value that masked a real push failure.
-  // Surface the internal tag instead so at least the shape is identifiable.
-  if (str === "[object Object]") return `non-Error thrown: ${Object.prototype.toString.call(err)}`;
-  return str;
 }
 
 /** Builds the mid-tick lease heartbeat handed to each push core as
