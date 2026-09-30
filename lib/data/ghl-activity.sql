@@ -111,6 +111,17 @@ CREATE TABLE IF NOT EXISTS ghl_activity_sweeps (
   updated_at               timestamptz NOT NULL DEFAULT now()
 );
 
+-- Applied 2026-09-30 as migration "ghl_activity_sweep_cursor".
+--
+-- Where an unfinished sweep stopped, so the next one resumes instead of
+-- restarting at page 1. Without this, the FIRST sweep of a large location can
+-- never finish: it is ~305 sequential calls for a 30k-conversation location,
+-- which does not fit in one worker tick's budget, so every tick would re-read
+-- the same opening pages and `full_sweep_completed_at` would stay NULL
+-- forever — meaning early stopping (the entire optimisation) would never
+-- switch on. NULL means "no sweep in progress, start from the newest".
+ALTER TABLE ghl_activity_sweeps ADD COLUMN IF NOT EXISTS sweep_cursor_ms bigint;
+
 -- 4. Durable per-sweep work list ---------------------------------------------
 --
 -- A sweep can identify tens of thousands of contacts to re-read; push_jobs.cursor

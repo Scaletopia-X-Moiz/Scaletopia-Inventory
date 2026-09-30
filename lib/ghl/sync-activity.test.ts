@@ -37,6 +37,12 @@ async function cleanupAll() {
   await supabaseAdmin.from("clients").delete().like("slug", `${TEST_PREFIX}%`);
 }
 
+/** These hooks each run several queries against the live 136k-row `people`
+ * table, which comfortably exceeds vitest's 10s default hook timeout whenever
+ * the project is under any other load. Matches the generous testTimeout
+ * vitest.config.ts already sets for the same reason. */
+const HOOK_TIMEOUT_MS = 60_000;
+
 let client: ClientRow;
 
 /** `n` people, each already "pushed" to the test client with a distinct GHL
@@ -172,9 +178,9 @@ beforeAll(async () => {
     isActive: true,
     updatedAt: data.updated_at as string,
   };
-});
+}, HOOK_TIMEOUT_MS);
 
-afterAll(cleanupAll);
+afterAll(cleanupAll, HOOK_TIMEOUT_MS);
 
 beforeEach(async () => {
   // Between cases, reset everything except the client row itself.
@@ -190,7 +196,7 @@ beforeEach(async () => {
   }
   await supabaseAdmin.from("ghl_activity_queue").delete().eq("client_id", client.id);
   await supabaseAdmin.from("ghl_activity_sweeps").delete().eq("client_id", client.id);
-});
+}, HOOK_TIMEOUT_MS);
 
 describe("canSkipContact — the incremental skip", () => {
   const synced = (lastActivityAt: string | null) => [
@@ -411,6 +417,67 @@ describe("runGhlActivitySync", () => {
     const state = await getSweepState(client.id);
     expect(state.lastMessageDateMs).toBe(newest);
     expect(state.fullSweepCompletedAt).not.toBeNull();
+    // A completed pass clears the cursor, so the next sweep starts from the
+    // newest conversation again rather than resuming mid-location.
+    expect(state.sweepCursorMs).toBeNull();
+  });
+
+  it("resumes an interrupted sweep from its cursor instead of restarting", async () => {
+    // A first full sweep of a 30k-conversation location is ~305 sequential
+    // calls and will not fit in one worker tick. Without a persisted cursor it
+    // would re-read the same opening pages every tick, never reach the end,
+    // and so never switch early stopping on.
+    const rows = await seedPushedPeople(4);
+    const base = Date.parse("2026-09-20T10:00:00.000Z");
+
+    // A stub that serves 100-entry pages so the sweep keeps paging, and
+    // records the startAfterDate it was asked for.
+    const requestedCursors: (string | null)[] = [];
+    let pagesServed = 0;
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/conversations/search")) {
+        const cursor = new URL(url).searchParams.get("startAfterDate");
+        requestedCursors.push(cursor);
+        pagesServed++;
+        const start = base - pagesServed * 100_000;
+        return {
+          status: 200,
+          headers: { get: () => null },
+          json: async () => ({
+            conversations: Array.from({ length: 100 }, (_, i) => ({
+              id: `conv-${pagesServed}-${i}`,
+              contactId: rows[i % rows.length].ghlContactId,
+              lastMessageDate: start - i,
+              lastMessageType: "TYPE_SMS",
+            })),
+            total: 100_000,
+          }),
+        } as unknown as Response;
+      }
+      return {
+        status: 200,
+        headers: { get: () => null },
+        json: async () => ({ messages: [], nextCursor: null, total: 0 }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    // Deadline just ahead: the sweep gets through a page or two, then stops.
+    await runGhlActivitySync(client, { fetchImpl, deadline: Date.now() + 50 });
+
+    const state = await getSweepState(client.id);
+    expect(state.fullSweepCompletedAt).toBeNull(); // pass didn't finish
+    expect(state.sweepCursorMs).not.toBeNull(); // …so it recorded where to resume
+
+    // Drain the queue so the next tick reaches the sweep phase again.
+    await supabaseAdmin.from("ghl_activity_queue").delete().eq("client_id", client.id);
+
+    requestedCursors.length = 0;
+    await runGhlActivitySync(client, { fetchImpl, deadline: Date.now() + 50 });
+
+    // The resumed sweep asked GHL to start after the stored cursor, not from
+    // the top (which would be a null startAfterDate).
+    expect(requestedCursors[0]).toBe(String(state.sweepCursorMs));
   });
 
   it("full mode skips the sweep entirely and re-reads every pushed contact", async () => {

@@ -136,24 +136,36 @@ function chunk<T>(arr: T[], size: number): T[][] {
 }
 
 /** Walks `conversations/search` newest-first and queues every contact whose
- * activity may have moved. Returns the newest date seen and whether the pass
- * reached the end of the location.
+ * activity may have moved. Returns the newest date seen, whether the pass
+ * reached the end of the location, and where to resume if it didn't.
  *
  * Stops at the first page that is entirely at or below `stopAtMs`. It checks
  * the page's OLDEST entry rather than bailing mid-page, so a page straddling
  * the mark is still processed in full — cheaper than being clever, and the
- * per-contact skip below catches anything redundant anyway. */
+ * per-contact skip below catches anything redundant anyway.
+ *
+ * `startCursor` resumes an unfinished sweep. A first full sweep of a large
+ * location is ~305 sequential calls and will not fit in one worker tick, so
+ * without resumption every tick would re-read the same opening pages, the
+ * pass would never reach the end, and early stopping would never switch on. */
 async function sweepConversations(
   credentials: GhlCredentials,
   pushedByGhlId: Map<string, PushedContact[]>,
   stopAtMs: number | null,
+  startCursor: number | null,
   deadline: number | undefined,
   fetchImpl: typeof fetch,
   onProgress: (() => void) | undefined
-): Promise<{ pages: number; enqueued: ActivityQueueEntry[]; newestMs: number | null; reachedEnd: boolean }> {
+): Promise<{
+  pages: number;
+  enqueued: ActivityQueueEntry[];
+  newestMs: number | null;
+  reachedEnd: boolean;
+  nextCursor: number | null;
+}> {
   const enqueued: ActivityQueueEntry[] = [];
   const seenContactIds = new Set<string>();
-  let cursor: number | null = null;
+  let cursor: number | null = startCursor;
   let newestMs: number | null = null;
   let pages = 0;
   let reachedEnd = false;
@@ -202,7 +214,9 @@ async function sweepConversations(
     if (deadline !== undefined && Date.now() >= deadline) break;
   }
 
-  return { pages, enqueued, newestMs, reachedEnd };
+  // A finished pass clears the cursor; an interrupted one hands back where to
+  // pick up. `reachedEnd` and a non-null cursor are mutually exclusive.
+  return { pages, enqueued, newestMs, reachedEnd, nextCursor: reachedEnd ? null : cursor };
 }
 
 /** Reads one contact's full history and writes it. Returns whether the stored
@@ -315,6 +329,7 @@ export async function runGhlActivitySync(
           credentials,
           pushedByGhlId,
           stopAtMs,
+          state.sweepCursorMs,
           deadline,
           fetchImpl,
           onProgress
@@ -335,7 +350,11 @@ export async function runGhlActivitySync(
 
       sweptPages = sweep.pages;
       // Cold contacts: never synced, so the sweep may never surface them (a
-      // deduped push can land on a conversation older than the mark).
+      // deduped push can land on a conversation older than the mark). Queued
+      // on every pass, including a partial one — the queue upserts on
+      // (client, contact), so re-adding one already queued is a no-op, and a
+      // contact the later pages would have surfaced anyway is simply
+      // processed once by whichever path reached it first.
       const cold: ActivityQueueEntry[] = [];
       const swept = new Set(sweep.enqueued.map((e) => e.ghlContactId));
       for (const [ghlContactId, rows] of pushedByGhlId) {
@@ -349,7 +368,9 @@ export async function runGhlActivitySync(
       if (toEnqueue.length > 0) await enqueueActivityContacts(client.id, toEnqueue);
       enqueuedCount = toEnqueue.length;
 
-      await recordSweep(client.id, sweep.newestMs, sweep.reachedEnd);
+      // The mark only moves forward, so a resumed pass (whose pages are older
+      // than the mark by definition) can't drag it backwards.
+      await recordSweep(client.id, sweep.newestMs, sweep.reachedEnd, sweep.nextCursor);
     }
   }
 

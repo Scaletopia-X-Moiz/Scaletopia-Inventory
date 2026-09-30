@@ -22,29 +22,40 @@ export interface SweepState {
    * then the mark is not trustworthy as a stopping point, because there is
    * no "everything older than this is already recorded" guarantee. */
   fullSweepCompletedAt: string | null;
+  /** Where an unfinished sweep stopped (a `startAfterDate` value), or null for
+   * "start from the newest". A first full sweep of a large location does not
+   * fit in one worker tick, so it must resume rather than restart — otherwise
+   * it can never reach the end and early stopping never switches on. */
+  sweepCursorMs: number | null;
 }
 
 export async function getSweepState(clientId: string): Promise<SweepState> {
   const { data, error } = await supabaseAdmin
     .from("ghl_activity_sweeps")
-    .select("last_message_date_ms,full_sweep_completed_at")
+    .select("last_message_date_ms,full_sweep_completed_at,sweep_cursor_ms")
     .eq("client_id", clientId)
     .maybeSingle();
   if (error) throw error;
   return {
     lastMessageDateMs: (data?.last_message_date_ms as number | null) ?? null,
     fullSweepCompletedAt: (data?.full_sweep_completed_at as string | null) ?? null,
+    sweepCursorMs: (data?.sweep_cursor_ms as number | null) ?? null,
   };
 }
 
 /** Advances the mark after a sweep. `fullSweep` records that this run reached
  * the end of the location, which is what unlocks early stopping for every
  * later run. The mark only ever moves forward: a sweep that found nothing
- * newer leaves it alone rather than resetting it. */
+ * newer leaves it alone rather than resetting it — which is also what makes a
+ * RESUMED sweep safe, since its pages are older than the mark by definition.
+ *
+ * `nextCursorMs` is where an unfinished sweep stopped; a finished one passes
+ * null, clearing it so the next sweep starts from the newest again. */
 export async function recordSweep(
   clientId: string,
   newestMessageDateMs: number | null,
-  fullSweep: boolean
+  fullSweep: boolean,
+  nextCursorMs: number | null = null
 ): Promise<void> {
   const current = await getSweepState(clientId);
   const nextMark =
@@ -57,6 +68,7 @@ export async function recordSweep(
       client_id: clientId,
       last_message_date_ms: nextMark,
       full_sweep_completed_at: fullSweep ? new Date().toISOString() : current.fullSweepCompletedAt,
+      sweep_cursor_ms: nextCursorMs,
       last_swept_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     },

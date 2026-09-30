@@ -15,6 +15,8 @@
 DROP INDEX IF EXISTS ghl_activity_queue_client_enqueued_idx;
 DROP TABLE IF EXISTS ghl_activity_queue;
 
+-- ghl_activity_sweeps carries the sweep cursor added by the
+-- "ghl_activity_sweep_cursor" migration; dropping the table takes it with it.
 DROP TABLE IF EXISTS ghl_activity_sweeps;
 
 DROP INDEX IF EXISTS platform_pushes_client_platform_contact_idx;

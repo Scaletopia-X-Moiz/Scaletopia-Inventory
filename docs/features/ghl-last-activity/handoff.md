@@ -375,7 +375,7 @@ read back and verified; purely additive — no existing function rewritten)
   - `ghl_messages` — history, unique on GHL's own `ghl_message_id`
   - `platform_pushes` +`last_activity_at` +`last_message_type`
     +`last_message_direction` +`activity_synced_at`, plus two indexes
-  - `ghl_activity_sweeps` — per-client high-water mark
+  - `ghl_activity_sweeps` — per-client high-water mark + resume cursor
   - `ghl_activity_queue` — durable work list
 
 **Sync**
@@ -404,8 +404,11 @@ read back and verified; purely additive — no existing function rewritten)
   `lib/data/people-search-params.ts` — the filter contract and plumbing.
 
 **Tests** — `lib/ghl/activity-rules.test.ts` (22),
-`lib/ghl/sync-activity.test.ts` (15), `lib/data/last-activity-filter.test.ts`
-(11). All 48 pass.
+`lib/ghl/sync-activity.test.ts` (16), `lib/data/last-activity-filter.test.ts`
+(11). GHL is stubbed at the `fetchImpl` seam; Supabase is real.
+
+Two migrations were applied, both purely additive (no existing function,
+column or index altered): `ghl_activity` and `ghl_activity_sweep_cursor`.
 
 ### 14.2 The incremental-sync design
 
@@ -448,11 +451,25 @@ fast.
    would mark every contact as changed forever and silently turn the
    incremental sync back into a full one. There is a regression test for this.
 
-**Resumability.** Both phases write to `ghl_activity_queue` and the fetch
-phase deletes each batch as it completes, so *the queue is the cursor*: a
-killed invocation resumes by draining what is left, with no offset arithmetic.
-The sweep only runs on a tick that finds the queue empty, so a resumed job
-never re-sweeps.
+**Resumability, and a bug this design nearly shipped with.** Both phases write
+to `ghl_activity_queue` and the fetch phase deletes each batch as it
+completes, so *the queue is the cursor*: a killed invocation resumes by
+draining what is left, with no offset arithmetic. The sweep only runs on a
+tick that finds the queue empty, so a resumed job never re-sweeps.
+
+The sweep itself needed the same treatment, which was missed on the first
+pass. A first full sweep is ~305 **sequential** conversation calls; against
+the live Internal location each takes long enough that the pass does not fit
+in one worker tick's 240s budget. Without a persisted position, every tick
+would restart at page 1, re-read the same opening pages, never reach the end,
+and therefore never set `full_sweep_completed_at` — so early stopping, the
+entire point of the design, would never switch on and the sync would silently
+run as a permanent partial sweep. Fixed by
+`ghl_activity_sweeps.sweep_cursor_ms` (migration `ghl_activity_sweep_cursor`,
+also additive): an interrupted pass records where it stopped and the next one
+resumes from there; a completed pass clears it. Because the high-water mark
+only ever moves forward, a resumed pass — whose pages are older than the mark
+by definition — cannot drag it backwards. There is a regression test.
 
 **Rate limits.** Concurrency is 5 (same as `GHL_PUSH_CONCURRENCY`), giving
 ~10 req/s against the 100-per-10s burst ceiling — deliberately half, because a
