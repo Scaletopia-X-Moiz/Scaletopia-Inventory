@@ -38,11 +38,18 @@ async function cleanupAll() {
   await supabaseAdmin.from("clients").delete().like("slug", `${TEST_PREFIX}%`);
 }
 
-/** These hooks each run several queries against the live 136k-row `people`
- * table, which comfortably exceeds vitest's 10s default hook timeout whenever
- * the project is under any other load. Matches the generous testTimeout
- * vitest.config.ts already sets for the same reason. */
+/** `cleanupAll` finds its rows with a leading-wildcard LIKE on
+ * `people.linkedin_url`, which is a full scan of a 136k-row table. That is
+ * acceptable twice per file (before/after the suite, to catch leftovers from
+ * a previous run) but not before every test — see `seededPersonIds`. Still
+ * generous, because the scan is slow whenever the project is under load; the
+ * same reason vitest.config.ts already raises testTimeout. */
 const HOOK_TIMEOUT_MS = 60_000;
+
+/** Ids seeded by the current test, so `beforeEach` can delete them by primary
+ * key instead of re-running cleanupAll's table scan 17 times per run. Doing
+ * the scan per-test was enough to blow a 60s hook budget under load. */
+const seededPersonIds: string[] = [];
 
 let client: ClientRow;
 
@@ -64,6 +71,7 @@ async function seedPushedPeople(n: number): Promise<{ personId: string; ghlConta
     personId: p.id as string,
     ghlContactId: `${TEST_PREFIX}contact-${i}`,
   }));
+  seededPersonIds.push(...rows.map((r) => r.personId));
 
   const { error: pushError } = await supabaseAdmin.from("platform_pushes").insert(
     rows.map((r) => ({
@@ -184,16 +192,15 @@ beforeAll(async () => {
 afterAll(cleanupAll, HOOK_TIMEOUT_MS);
 
 beforeEach(async () => {
-  // Between cases, reset everything except the client row itself.
-  const { data: people } = await supabaseAdmin
-    .from("people")
-    .select("id")
-    .like("linkedin_url", `%${TEST_PREFIX}%`);
-  const personIds = (people ?? []).map((p) => p.id as string);
-  if (personIds.length > 0) {
-    await supabaseAdmin.from("ghl_messages").delete().in("person_id", personIds);
-    await supabaseAdmin.from("platform_pushes").delete().in("person_id", personIds);
-    await supabaseAdmin.from("people").delete().in("id", personIds);
+  // Between cases, reset everything except the client row itself. Deletes by
+  // the ids this file seeded (primary-key lookups) rather than re-scanning
+  // `people` for the test prefix — the scan is what made this hook exceed even
+  // a 60s budget once the suite grew past a dozen cases.
+  if (seededPersonIds.length > 0) {
+    await supabaseAdmin.from("ghl_messages").delete().in("person_id", seededPersonIds);
+    await supabaseAdmin.from("platform_pushes").delete().in("person_id", seededPersonIds);
+    await supabaseAdmin.from("people").delete().in("id", seededPersonIds);
+    seededPersonIds.length = 0;
   }
   await supabaseAdmin.from("ghl_activity_queue").delete().eq("client_id", client.id);
   await supabaseAdmin.from("ghl_activity_sweeps").delete().eq("client_id", client.id);
