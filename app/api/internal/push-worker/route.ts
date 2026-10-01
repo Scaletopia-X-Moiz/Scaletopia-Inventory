@@ -7,6 +7,9 @@ import {
   touchJobLease,
   finishJob,
   recordJobPeople,
+  updateJobOptions,
+  listMarkedActivityJobs,
+  claimActivityJobMarker,
   type PushJob,
   type PushJobStatus,
   type PushJobFailure,
@@ -23,6 +26,26 @@ import { resumeCampaign } from "@/lib/emailbison/client";
 import { runPeopleGhlPush } from "@/lib/ghl/push-to-ghl";
 import { runGhlActivitySync } from "@/lib/ghl/sync-activity";
 import { enqueueGhlActivitySync } from "@/lib/ghl/enqueue-activity-sync";
+import {
+  BUDGET_STOP_OPTION_KEY,
+  FAILURE_RETRY_OPTION_KEY,
+  INCREMENTAL_QUEUE_JOB_ID,
+  budgetStopMarkerFrom,
+  droppedRemainderMessage,
+  failureRetryMarkerFrom,
+  hasIrreplaceableWorkList,
+  isResumableOn,
+  isRetryDueAt,
+  MAX_ACTIVITY_RETRY_ATTEMPTS,
+  ownsQueuePartition,
+  planActivityFailureRetry,
+  queueJobIdFor,
+  retryAttemptsSpent,
+  scopeFromJobOptions,
+  type ActivityBudgetStopMarker,
+} from "@/lib/ghl/activity-scope";
+import { budgetDay } from "@/lib/ghl/activity-budget";
+import { clearActivityQueueForJob, countActivityQueue } from "@/lib/data/ghl-activity";
 import { errorMessage } from "@/lib/errors";
 import type { PersonListFilters } from "@/lib/data/people";
 import type { CompanyListFilters } from "@/lib/data/companies";
@@ -132,6 +155,12 @@ interface TickOutcome {
   succeededPersonIds: string[];
   failedPersonIds: string[];
   failures: PushJobFailure[];
+  /** Set when the tick stopped for a condition that will still hold on the
+   * next tick — today only the per-location daily GHL API budget. Such a job
+   * must NOT be self-chained: it cannot advance until the UTC day rolls over,
+   * and chaining it would spin the worker. Treated as terminal, with the
+   * reason on the job row so a human sees it. */
+  stoppedReason?: string | null;
 }
 
 /** Dispatches one tick to the right push-core function based on the job's
@@ -201,6 +230,14 @@ async function runTick(
       deadline,
       onProgress: heartbeat,
       full: options.full === true,
+      // The queue partition this job owns. A targeted job keeps its work list
+      // to itself; a whole-client job joins the shared incremental queue (the
+      // all-zero sentinel), which is what `queueJobIdFor` decides from the
+      // scope. Passing job.id unconditionally would split the incremental
+      // queue per job and lose its across-runs resume cursor.
+      jobId: job.id,
+      scope: scopeFromJobOptions(options),
+      dedupedOnly: options.dedupedOnly === true,
     });
     return {
       total: result.total,
@@ -215,6 +252,7 @@ async function runTick(
       succeededPersonIds: result.succeededPersonIds,
       failedPersonIds: result.failedPersonIds,
       failures: result.failed,
+      stoppedReason: result.stoppedReason,
     };
   }
 
@@ -285,6 +323,299 @@ async function runTick(
   throw new Error(`Unknown push job platform "${job.platform}"`);
 }
 
+/** Drops the queue rows a terminal job will never drain.
+ *
+ * Only a job that owns a private partition has any: the shared incremental
+ * partition's rows ARE its across-runs resume cursor and must never be
+ * cleared here. A private partition belongs to one job and nothing else will
+ * ever claim it, so leaving it behind leaks rows forever — up to
+ * MAX_FILTERED_PEOPLE of them for a pre-queued job, which is why this runs on
+ * every terminal path rather than only the budget stop it was written for.
+ *
+ * NOT on a budget stop any more, and that is the point: a budget stop is
+ * "come back tomorrow", so its remainder is kept and marked for resume
+ * (`markActivityJobForResume`). Every other terminal path really is the end
+ * of that work — the job failed or finished, and nothing will claim the
+ * partition again. */
+async function discardPrivateQueuePartition(job: PushJob): Promise<void> {
+  const partition = privateQueuePartitionOf(job);
+  if (!partition) return;
+  await clearActivityQueueForJob(job.clientId, partition).catch((err) => {
+    console.error(`[push-worker] failed to clear activity queue for terminal job ${job.id}: ${errorMessage(err)}`);
+  });
+}
+
+/** The `ghl_activity_queue` partition this job owns, or null when it has none
+ * of its own (not an activity job, or a plain incremental run drinking from
+ * the shared sentinel partition). Not always `job.id`: a continuation job
+ * adopts the partition of the job the daily budget stopped. */
+function privateQueuePartitionOf(job: PushJob): string | null {
+  if (job.platform !== "ghl_activity") return null;
+  const scope = scopeFromJobOptions(job.options);
+  const full = job.options?.full === true;
+  if (!ownsQueuePartition(scope, full)) return null;
+  const partition = queueJobIdFor(job.id, scope, full);
+  return partition === INCREMENTAL_QUEUE_JOB_ID ? null : partition;
+}
+
+/** The partition this job owns AND cannot reconstruct if it is thrown away —
+ * see `hasIrreplaceableWorkList` for which kinds those are and why.
+ *
+ * Null for the SHARED sentinel partition by construction: it comes through
+ * `privateQueuePartitionOf`, which returns null for it. The sentinel is the
+ * client's across-runs incremental cursor — never discarded, never adopted. */
+function adoptableQueuePartitionOf(job: PushJob): string | null {
+  const partition = privateQueuePartitionOf(job);
+  if (!partition) return null;
+  const scope = scopeFromJobOptions(job.options);
+  return hasIrreplaceableWorkList(scope, job.options?.full === true) ? partition : null;
+}
+
+/** Decides what a job that threw for an unexpected reason does with its
+ * undrained queue partition, and what its row should say.
+ *
+ * The defect this closes: the worker's generic catch used to call
+ * `discardPrivateQueuePartition` unconditionally, so one transient
+ * `Timed out acquiring connection from connection pool` (handoff §14.5.8)
+ * permanently destroyed the remainder of a filtered refresh of up to
+ * MAX_FILTERED_PEOPLE people — rows that are the ONLY record of that work.
+ *
+ * Three outcomes, and the invariant across all of them is that the partition
+ * is either adopted by a retry or discarded, never left behind unclaimed
+ * (rows nothing will ever look for again are a leak, not a safety net):
+ *
+ *   retry pending — marker written, partition kept, caller must NOT discard.
+ *   exhausted     — attempts spent; caller discards and the row says plainly
+ *                   that the remainder was dropped and how big it was.
+ *   not adoptable — an ids/full/incremental job, or an already-empty
+ *                   partition. Behaves exactly as before.
+ *
+ * Returns the error text for the job row and whether a retry now owns the
+ * rows. Best-effort throughout: anything that goes wrong while arranging the
+ * retry degrades to "discard and say so", because a remainder nothing is
+ * coming back for must not be left sitting in the queue pretending otherwise. */
+async function planFailureForActivityJob(
+  job: PushJob,
+  reason: string
+): Promise<{ error: string; retryPending: boolean }> {
+  if (job.platform !== "ghl_activity") return { error: reason, retryPending: false };
+
+  const partition = adoptableQueuePartitionOf(job);
+  if (!partition) return { error: reason, retryPending: false };
+
+  let remaining: number;
+  try {
+    remaining = await countActivityQueue(job.clientId, partition);
+  } catch (err) {
+    console.error(
+      `[push-worker] could not count the remainder of failed job ${job.id}: ${errorMessage(err)}`
+    );
+    return { error: reason, retryPending: false };
+  }
+  // Nothing left to protect — the job drained its work and then threw.
+  if (remaining === 0) return { error: reason, retryPending: false };
+
+  const plan = planActivityFailureRetry({
+    reason,
+    queueJobId: partition,
+    remaining,
+    spent: retryAttemptsSpent(job.options),
+  });
+  if (plan.outcome === "exhausted") return { error: plan.error, retryPending: false };
+
+  try {
+    await updateJobOptions(job.id, { ...job.options, [FAILURE_RETRY_OPTION_KEY]: plan.marker });
+  } catch (err) {
+    // The marker is the ONLY thing that would ever bring a worker back to
+    // these rows. Without it they are invisible, so the honest move is to drop
+    // them and say so rather than leak them silently.
+    console.error(
+      `[push-worker] could not mark job ${job.id} for failure retry: ${errorMessage(err)}`
+    );
+    return { error: droppedRemainderMessage(reason, remaining), retryPending: false };
+  }
+  console.warn(
+    `[push-worker] job ${job.id} failed with ${remaining} contacts left in partition ${partition}; ` +
+      `retry ${plan.marker.attempt} of ${MAX_ACTIVITY_RETRY_ATTEMPTS} scheduled: ${reason}`
+  );
+  return { error: plan.error, retryPending: true };
+}
+
+/** Records that the daily GHL budget stopped this job with work still in its
+ * partition, so a later invocation can hand that remainder to a fresh job.
+ *
+ * The rows are deliberately NOT discarded. For a filtered refresh they are
+ * the ONLY record of the work: the job row carries a person COUNT, not the
+ * ids, and the filter they came from cannot be re-resolved honestly (it reads
+ * `platform_pushes`, which the sync writes as it runs). Dropping them turned
+ * a 25,000-person refresh that stopped at 9,000 into 16,000 people silently
+ * lost, under an error message telling the user to re-run something no UI
+ * offers.
+ *
+ * Returns whether a resume is now pending. */
+async function markActivityJobForResume(job: PushJob, day: string): Promise<boolean> {
+  const partition = privateQueuePartitionOf(job);
+  if (!partition) return false;
+  try {
+    const remaining = await countActivityQueue(job.clientId, partition);
+    if (remaining === 0) return false;
+    await updateJobOptions(job.id, {
+      ...job.options,
+      [BUDGET_STOP_OPTION_KEY]: { day, queueJobId: partition } satisfies ActivityBudgetStopMarker,
+    });
+    return true;
+  } catch (err) {
+    // Best-effort: failing to WRITE the marker must not also fail the job
+    // row's own write-back. The rows stay in place either way, so the worst
+    // case is a remainder that needs a human to notice, not one that is gone.
+    console.error(`[push-worker] could not mark job ${job.id} for budget resume: ${errorMessage(err)}`);
+    return false;
+  }
+}
+
+/** One kind of resume marker, as the shared resume loop needs to see it.
+ *
+ * Two markers exist and they are NOT the same thing — a budget stop is "come
+ * back tomorrow, nothing is wrong", a failure retry is "something went wrong,
+ * try a couple more times". They differ in pacing (a UTC day boundary vs. an
+ * elapsed backoff), in whether attempts are bounded, and in what the job row
+ * tells the user. What they genuinely share is the *mechanism* below: find the
+ * marked jobs, atomically claim one, queue a continuation that ADOPTS the
+ * partition instead of re-resolving anything, and put the marker back if that
+ * fails. That part, and only that part, is unified here. */
+interface ResumeMarkerSpec {
+  /** `options` key the marker lives under. */
+  optionKey: string;
+  /** Marker field whose value makes the claim conditional — the budget stop's
+   * `day`, the failure retry's `failedAt`. */
+  claimField: string;
+  /** For logs. */
+  label: string;
+  /** Reads the marker off a job and decides whether it is ready to run NOW.
+   * Null means "not mine, or not yet" — the pacing rule for this marker kind
+   * lives here. */
+  read(job: PushJob): { queueJobId: string; claimValue: string; retryAttempt: number } | null;
+}
+
+/** Hands every ready remainder to a fresh job. Runs once per invocation, next
+ * to the stale-job reaper, for the same reason: it is the only thing that will
+ * ever pick that work back up.
+ *
+ * The continuation is a NEW job rather than the old one re-queued because
+ * `claim_next_runnable_job` has no run-after predicate — see
+ * ActivityQueuedScope. Its scope adopts the partition, so it resolves nothing,
+ * sweeps nothing and simply drains what is there.
+ *
+ * Best-effort throughout: a missing table, a transient error or a lost race
+ * with a concurrent invocation leaves the marker (or restores it) for the next
+ * pass rather than aborting the tick loop. */
+async function resumeMarkedActivityJobs(spec: ResumeMarkerSpec): Promise<number> {
+  const marked = await listMarkedActivityJobs(spec.optionKey);
+  let resumed = 0;
+
+  for (const job of marked) {
+    const ready = spec.read(job);
+    if (!ready) continue;
+
+    const remaining = await countActivityQueue(job.clientId, ready.queueJobId);
+    const withoutMarker = { ...job.options };
+    delete withoutMarker[spec.optionKey];
+    // Claimed BEFORE the continuation is queued, and conditional on the marker
+    // value still being the one we read: two overlapping invocations must not
+    // both queue a continuation for one partition.
+    if (
+      !(await claimActivityJobMarker(
+        job.id,
+        { key: spec.optionKey, field: spec.claimField, value: ready.claimValue },
+        withoutMarker
+      ))
+    ) {
+      continue;
+    }
+    if (remaining === 0) continue; // drained by hand or by an earlier continuation
+
+    try {
+      const continuation = await enqueueGhlActivitySync({
+        clientId: job.clientId,
+        scope: { kind: "queued", personCount: remaining, queueJobId: ready.queueJobId },
+        // Carried forward so a chain of continuations remembers how many
+        // attempts it has burned. A budget stop spends none of them.
+        retryAttempt: ready.retryAttempt,
+        triggeredByUserId: job.triggeredByUserId,
+        triggeredByEmail: job.triggeredByEmail,
+      });
+      resumed++;
+      console.log(
+        `[push-worker] resumed ${spec.label} job ${job.id} as ${continuation.id} ` +
+          `(partition=${ready.queueJobId}, remaining=${remaining}, retryAttempt=${ready.retryAttempt})`
+      );
+    } catch (err) {
+      console.error(`[push-worker] failed to resume ${spec.label} job ${job.id}: ${errorMessage(err)}`);
+      // Put the marker back, or the remainder becomes invisible: the rows are
+      // still there and nothing else looks for them.
+      await updateJobOptions(job.id, job.options).catch((restoreErr) => {
+        console.error(
+          `[push-worker] job ${job.id} has ${remaining} undrained activity rows in partition ` +
+            `${ready.queueJobId} and its resume marker could not be restored: ${errorMessage(restoreErr)}`
+        );
+      });
+    }
+  }
+  return resumed;
+}
+
+/** Budget stops: paced by the UTC day rolling over, unbounded in attempts
+ * (nothing is wrong, the location simply has no quota left today). */
+function resumeBudgetStoppedActivityJobs(): Promise<number> {
+  const today = budgetDay();
+  return resumeMarkedActivityJobs({
+    optionKey: BUDGET_STOP_OPTION_KEY,
+    claimField: "day",
+    label: "budget-stopped",
+    read: (job) => {
+      const marker = budgetStopMarkerFrom(job.options);
+      if (!marker || !isResumableOn(marker, today)) return null;
+      return {
+        queueJobId: marker.queueJobId,
+        claimValue: marker.day,
+        // A budget stop is not a failure and must not consume a retry, but it
+        // must not RESET one either: a chain that had already failed once and
+        // then budget-stopped keeps its count.
+        retryAttempt: retryAttemptsSpent(job.options),
+      };
+    },
+  });
+}
+
+/** Failure retries: paced by ACTIVITY_RETRY_BACKOFF_MS of wall clock since the
+ * failure, and hard-bounded at MAX_ACTIVITY_RETRY_ATTEMPTS.
+ *
+ * The pacing has to be wall clock because, unlike a budget stop, there is no
+ * day rollover to wait for and `claim_next_runnable_job` (SQL, off-limits) has
+ * no run-after predicate. This scan runs at the top of EVERY invocation —
+ * self-chains and route kicks make that far more often than the one-a-minute
+ * cron — so the backoff is what stops a failing partition from burning all its
+ * attempts within seconds and hammering the GHL API. The attempt count, not
+ * the clock, is what guarantees termination. */
+function resumeFailedActivityJobs(): Promise<number> {
+  const now = new Date();
+  return resumeMarkedActivityJobs({
+    optionKey: FAILURE_RETRY_OPTION_KEY,
+    claimField: "failedAt",
+    label: "failure-retry",
+    read: (job) => {
+      const marker = failureRetryMarkerFrom(job.options);
+      if (!marker) return null;
+      // Defence in depth: planActivityFailureRetry never writes a marker past
+      // the limit, but a hand-edited or legacy blob must not resurrect a job
+      // forever.
+      if (marker.attempt > MAX_ACTIVITY_RETRY_ATTEMPTS) return null;
+      if (!isRetryDueAt(marker, now)) return null;
+      return { queueJobId: marker.queueJobId, claimValue: marker.failedAt, retryAttempt: marker.attempt };
+    },
+  });
+}
+
 function terminalStatus(succeeded: number, failed: number): Exclude<PushJobStatus, "queued" | "running"> {
   if (failed === 0) return "succeeded";
   if (succeeded === 0) return "failed";
@@ -309,6 +640,7 @@ async function processJobTick(job: PushJob, workerDeadline: number): Promise<boo
       failures: job.failures,
       error: `Client ${job.clientId} not found`,
     });
+    await discardPrivateQueuePartition(job);
     return true;
   }
 
@@ -344,6 +676,43 @@ async function processJobTick(job: PushJob, workerDeadline: number): Promise<boo
     ...tick.succeededPersonIds.map((personId) => ({ personId, outcome: "succeeded" as const })),
     ...tick.failedPersonIds.map((personId) => ({ personId, outcome: "failed" as const })),
   ]);
+
+  // A tick that stopped on a standing condition (the per-location daily GHL
+  // API budget) ends THIS job, but not the work: the condition holds until the
+  // UTC day rolls over, so self-chaining would spin the worker on a job that
+  // cannot advance, while discarding its queue partition would destroy a work
+  // list that for a filtered refresh exists nowhere else.
+  //
+  // So: the job row goes terminal and says what happened, the partition stays,
+  // and a marker on `options` tells `resumeBudgetStoppedActivityJobs` to hand
+  // the remainder to a fresh job once the budget resets. Status is `partial`
+  // even with nothing succeeded — a stop on the very first reservation is
+  // information ("no quota left today"), not a failure, and the work is still
+  // queued. `failed` is reserved for work that will not happen on its own.
+  if (tick.stoppedReason) {
+    const resumable = await markActivityJobForResume(job, budgetDay());
+    await finishJob(job.id, {
+      // `partial` even when the very first reservation was refused and
+      // nothing at all ran. "No quota left for this location today" is
+      // information about the location, not a fault in this job, and a red
+      // Failed row invites someone to go looking for a bug that isn't there.
+      status: "partial",
+      total: tick.total,
+      processed: tick.nextOffset,
+      succeeded,
+      created,
+      updated,
+      failed,
+      failures,
+      error: resumable
+        ? `${tick.stoppedReason} The remaining ${Math.max(tick.total - tick.nextOffset, 0)} contacts stay queued ` +
+          `and resume automatically after 00:00 UTC.`
+        : tick.stoppedReason,
+    });
+    if (!resumable) await discardPrivateQueuePartition(job);
+    console.warn(`[push-worker] job ${job.id} stopped: ${tick.stoppedReason} (resumable=${resumable})`);
+    return true;
+  }
 
   if (tick.done) {
     await finishJob(job.id, {
@@ -391,6 +760,22 @@ async function processJobTick(job: PushJob, workerDeadline: number): Promise<boo
       try {
         const syncJob = await enqueueGhlActivitySync({
           clientId: job.clientId,
+          // Decision 5, layer 1 — the single biggest cost control in this
+          // feature. A push of 100k genuinely-new leads used to auto-enqueue a
+          // sync that made ~100k export calls (~3.5 hours, half the location's
+          // daily quota) to discover 100k contacts GHL had created seconds
+          // earlier and which therefore cannot have a conversation. With the
+          // `new` flag now persisted as platform_pushes.was_deduped, that sync
+          // skips them and costs ~0 extra calls.
+          //
+          // It narrows the COLD-contact fan-out only, not the sweep: a brand-
+          // new contact that genuinely did get a reply still surfaces in the
+          // conversation sweep (one or two pages either way) and is read. And
+          // the predicate is "was_deduped IS NOT false", never "= true" —
+          // every row pushed before the column existed is NULL, and treating
+          // NULL as "brand new" would drop the entire existing corpus from
+          // every post-push sync with no error at all.
+          dedupedOnly: true,
           triggeredByUserId: job.triggeredByUserId,
           triggeredByEmail: job.triggeredByEmail,
         });
@@ -512,6 +897,28 @@ async function runWorker(request: Request): Promise<Response> {
     console.error(`[push-worker] stale-job reaper failed: ${message}`);
   }
 
+  // Budget resume: the counterpart to the reaper. A job the per-location daily
+  // GHL budget stopped left its undrained queue partition behind on purpose;
+  // once the UTC day has rolled over, that remainder gets a fresh job. Same
+  // best-effort contract as the reaper — a failure here must not cost the
+  // invocation the jobs it could otherwise run.
+  try {
+    await resumeBudgetStoppedActivityJobs();
+  } catch (err) {
+    console.error(`[push-worker] budget-stop resume failed: ${errorMessage(err)}`);
+  }
+
+  // Failure retry: the same adoption mechanism, different question. A job that
+  // threw unexpectedly (a connection-pool timeout, say) left its undrained
+  // partition behind with a bounded, backed-off retry marker; this hands it to
+  // a fresh job once the backoff has elapsed, and gives up — loudly, on the
+  // job row — once the attempts are spent. Same best-effort contract.
+  try {
+    await resumeFailedActivityJobs();
+  } catch (err) {
+    console.error(`[push-worker] failure-retry resume failed: ${errorMessage(err)}`);
+  }
+
   const scheduleSelfChain = (jobId?: string) => {
     chained = true;
     after(() => {
@@ -581,6 +988,13 @@ async function runWorker(request: Request): Promise<Response> {
       finished = await processJobTick(job, workerDeadline);
     } catch (err) {
       const message = errorMessage(err);
+      // An activity job whose remainder exists nowhere but its queue partition
+      // gets a bounded, paced retry rather than having that remainder deleted
+      // by one transient throw. Everything else (and an exhausted chain) ends
+      // exactly as it did — but the row now SAYS the remainder was dropped,
+      // and how much of it, instead of reporting a failure that quietly lost
+      // most of the work.
+      const plan = await planFailureForActivityJob(job, message);
       await finishJob(job.id, {
         status: "failed",
         total: job.total,
@@ -590,8 +1004,11 @@ async function runWorker(request: Request): Promise<Response> {
         updated: job.updated,
         failed: job.failed,
         failures: job.failures,
-        error: message,
+        error: plan.error,
       });
+      // Either the partition is adopted by a retry or it is discarded here.
+      // Never neither: rows nothing will come back for are a leak.
+      if (!plan.retryPending) await discardPrivateQueuePartition(job);
       finished = true; // terminal — don't strand the whole invocation on one bad job
     }
 

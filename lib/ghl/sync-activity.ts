@@ -17,10 +17,18 @@ import {
   getPushedContactsByGhlId,
   getSweepState,
   recordSweep,
+  reserveGhlApiCalls,
   writeContactActivity,
   type ActivityQueueEntry,
   type PushedContact,
 } from "@/lib/data/ghl-activity";
+import {
+  INCREMENTAL_QUEUE_JOB_ID,
+  isTargetedScope,
+  queueJobIdFor,
+  type ActivityScope,
+} from "@/lib/ghl/activity-scope";
+import { budgetDay, budgetStopReason, judgeBudget } from "@/lib/ghl/activity-budget";
 
 /** Reads each pushed contact's GHL message history and recomputes their last
  * activity, as a resumable background job.
@@ -111,6 +119,11 @@ export interface GhlActivitySyncResult {
   total: number;
   nextOffset: number;
   done: boolean;
+  /** Set when the tick stopped for a reason that will still be true next tick
+   * (today: the location's daily API budget). The caller must treat this as
+   * terminal rather than self-chaining, or the worker spins on a job it cannot
+   * advance until the UTC day rolls over. Null on a normal tick. */
+  stoppedReason: string | null;
 }
 
 export interface RunGhlActivitySyncDeps {
@@ -128,7 +141,40 @@ export interface RunGhlActivitySyncDeps {
    * manual "Refresh" button asks for when a user has reason to distrust the
    * incremental path. */
   full?: boolean;
+  /** Which partition of `ghl_activity_queue` this run owns. A targeted job
+   * passes its own job id; a whole-client run passes the all-zero sentinel and
+   * shares the client's ongoing incremental queue. Defaults to the sentinel so
+   * an existing caller keeps today's behaviour. */
+  jobId?: string;
+  /** What this run is allowed to look at (Decision 4). `{kind:"ids"}` turns on
+   * targeted mode: no sweep, no sweep-state write, and the pushed set is read
+   * narrowed to those people. `{kind:"queued"}` means the work list was
+   * resolved from a filter at enqueue time and already sits in this job's
+   * queue partition — same no-sweep rule, nothing to resolve. */
+  scope?: ActivityScope;
+  /** Skip contacts GHL positively told us it had just CREATED (Decision 5,
+   * layer 1). Set by the post-push auto-sync: pushing 100k genuinely-new leads
+   * otherwise queues 100k export calls for conversations that cannot exist
+   * yet. See the cold-contact block below for why this narrows the COLD set
+   * and not the sweep. */
+  dedupedOnly?: boolean;
 }
+
+/** Attempts one contact gets inside a single run before it is dropped from the
+ * queue and reported as failed.
+ *
+ * Two, not one: the failure this most often catches is a transient
+ * `Timed out acquiring connection from connection pool` on the write-back
+ * (handoff §14.5.8), which on a ten-person targeted refresh is the difference
+ * between a clean result and a red row the user has to interpret. Two, not
+ * unbounded: a permanently-broken contact must never block its job's queue,
+ * which is the property the original drop-on-failure behaviour was protecting.
+ *
+ * The counter is in memory and per-run on purpose — there is no attempts
+ * column, and adding one would buy very little: a run that genuinely cannot
+ * read a contact should surface that to the user now, not grind at it across
+ * ticks. */
+const MAX_CONTACT_ATTEMPTS = 2;
 
 function chunk<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = [];
@@ -156,7 +202,13 @@ async function sweepConversations(
   startCursor: number | null,
   deadline: number | undefined,
   fetchImpl: typeof fetch,
-  onProgress: (() => void) | undefined
+  onProgress: (() => void) | undefined,
+  /** Reserves budget for the page about to be read; false means the location
+   * is out of quota and the pass must stop where it is. Reserved per page
+   * rather than up front for the whole pass, because a steady-state sweep is
+   * one or two pages and reserving MAX_SWEEP_PAGES_PER_TICK would burn 400
+   * calls of quota in order to spend two. */
+  reserve: (calls: number) => Promise<boolean>
 ): Promise<{
   pages: number;
   enqueued: ActivityQueueEntry[];
@@ -181,6 +233,9 @@ async function sweepConversations(
   let caughtUp = false;
 
   for (; pages < MAX_SWEEP_PAGES_PER_TICK; ) {
+    // Out of quota: stop exactly as a tick-budget exhaustion would — the pass
+    // keeps its resume cursor and the next run picks it up from there.
+    if (!(await reserve(1))) break;
     const page = await fetchConversationPage(credentials, cursor, { fetchImpl });
     pages++;
     onProgress?.();
@@ -306,11 +361,52 @@ export function canSkipContact(
   });
 }
 
+/** Whether this contact could possibly have messages worth an export call
+ * (Decision 5, layer 1).
+ *
+ * `platform_pushes.was_deduped` records GHL's own `new` flag from the upsert
+ * that wrote the row: false means GHL created the contact fresh, so it has no
+ * conversation and reading it is a guaranteed-empty API call. A push of 100k
+ * genuinely-new leads auto-enqueues a sync; without this, that sync makes
+ * ~100k export calls — about 3.5 hours and half the location's daily quota —
+ * to discover 100k empty inboxes.
+ *
+ * THREE states, and only one of them is a skip:
+ *   true  — GHL matched an existing contact. Read it.
+ *   null  — unknown. Every row pushed before this column existed is NULL, as
+ *           is a response whose `new` flag we couldn't recognize. Read it.
+ *           Treating NULL as "new" would silently drop the entire existing
+ *           corpus from every post-push sync, forever, with no error — which
+ *           is why this is `!== false` and never `=== true`.
+ *   false — GHL created it seconds ago. Skip.
+ *
+ * A contact is skipped only when EVERY push row for it says false: if two of
+ * our people share one GHL contact and either push matched an existing
+ * contact, the conversation exists. */
+export function mayHaveMessages(pushed: PushedContact[] | undefined): boolean {
+  if (!pushed || pushed.length === 0) return false;
+  return pushed.some((p) => p.wasDeduped !== false);
+}
+
 /** One tick of a client's activity sync.
  *
  * Phase order matters: the sweep runs only on a tick that finds an empty
  * queue, so a resumed job goes straight back to draining rather than
- * re-sweeping a location it already swept. */
+ * re-sweeping a location it already swept.
+ *
+ * ## Targeted mode (Decision 3)
+ *
+ * When `scope` names person ids, the sweep is skipped ENTIRELY and
+ * `ghl_activity_sweeps` is never written. The sweep exists to DISCOVER which
+ * contacts moved; a caller that names the contacts has done that discovery
+ * already, and a cold sweep costs ~138s against the Internal location —
+ * absurd overhead on a thirty-contact refresh. The sweep-state write is the
+ * part that actually matters: `recordSweep` has exactly one call site, inside
+ * the non-targeted branch below, so a targeted run leaves
+ * `last_message_date_ms`, `full_sweep_completed_at` and `sweep_cursor_ms`
+ * untouched and the next incremental run behaves as if it never happened.
+ * Keep it that way — a targeted run has not walked the location and must
+ * never be allowed to advance a mark that claims it has. */
 export async function runGhlActivitySync(
   client: ClientRow,
   deps: RunGhlActivitySyncDeps = {}
@@ -319,29 +415,91 @@ export async function runGhlActivitySync(
     throw new Error(`Client "${client.name}" has no GHL credentials configured`);
   }
 
-  const credentials: GhlCredentials = { apiKey: client.ghlApiKey, locationId: client.ghlLocationId };
+  const locationId = client.ghlLocationId;
+  const credentials: GhlCredentials = { apiKey: client.ghlApiKey, locationId };
   const fetchImpl = deps.fetchImpl ?? fetch;
   const onProgress = deps.onProgress;
   const deadline = deps.deadline;
   const offset = deps.offset ?? 0;
 
-  const pushedByGhlId = await getPushedContactsByGhlId(client.id);
+  const scope = deps.scope;
+  const targeted = isTargetedScope(scope);
+  // Its work list was resolved from a filter at enqueue time and written
+  // straight into this job's partition, so phase 1 has nothing left to do:
+  // no sweep (same reason as targeted mode — the discovery is done), and no
+  // re-enqueue, because the rows ARE the scope. An empty partition here means
+  // the job has drained, not that it should go and find more work.
+  const preQueued = scope?.kind === "queued";
+  // A job that resolved its own work list — targeted, pre-queued, or a full
+  // re-read — owns a private partition of the queue; only a plain incremental
+  // run joins the shared one, whose rows persist across runs and ARE its
+  // resume cursor. `deps.full` is part of that test: a full re-read writes the
+  // client's entire pushed set and never sweeps, so leaving it in the shared
+  // partition let an abandoned full job's work be silently drained (and paid
+  // for) by the next incremental sync, which then skipped its own sweep.
+  const queueJobId = queueJobIdFor(deps.jobId ?? INCREMENTAL_QUEUE_JOB_ID, scope, deps.full === true);
+
+  // -- The per-location daily budget (Decision 5, layer 2) -------------------
+  // Every GHL call this tick makes passes through `reserve` first. The RPC
+  // increments and returns the new total in one statement, so two workers
+  // racing for the last of the quota cannot both see room; the ceiling itself
+  // is app-side policy, deliberately not baked into the schema.
+  const day = budgetDay();
+  let budgetStop: string | null = null;
+  const reserve = async (calls: number): Promise<boolean> => {
+    if (budgetStop) return false;
+    const total = await reserveGhlApiCalls(locationId, calls, day);
+    if (total == null) return true; // guard not installed yet — logged in the data layer
+    const verdict = judgeBudget(total);
+    if (!verdict.allowed) {
+      budgetStop = budgetStopReason(locationId, day, verdict.used);
+      return false;
+    }
+    return true;
+  };
+
+  // Targeted mode reads only the selected people's push rows. The whole-client
+  // read loads the client's entire pushed set (thousands of rows) on every
+  // tick, which a ten-person refresh pays for and uses almost none of.
+  //
+  // A pre-queued job falls on the whole-client side because its scope names
+  // contacts, not people: this map is how a queue row finds the person ids to
+  // write back to, and narrowing it would need the person ids the job
+  // deliberately does not carry.
+  const pushedByGhlId = await getPushedContactsByGhlId(
+    client.id,
+    targeted ? { personIds: scope.personIds } : {}
+  );
 
   let sweptPages = 0;
   let enqueuedCount = 0;
 
-  const pending = await countActivityQueue(client.id);
+  const pending = await countActivityQueue(client.id, queueJobId);
 
-  // Phase 1 — sweep (or, for a full refresh, queue everything directly).
+  // Phase 1 — resolve the work list. Four shapes: pre-queued (already
+  // resolved), targeted (no sweep), full (everything, no sweep), incremental
+  // (sweep).
   if (pending === 0) {
-    if (deps.full) {
+    if (preQueued) {
+      // Nothing to resolve and, above all, nothing to sweep.
+    } else if (targeted) {
+      // The caller named these people; the only resolution left is "which GHL
+      // contact is each of them". No swept date, so canSkipContact always
+      // fetches — which is what a user watching these specific rows asked for.
+      const all: ActivityQueueEntry[] = Array.from(pushedByGhlId.keys()).map((ghlContactId) => ({
+        ghlContactId,
+        lastMessageDate: null,
+      }));
+      if (all.length > 0) await enqueueActivityContacts(client.id, queueJobId, all);
+      enqueuedCount = all.length;
+    } else if (deps.full) {
       const all: ActivityQueueEntry[] = Array.from(pushedByGhlId.keys()).map((ghlContactId) => ({
         ghlContactId,
         // No swept date: canSkipContact then always fetches, which is exactly
         // what "refresh, I don't trust the incremental path" means.
         lastMessageDate: null,
       }));
-      await enqueueActivityContacts(client.id, all);
+      await enqueueActivityContacts(client.id, queueJobId, all);
       enqueuedCount = all.length;
     } else {
       const state = await getSweepState(client.id);
@@ -358,7 +516,8 @@ export async function runGhlActivitySync(
           state.sweepCursorMs,
           deadline,
           fetchImpl,
-          onProgress
+          onProgress,
+          reserve
         );
       } catch (err) {
         // A stale/contacts-only token 401s on every conversations endpoint
@@ -378,24 +537,36 @@ export async function runGhlActivitySync(
       // Cold contacts: never synced, so the sweep may never surface them (a
       // deduped push can land on a conversation older than the mark). Queued
       // on every pass, including a partial one — the queue upserts on
-      // (client, contact), so re-adding one already queued is a no-op, and a
-      // contact the later pages would have surfaced anyway is simply
+      // (client, job, contact), so re-adding one already queued is a no-op, and
+      // a contact the later pages would have surfaced anyway is simply
       // processed once by whichever path reached it first.
+      //
+      // `dedupedOnly` prunes THIS set and only this set (Decision 5, layer 1).
+      // The cold set is where the 100k-push blow-up lives: 100k freshly
+      // created contacts are all cold, and each would cost one export call to
+      // learn it has no conversation. The SWEEP is deliberately left
+      // unnarrowed — it is discovery, it costs the same one or two pages
+      // either way, and a brand-new contact that genuinely did receive a reply
+      // shows up in it and is fetched. Narrowing the sweep too would be the
+      // difference between "don't pay for data that cannot exist" and "never
+      // look at these contacts again".
       const cold: ActivityQueueEntry[] = [];
       const swept = new Set(sweep.enqueued.map((e) => e.ghlContactId));
       for (const [ghlContactId, rows] of pushedByGhlId) {
         if (swept.has(ghlContactId)) continue;
-        if (rows.some((r) => r.activitySyncedAt == null)) {
-          cold.push({ ghlContactId, lastMessageDate: null });
-        }
+        if (!rows.some((r) => r.activitySyncedAt == null)) continue;
+        if (deps.dedupedOnly && !mayHaveMessages(rows)) continue;
+        cold.push({ ghlContactId, lastMessageDate: null });
       }
 
       const toEnqueue = [...sweep.enqueued, ...cold];
-      if (toEnqueue.length > 0) await enqueueActivityContacts(client.id, toEnqueue);
+      if (toEnqueue.length > 0) await enqueueActivityContacts(client.id, queueJobId, toEnqueue);
       enqueuedCount = toEnqueue.length;
 
-      // The mark only moves forward, so a resumed pass (whose pages are older
-      // than the mark by definition) can't drag it backwards.
+      // The ONLY recordSweep call site, and it must stay that way: a targeted
+      // run has not walked the location and must not advance a mark that says
+      // it has. The mark only moves forward, so a resumed pass (whose pages are
+      // older than the mark by definition) can't drag it backwards.
       await recordSweep(client.id, sweep.newestMs, sweep.reachedEnd, sweep.nextCursor);
     }
   }
@@ -410,19 +581,23 @@ export async function runGhlActivitySync(
   const failedPersonIds: string[] = [];
   let hitDeadline = false;
 
+  /** Attempts spent per contact within this run — see MAX_CONTACT_ATTEMPTS. */
+  const attempts = new Map<string, number>();
+
   for (;;) {
+    if (budgetStop) break;
     if (deadline !== undefined && Date.now() >= deadline) {
       hitDeadline = true;
       break;
     }
 
-    const batch = await claimActivityQueueBatch(client.id, QUEUE_BATCH_SIZE);
+    const batch = await claimActivityQueueBatch(client.id, queueJobId, QUEUE_BATCH_SIZE);
     if (batch.length === 0) break;
 
     // Cheap skips first, so a steady-state run deletes most of its queue
     // without making a single API call.
     const settledIds: string[] = [];
-    const toFetch: ActivityQueueEntry[] = [];
+    let toFetch: ActivityQueueEntry[] = [];
     for (const entry of batch) {
       if (canSkipContact(entry, pushedByGhlId.get(entry.ghlContactId))) {
         skipped++;
@@ -432,62 +607,101 @@ export async function runGhlActivitySync(
       }
     }
 
-    for (const group of chunk(toFetch, GHL_ACTIVITY_CONCURRENCY)) {
-      const results = await Promise.allSettled(
-        group.map(async (entry) => ({
-          entry,
-          result: await syncOneContact(
+    // One pass per attempt: a contact that fails is retried once within this
+    // batch before being settled as failed, so a transient write-back blip
+    // doesn't surface as a red row on a refresh the user is watching.
+    for (let attempt = 1; attempt <= MAX_CONTACT_ATTEMPTS && toFetch.length > 0; attempt++) {
+      const retry: ActivityQueueEntry[] = [];
+
+      for (const group of chunk(toFetch, GHL_ACTIVITY_CONCURRENCY)) {
+        // One export call per contact (a contact with a genuinely long history
+        // pages, which under-reserves slightly — the safe direction is covered
+        // by the 50k of headroom the ceiling leaves under GHL's own limit).
+        if (!(await reserve(group.length))) break;
+
+        const results = await Promise.allSettled(
+          group.map(async (entry) => ({
             entry,
-            client,
-            credentials,
-            fetchImpl,
-            pushedByGhlId.get(entry.ghlContactId) ?? []
-          ),
-        }))
-      );
+            result: await syncOneContact(
+              entry,
+              client,
+              credentials,
+              fetchImpl,
+              pushedByGhlId.get(entry.ghlContactId) ?? []
+            ),
+          }))
+        );
 
-      for (const settled of results) {
-        const entry = settled.status === "fulfilled" ? settled.value.entry : null;
-        const personIds = entry ? (pushedByGhlId.get(entry.ghlContactId) ?? []).map((p) => p.personId) : [];
+        for (const settled of results) {
+          const entry = settled.status === "fulfilled" ? settled.value.entry : null;
+          const pushed = entry ? (pushedByGhlId.get(entry.ghlContactId) ?? []) : [];
+          const personIds = pushed.map((p) => p.personId);
 
-        if (settled.status === "fulfilled" && settled.value.result.ok) {
-          fetched++;
-          if (settled.value.result.changed) updated++;
-          succeededPersonIds.push(...personIds);
-          if (entry) settledIds.push(entry.ghlContactId);
-        } else {
-          errors++;
+          if (settled.status === "fulfilled" && settled.value.result.ok) {
+            fetched++;
+            if (settled.value.result.changed) updated++;
+            succeededPersonIds.push(...personIds);
+            if (entry) settledIds.push(entry.ghlContactId);
+            continue;
+          }
+
           const reason =
             settled.status === "fulfilled"
               ? (settled.value.result as { ok: false; error: string }).error
               : errorMessage((settled as PromiseRejectedResult).reason);
-          failed.push({ name: entry?.ghlContactId ?? "unknown", reason });
+
+          // A rejected promise carries no entry, so there is nothing to retry
+          // or settle — count it and move on, as before.
+          if (!entry) {
+            errors++;
+            failed.push({ name: "unknown", reason });
+            console.error(`GHL activity sync: failed for an unknown contact (client ${client.id}): ${reason}`);
+            continue;
+          }
+
+          const spent = (attempts.get(entry.ghlContactId) ?? 0) + 1;
+          attempts.set(entry.ghlContactId, spent);
+          if (spent < MAX_CONTACT_ATTEMPTS) {
+            retry.push(entry);
+            continue;
+          }
+
+          errors++;
+          // Named by person id, not GHL contact id: on a targeted refresh the
+          // user selected PEOPLE, and "contact mN3k…" in the failures list is
+          // not something they can match back to a row.
+          failed.push({ name: personIds[0] ?? entry.ghlContactId, reason });
           failedPersonIds.push(...personIds);
-          // Dropped from the queue even on failure: leaving it would make a
-          // single permanently-broken contact block the queue forever. The
-          // next sweep re-queues it if its activity is still moving, and a
-          // cold contact stays cold (activity_synced_at unwritten) so the
-          // next run retries it anyway.
-          if (entry) settledIds.push(entry.ghlContactId);
+          // Still dropped from the queue after its last attempt: leaving it
+          // would make one permanently-broken contact block this job's queue
+          // forever, which is the property the original behaviour protected.
+          // It is NOT dropped silently — the reason and the person ids go onto
+          // the job row, so the Push Activity panel shows the job as
+          // partial/failed with a per-person reason, and a cold contact stays
+          // cold (activity_synced_at unwritten) so the next run retries it.
+          settledIds.push(entry.ghlContactId);
           console.error(
-            `GHL activity sync: failed for contact ${entry?.ghlContactId ?? "unknown"} (client ${client.id}): ${reason}`
+            `GHL activity sync: failed for contact ${entry.ghlContactId} (client ${client.id}): ${reason}`
           );
+        }
+
+        onProgress?.();
+
+        if (deadline !== undefined && Date.now() >= deadline) {
+          hitDeadline = true;
+          break;
         }
       }
 
-      onProgress?.();
-
-      if (deadline !== undefined && Date.now() >= deadline) {
-        hitDeadline = true;
-        break;
-      }
+      if (hitDeadline || budgetStop) break;
+      toFetch = retry;
     }
 
-    if (settledIds.length > 0) await dequeueActivityContacts(client.id, settledIds);
-    if (hitDeadline) break;
+    if (settledIds.length > 0) await dequeueActivityContacts(client.id, queueJobId, settledIds);
+    if (hitDeadline || budgetStop) break;
   }
 
-  const remaining = await countActivityQueue(client.id);
+  const remaining = await countActivityQueue(client.id, queueJobId);
   const processed = fetched + skipped + errors;
 
   return {
@@ -502,6 +716,9 @@ export async function runGhlActivitySync(
     failedPersonIds,
     total: offset + processed + remaining,
     nextOffset: offset + processed,
+    // A budget stop leaves work behind by definition, so `done` stays honest
+    // and `stoppedReason` tells the caller not to self-chain on it.
     done: remaining === 0,
+    stoppedReason: budgetStop,
   };
 }

@@ -140,7 +140,12 @@ type PushOneResult = { ok: true } | { ok: false; error: string };
  * inserted) on the (person_id, client_id, platform) unique key — this record
  * is resent on every run, so a prior push row is overwritten with the latest
  * attempt rather than causing a conflict. Only successful pushes are logged;
- * a failure just contributes to the batch's error count. */
+ * a failure just contributes to the batch's error count.
+ *
+ * `was_deduped` is overwritten on every re-push, which is correct: a second
+ * push of the same person always matches the contact the first one created,
+ * so the row converges on true — "this contact exists in GHL and may have a
+ * conversation", which is exactly what the activity sync wants to know. */
 async function pushOne(
   candidate: GhlPushCandidate,
   client: ClientRow,
@@ -163,7 +168,7 @@ async function pushOne(
   );
 
   try {
-    const { contactId } = await pushContactToGhl(
+    const { contactId, deduped } = await pushContactToGhl(
       credentials,
       {
         firstName: payload.firstName ?? undefined,
@@ -187,6 +192,13 @@ async function pushOne(
         client_id: client.id,
         platform: PLATFORM,
         platform_contact_id: contactId,
+        // GHL's own new-vs-existing verdict, persisted rather than discarded
+        // (Decision 5, layer 1). It is the only thing that lets the activity
+        // sync avoid one export call per contact for a push of 100k
+        // genuinely-new leads — conversations that cannot exist yet. Written
+        // as a tri-state: null means GHL's response carried no recognizable
+        // `new` flag, and the sync must treat that as "might have messages".
+        was_deduped: deduped,
         campaign_tag: userTag ?? null,
         pushed_at: pushedAt,
         pushed_by_user_id: actor.id,

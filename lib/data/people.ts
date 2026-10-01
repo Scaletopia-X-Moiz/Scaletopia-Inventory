@@ -687,6 +687,33 @@ export async function getAllFilteredPeople(filters: PersonListFilters): Promise<
   return sortByLastUpdatedDesc(await fetchFilteredRows(filters)).map(toListRow);
 }
 
+/** How many people these filters match, WITHOUT materializing them — or null
+ * when that can't be answered without resolving an id set.
+ *
+ * For a caller that has to refuse an over-large population (the GHL activity
+ * refresh), fetching 80,000 rows in order to reject them is the expensive
+ * part of the request, and it runs on every click of a dialog that
+ * re-previews as the user changes their mind. The plain filter path is a
+ * head count — one query, no rows.
+ *
+ * Null, not a count, when an id-restricting dimension is active
+ * (virtualFilters / pushStatus / pushJobId / lastActivity): those are
+ * resolved as id sets and the count is only exact once they've been
+ * intersected and re-filtered. They are also the bounded ones — an id set
+ * comes from one push job, one client's pushed set, or the matching RPC —
+ * so the caller resolving them directly is not the runaway case this guards.
+ * Callers must treat null as "no cheap answer", never as zero. */
+export async function tryCountFilteredPeople(filters: PersonListFilters): Promise<number | null> {
+  if (needsMatchingRpc(filters) || filters.pushJobId || filters.lastActivity) return null;
+
+  const { count, error } = await applyPersonFilters(
+    supabaseAdmin.from("people").select("id", { count: "exact", head: true }),
+    filters
+  );
+  if (error) throw error;
+  return count ?? 0;
+}
+
 /** The raw person row plus the enrichment blob and identity columns the list query drops. */
 interface FullPersonRow extends RawPersonRow {
   first_name: string | null;

@@ -20,7 +20,7 @@ export default async function PeoplePage() {
           </Suspense>
 
           <Suspense fallback={<div className="flex flex-col gap-6"><div className="h-4 w-28 rounded bg-rule animate-pulse" /><SkeletonTable rows={12} /></div>}>
-            <PeopleResultsClient />
+            <PeopleResultsClient clientOptions={clientOptions} />
           </Suspense>
         </div>
       </main>

@@ -158,12 +158,15 @@ describe("pushContactToGhl", () => {
     expect(JSON.parse(tagInit.body)).toEqual({ tags: ["ghl-b"] });
   });
 
-  it("treats a response with no recognizable `new` flag as not deduped", async () => {
+  it("reports deduped: null when the response carries no recognizable `new` flag", async () => {
+    // Not false. "Unknown" is persisted as was_deduped NULL, which the activity
+    // sync reads as "might have messages" — collapsing it to false would make
+    // the sync skip a contact that may have years of history.
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, { contact: { id: "contact_1" } }));
 
     const result = await pushContactToGhl(CREDENTIALS, { email: "ada@example.com" }, { fetchImpl });
 
-    expect(result).toEqual({ contactId: "contact_1", deduped: false });
+    expect(result).toEqual({ contactId: "contact_1", deduped: null });
   });
 
   it("retries transient 5xx failures and succeeds once the response recovers", async () => {

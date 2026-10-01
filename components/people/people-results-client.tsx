@@ -3,9 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { AlertDialog } from "radix-ui";
+import { X } from "lucide-react";
 import type { PersonListResult } from "@/lib/data/people";
+import type { ClientOption } from "@/lib/data/clients";
 import { virtualColumnIdentity } from "@/lib/data/virtual-columns";
-import { PeopleTable } from "@/components/people/people-table";
+import { PeopleTable, type PeopleTableSelection } from "@/components/people/people-table";
 import { VirtualColumnsBar } from "@/components/companies/virtual-columns-bar";
 import { useVirtualColumnsState } from "@/components/companies/use-virtual-columns";
 import { Pagination } from "@/components/companies/pagination";
@@ -21,7 +23,7 @@ import { isAnyDialogOpen, subscribeToDialogStack } from "@/components/shared/dia
 
 const cache = new Map<string, PersonListResult>();
 
-export function PeopleResultsClient() {
+export function PeopleResultsClient({ clientOptions }: { clientOptions: ClientOption[] }) {
   const searchParams = useSearchParams();
   const paramsStr = searchParams.toString();
   const hit = cache.get(paramsStr) ?? null;
@@ -66,6 +68,55 @@ export function PeopleResultsClient() {
     load();
     return () => abortRef.current?.abort();
   }, [load]);
+
+  /** Row selection for the toolbar's targeted actions (Refresh activity).
+   *
+   * Scoped to the *filter*, not the page: paging is just moving a window over
+   * one result set, so ids picked on page 1 stay picked on page 2. Changing
+   * any other param changes which people exist, and keeping ids the user can
+   * no longer see would mean acting on rows they believe they dismissed — so
+   * the selection is dropped whenever the filter identity changes. */
+  const filterKey = useMemo(() => {
+    const params = new URLSearchParams(paramsStr);
+    params.delete("page");
+    params.sort();
+    return params.toString();
+  }, [paramsStr]);
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
+  // Reset during render rather than in an effect: React re-runs this render
+  // before committing, so the table never paints one frame with stale ids
+  // against the new filter (and it keeps the set-state-in-effect rule happy).
+  const [selectionFilterKey, setSelectionFilterKey] = useState(filterKey);
+  if (selectionFilterKey !== filterKey) {
+    setSelectionFilterKey(filterKey);
+    setSelectedIds(new Set());
+  }
+
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
+  const rows = result?.rows;
+  const selection = useMemo<PeopleTableSelection>(
+    () => ({
+      selectedIds,
+      toggleRow: (id, selected) =>
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          if (selected) next.add(id);
+          else next.delete(id);
+          return next;
+        }),
+      togglePage: (selected) =>
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          for (const row of rows ?? []) {
+            if (selected) next.add(row.id);
+            else next.delete(row.id);
+          }
+          return next;
+        }),
+    }),
+    [selectedIds, rows]
+  );
+  const selectedIdList = useMemo(() => [...selectedIds], [selectedIds]);
 
   const {
     activeColumns: virtualColumns,
@@ -145,9 +196,25 @@ export function PeopleResultsClient() {
   return (
     <>
       <div className="flex items-baseline justify-between gap-3">
-        <h2 className="text-sm font-semibold text-ink">
-          {result.total.toLocaleString("en-US")} people
-        </h2>
+        <div className="flex items-baseline gap-3">
+          <h2 className="text-sm font-semibold text-ink">
+            {result.total.toLocaleString("en-US")} people
+          </h2>
+          {selectedIdList.length > 0 && (
+            <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs text-ink-soft">
+              {selectedIdList.length.toLocaleString("en-US")} selected
+              <button
+                type="button"
+                onClick={clearSelection}
+                className="inline-flex items-center gap-0.5 rounded text-ink-mute transition-smooth hover:text-ink focus-visible:ring-2 focus-visible:ring-stamp/50"
+                aria-label="Clear selection"
+              >
+                <X size={12} />
+                Clear
+              </button>
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <ReverifyFilteredButton
             endpoint="/api/people/reverify"
@@ -173,7 +240,15 @@ export function PeopleResultsClient() {
             virtualColumns={virtualColumns}
             onDone={handlePushDone}
           />
-          <RefreshGhlActivityButton onDone={handlePushDone} />
+          <RefreshGhlActivityButton
+            paramsStr={paramsStr}
+            selectedIds={selectedIdList}
+            // Every sub-account, including the inactive ones: people were
+            // pushed to those too, and the dialog has to be able to name and
+            // narrow to them.
+            clients={clientOptions}
+            onDone={handlePushDone}
+          />
           <PushToEmailBisonButton
             paramsStr={paramsStr}
             total={result.total}
@@ -201,7 +276,7 @@ export function PeopleResultsClient() {
         selfEntity="person"
       />
 
-      <PeopleTable rows={result.rows} virtualColumns={virtualColumns} />
+      <PeopleTable rows={result.rows} virtualColumns={virtualColumns} selection={selection} />
 
       <Pagination
         page={result.page}

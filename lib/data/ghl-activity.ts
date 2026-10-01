@@ -1,8 +1,11 @@
 import "server-only";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { fetchAllRows } from "@/lib/data/fetch-all-rows";
+import { mapWithConcurrency } from "@/lib/concurrency";
 import type { NormalizedGhlMessage } from "@/lib/ghl/activity-rules";
 import type { LastActivityFilter } from "@/lib/data/last-activity-filter";
+import { INCREMENTAL_QUEUE_JOB_ID } from "@/lib/ghl/activity-scope";
+import { budgetDay } from "@/lib/ghl/activity-budget";
 
 /** Data layer for the GHL last-activity feature (schema in
  * lib/data/ghl-activity.sql): the sweep high-water mark, the durable work
@@ -84,12 +87,21 @@ export interface ActivityQueueEntry {
   lastMessageDate: string | null;
 }
 
-/** Adds contacts to this client's work list. Upsert on the composite PK so a
+/** Adds contacts to one job's work list. Upsert on the composite PK so a
  * sweep that re-sees a contact (or a second sweep before the first drained)
  * refreshes its observed date instead of conflicting. Chunked because a first
- * full sweep can enqueue tens of thousands of rows in one go. */
+ * full sweep can enqueue tens of thousands of rows in one go.
+ *
+ * EVERY queue operation in this file takes a `jobId` and filters on it. The
+ * queue used to be keyed `(client_id, ghl_contact_id)` alone, and because the
+ * sync only enqueues when the queue is empty, two jobs for one client shared
+ * one work list: a targeted job could drain rows another job had queued and
+ * then report success while the other job reported nothing to do. The all-zero
+ * sentinel (INCREMENTAL_QUEUE_JOB_ID) is the shared incremental partition;
+ * a targeted job writes under its own id. */
 export async function enqueueActivityContacts(
   clientId: string,
+  jobId: string,
   entries: ActivityQueueEntry[]
 ): Promise<void> {
   const CHUNK = 500;
@@ -97,10 +109,11 @@ export async function enqueueActivityContacts(
     const { error } = await supabaseAdmin.from("ghl_activity_queue").upsert(
       entries.slice(i, i + CHUNK).map((e) => ({
         client_id: clientId,
+        job_id: jobId,
         ghl_contact_id: e.ghlContactId,
         last_message_date: e.lastMessageDate,
       })),
-      { onConflict: "client_id,ghl_contact_id" }
+      { onConflict: "client_id,job_id,ghl_contact_id" }
     );
     if (error) throw error;
   }
@@ -111,12 +124,14 @@ export async function enqueueActivityContacts(
  * entries a sweep appended last are processed last. */
 export async function claimActivityQueueBatch(
   clientId: string,
+  jobId: string,
   limit: number
 ): Promise<ActivityQueueEntry[]> {
   const { data, error } = await supabaseAdmin
     .from("ghl_activity_queue")
     .select("ghl_contact_id,last_message_date")
     .eq("client_id", clientId)
+    .eq("job_id", jobId)
     .order("enqueued_at", { ascending: true })
     .order("ghl_contact_id", { ascending: true })
     .limit(limit);
@@ -130,25 +145,49 @@ export async function claimActivityQueueBatch(
 /** Removes finished work. Called after each batch, so an invocation killed
  * mid-job leaves exactly the un-processed remainder behind — the queue IS the
  * cursor, which is why nothing about the fetch phase needs offset arithmetic. */
-export async function dequeueActivityContacts(clientId: string, ghlContactIds: string[]): Promise<void> {
+export async function dequeueActivityContacts(
+  clientId: string,
+  jobId: string,
+  ghlContactIds: string[]
+): Promise<void> {
   const CHUNK = 200;
   for (let i = 0; i < ghlContactIds.length; i += CHUNK) {
     const { error } = await supabaseAdmin
       .from("ghl_activity_queue")
       .delete()
       .eq("client_id", clientId)
+      .eq("job_id", jobId)
       .in("ghl_contact_id", ghlContactIds.slice(i, i + CHUNK));
     if (error) throw error;
   }
 }
 
-export async function countActivityQueue(clientId: string): Promise<number> {
+export async function countActivityQueue(clientId: string, jobId: string): Promise<number> {
   const { count, error } = await supabaseAdmin
     .from("ghl_activity_queue")
     .select("ghl_contact_id", { count: "exact", head: true })
-    .eq("client_id", clientId);
+    .eq("client_id", clientId)
+    .eq("job_id", jobId);
   if (error) throw error;
   return count ?? 0;
+}
+
+/** Drops a targeted job's entire partition.
+ *
+ * Only ever called for a NON-sentinel job_id, and only once that job has
+ * reached a terminal state: a targeted job re-resolves its contact set from
+ * the person ids stored in `push_jobs.options` on every run, so its leftover
+ * queue rows carry no information once the job is over — whereas the shared
+ * incremental partition's rows ARE the resume cursor and must never be
+ * cleared this way. */
+export async function clearActivityQueueForJob(clientId: string, jobId: string): Promise<void> {
+  if (jobId === INCREMENTAL_QUEUE_JOB_ID) return;
+  const { error } = await supabaseAdmin
+    .from("ghl_activity_queue")
+    .delete()
+    .eq("client_id", clientId)
+    .eq("job_id", jobId);
+  if (error) throw error;
 }
 
 // -- platform_pushes: the contacts we actually care about --------------------
@@ -158,7 +197,45 @@ export interface PushedContact {
   ghlContactId: string;
   lastActivityAt: string | null;
   activitySyncedAt: string | null;
+  /** True when GHL's upsert matched an EXISTING contact, false when it created
+   * a fresh one, null when we don't know (every row pushed before the column
+   * existed, plus the rare response with no recognizable `new` flag).
+   *
+   * Only `false` is actionable: a contact GHL created seconds ago cannot have
+   * a conversation, so reading its messages is a guaranteed-empty API call.
+   * Null must be treated as "might have messages" — see dedupedOnly below. */
+  wasDeduped: boolean | null;
 }
+
+/** How many person ids go into one PostgREST `in.(...)` list. The filter
+ * travels in the query string, and 2,000 uuids is ~74 KB of URL — well past
+ * what any proxy will carry. */
+const ID_FILTER_CHUNK = 200;
+
+/** How many of those chunked lookups may be in flight at once.
+ *
+ * A filtered refresh can carry MAX_FILTERED_PEOPLE ids, which is ~125 chunks;
+ * `Promise.all` over all of them opens ~125 concurrent Supabase queries, and
+ * each chunk is itself a `fetchAllRows` (a count plus its pages). This project
+ * already sees pool timeouts under far less, and the preview runs this on
+ * every click in the refresh dialog. Six at a time keeps the chunks
+ * overlapping without the fan-out scaling with the user's selection. */
+const ID_FILTER_CONCURRENCY = 6;
+
+export interface PushedContactQuery {
+  /** Narrow to these people only. The whole-client read loads the client's
+   * entire pushed set (thousands of rows) on EVERY tick, which is pure waste
+   * for a targeted refresh of ten people. */
+  personIds?: string[];
+}
+
+/** Note on `was_deduped`: it is deliberately selected and returned rather than
+ * filtered on here. The "skip contacts GHL just created" rule (Decision 5,
+ * layer 1) is applied in memory by `mayHaveMessages` (lib/ghl/sync-activity.ts)
+ * because it must distinguish three states, and a three-valued column is the
+ * easiest thing in the world to get wrong in a PostgREST filter: `= true`
+ * drops every pre-existing row (they are all NULL) and `NOT was_deduped` is
+ * NULL-unsafe. In memory the three cases are explicit and unit-testable. */
 
 /** Every person this client has a GHL contact id for. The sweep intersects
  * against this: a location holds every contact the client has ever had, but
@@ -167,17 +244,38 @@ export interface PushedContact {
  * Keyed by GHL contact id, and deliberately a Map of ARRAYS: `platform_contact_id`
  * is not unique, because GHL dedupes on phone, so two of our people can end up
  * pointing at the same GHL contact. Both must receive the date. */
-export async function getPushedContactsByGhlId(clientId: string): Promise<Map<string, PushedContact[]>> {
-  const rows = await fetchAllRows<{
+export async function getPushedContactsByGhlId(
+  clientId: string,
+  query: PushedContactQuery = {}
+): Promise<Map<string, PushedContact[]>> {
+  const COLUMNS = "id,person_id,platform_contact_id,last_activity_at,activity_synced_at,was_deduped";
+  type Row = {
     person_id: string;
     platform_contact_id: string | null;
     last_activity_at: string | null;
     activity_synced_at: string | null;
-  }>(
-    "platform_pushes",
-    "id,person_id,platform_contact_id,last_activity_at,activity_synced_at",
-    (query) => query.eq("client_id", clientId).eq("platform", PLATFORM).not("platform_contact_id", "is", null)
-  );
+    was_deduped: boolean | null;
+  };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const applyCommon = (q: any, ids?: string[]) => {
+    const out = q.eq("client_id", clientId).eq("platform", PLATFORM).not("platform_contact_id", "is", null);
+    return ids ? out.in("person_id", ids) : out;
+  };
+
+  let rows: Row[];
+  if (query.personIds) {
+    const ids = Array.from(new Set(query.personIds));
+    if (ids.length === 0) return new Map();
+    const chunks: string[][] = [];
+    for (let i = 0; i < ids.length; i += ID_FILTER_CHUNK) chunks.push(ids.slice(i, i + ID_FILTER_CHUNK));
+    const pages = await mapWithConcurrency(chunks, ID_FILTER_CONCURRENCY, (part) =>
+      fetchAllRows<Row>("platform_pushes", COLUMNS, (q) => applyCommon(q, part))
+    );
+    rows = pages.flat();
+  } else {
+    rows = await fetchAllRows<Row>("platform_pushes", COLUMNS, (q) => applyCommon(q));
+  }
 
   const byGhlId = new Map<string, PushedContact[]>();
   for (const row of rows) {
@@ -187,12 +285,130 @@ export async function getPushedContactsByGhlId(clientId: string): Promise<Map<st
       ghlContactId: row.platform_contact_id,
       lastActivityAt: row.last_activity_at,
       activitySyncedAt: row.activity_synced_at,
+      wasDeduped: row.was_deduped ?? null,
     };
     const existing = byGhlId.get(row.platform_contact_id);
     if (existing) existing.push(entry);
     else byGhlId.set(row.platform_contact_id, [entry]);
   }
   return byGhlId;
+}
+
+/** Which sub-accounts a selection of people actually touches, and how many of
+ * them each one holds.
+ *
+ * The fan-out endpoint's whole job (Decision 1) is "refresh these people
+ * everywhere they were pushed", and `platform_pushes` is the only record of
+ * where that is. Returns nothing for a person who has never been pushed to
+ * GHL — which is an informational outcome for the caller, not an error. */
+export interface ClientForPeople {
+  clientId: string;
+  personCount: number;
+  personIds: string[];
+  /** The GHL contacts those people map to in this sub-account. Distinct, and
+   * can be fewer than `personCount`: GHL dedupes on phone, so two of our
+   * people can share one contact — which is also why this is the honest basis
+   * for "how many API calls will this cost". */
+  ghlContactIds: string[];
+}
+
+export async function getClientsForPeople(personIds: string[]): Promise<ClientForPeople[]> {
+  const ids = Array.from(new Set(personIds.filter((id) => id && id.trim() !== "")));
+  if (ids.length === 0) return [];
+
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += ID_FILTER_CHUNK) chunks.push(ids.slice(i, i + ID_FILTER_CHUNK));
+
+  const pages = await mapWithConcurrency(chunks, ID_FILTER_CONCURRENCY, (part) =>
+    fetchAllRows<{ client_id: string; person_id: string; platform_contact_id: string | null }>(
+      "platform_pushes",
+      "id,client_id,person_id,platform_contact_id",
+      (query) =>
+        query.eq("platform", PLATFORM).not("platform_contact_id", "is", null).in("person_id", part)
+    )
+  );
+
+  // Counted as DISTINCT people per client: a person can hold several rows for
+  // one client over time, and reporting "3 people" for one person pushed three
+  // times would be a number the user can't reconcile with their selection.
+  const byClient = new Map<string, { people: Set<string>; contacts: Set<string> }>();
+  for (const row of pages.flat()) {
+    let entry = byClient.get(row.client_id);
+    if (!entry) {
+      entry = { people: new Set(), contacts: new Set() };
+      byClient.set(row.client_id, entry);
+    }
+    entry.people.add(row.person_id);
+    if (row.platform_contact_id) entry.contacts.add(row.platform_contact_id);
+  }
+
+  return Array.from(byClient, ([clientId, { people, contacts }]) => ({
+    clientId,
+    personCount: people.size,
+    personIds: Array.from(people),
+    ghlContactIds: Array.from(contacts),
+  })).sort((a, b) => b.personCount - a.personCount);
+}
+
+/** How many people this sub-account has a GHL contact for.
+ *
+ * The honest size of a WHOLE-sub-account refresh, which names no people and
+ * so has no id set to count. A head count rather than a fetch because the
+ * number is only ever shown, never iterated; it reads as an upper bound on
+ * the API calls such a refresh can cost, since two people sharing one GHL
+ * contact are read once. */
+export async function countPushedPeople(clientId: string): Promise<number> {
+  const { count, error } = await supabaseAdmin
+    .from("platform_pushes")
+    .select("id", { count: "exact", head: true })
+    .eq("client_id", clientId)
+    .eq("platform", PLATFORM)
+    .not("platform_contact_id", "is", null);
+  if (error) throw error;
+  return count ?? 0;
+}
+
+// -- The per-location daily API budget ---------------------------------------
+
+/** Reserves `calls` against a location's daily quota and returns the new
+ * total (Decision 5, layer 2).
+ *
+ * A RESERVATION, not an accounting entry: it must be called BEFORE the calls
+ * are spent. Recording afterwards would let every concurrent worker read the
+ * same comfortable number, all decide there is room, and all spend on top of
+ * it. Reservations are never refunded — a call that 429'd still consumed
+ * quota, and over-counting is the safe direction.
+ *
+ * Keyed on LOCATION rather than client because co-located client rows share
+ * one real GHL quota (three of ours share `MeFEd7scikKpI44Utr8N`).
+ *
+ * Best-effort by design: if the RPC isn't there yet (PGRST202 — the schema is
+ * applied separately from the deploy) the guard degrades to "no ceiling"
+ * rather than failing every activity job on an unrelated migration gap. That
+ * is logged loudly, because a silent un-guarded sync is exactly what this
+ * layer exists to prevent. */
+export async function reserveGhlApiCalls(
+  ghlLocationId: string,
+  calls: number,
+  day: string = budgetDay()
+): Promise<number | null> {
+  if (calls <= 0) return null;
+  const { data, error } = await supabaseAdmin.rpc("increment_ghl_api_budget", {
+    p_location_id: ghlLocationId,
+    p_calls: calls,
+    p_day: day,
+  });
+  if (error) {
+    if (error.code === "PGRST202") {
+      console.error(
+        `[ghl-activity] increment_ghl_api_budget is missing — the daily API budget guard is NOT active ` +
+          `(location ${ghlLocationId}). Apply lib/data/*.sql.`
+      );
+      return null;
+    }
+    throw error;
+  }
+  return typeof data === "number" ? data : null;
 }
 
 // -- Writes ------------------------------------------------------------------
@@ -215,10 +431,19 @@ export interface ContactActivityWrite {
  * the same rows rather than duplicating them. `person_id` is part of the row
  * but not of the conflict key: if the same GHL contact backs two of our
  * people, the message is stored once, against whichever person the write saw
- * first, and both people still get the date. Storing it twice would need a
- * composite key and would double the table for no display benefit — the
- * drawer falls back to reading by conversation when a person has no rows of
- * its own (see getPersonGhlMessages).
+ * first, and both people still get the date. Storing it twice would double the
+ * table for no benefit the date column doesn't already give.
+ *
+ * KNOWN LIMITATION, stated rather than implied: the second person's drawer is
+ * then empty. `getPersonGhlMessages` reads by `person_id` and has no
+ * conversation-level fallback — an earlier version of this comment claimed it
+ * did, which was simply untrue.
+ *
+ * The conflict key is `(ghl_message_id, client_id)`, not `ghl_message_id`
+ * alone. Two client rows sharing one GHL location see byte-identical message
+ * ids, and a global key made the second client's upsert overwrite the first
+ * client's `person_id`/`client_id` — last writer wins, and a person's drawer
+ * silently went blank.
  *
  * `activity_synced_at` is stamped even when nothing qualified, so a contact
  * with genuinely no messages stops being "cold" and is never re-fetched
@@ -242,7 +467,7 @@ export async function writeContactActivity(write: ContactActivityWrite): Promise
           body: m.body,
           raw: m.raw as unknown as Record<string, unknown>,
         })),
-        { onConflict: "ghl_message_id" }
+        { onConflict: "ghl_message_id,client_id" }
       );
       if (error) throw error;
     }
@@ -293,6 +518,74 @@ export async function getPeopleLastActivity(personIds: string[]): Promise<Map<st
     if (!current || row.last_activity_at > current) result.set(row.person_id, row.last_activity_at);
   }
   return result;
+}
+
+export interface PersonGhlPush {
+  clientId: string;
+  clientName: string | null;
+  /** Null for a person pushed to this sub-account whose contact has never had
+   * a qualifying message — which is a different answer from "never pushed",
+   * and the person detail page renders them differently. */
+  lastActivityAt: string | null;
+  lastMessageType: string | null;
+  lastMessageDirection: string | null;
+  /** When the sync last read this contact. Null means the activity sync has
+   * never looked, so "no activity yet" is an unverified claim. */
+  activitySyncedAt: string | null;
+  pushedAt: string | null;
+}
+
+/** Every sub-account one person was pushed to, with that sub-account's OWN
+ * last-activity stamp — newest first.
+ *
+ * Deliberately NOT getPeopleLastActivity: that one collapses to a max across
+ * clients, because the People table has no current client and needs one date
+ * per row. The person detail page is the place where "which sub-account was
+ * this person last active in" has to be answerable, and a max destroys exactly
+ * that. It also returns rows with a null `last_activity_at`, which the table's
+ * read filters out: "pushed to this sub-account, nothing has happened" is the
+ * answer the detail page's empty state is built on.
+ *
+ * Rows with no `platform_contact_id` are excluded — the push never landed a
+ * contact, so there is no GHL side to report activity for. */
+export async function getPersonGhlPushes(personId: string): Promise<PersonGhlPush[]> {
+  const { data, error } = await supabaseAdmin
+    .from("platform_pushes")
+    .select(
+      "client_id,last_activity_at,last_message_type,last_message_direction,activity_synced_at,pushed_at,client:clients(name)"
+    )
+    .eq("person_id", personId)
+    .eq("platform", PLATFORM)
+    .not("platform_contact_id", "is", null);
+  if (error) throw error;
+
+  return ((data ?? []) as unknown as {
+    client_id: string;
+    last_activity_at: string | null;
+    last_message_type: string | null;
+    last_message_direction: string | null;
+    activity_synced_at: string | null;
+    pushed_at: string | null;
+    client: { name: string | null } | null;
+  }[])
+    .map((row) => ({
+      clientId: row.client_id,
+      clientName: row.client?.name ?? null,
+      lastActivityAt: row.last_activity_at,
+      lastMessageType: row.last_message_type,
+      lastMessageDirection: row.last_message_direction,
+      activitySyncedAt: row.activity_synced_at,
+      pushedAt: row.pushed_at,
+    }))
+    // Sub-accounts with activity first, newest first; the never-active ones
+    // keep a stable alphabetical order behind them rather than whatever order
+    // PostgREST happened to return.
+    .sort((a, b) => {
+      if (a.lastActivityAt && b.lastActivityAt) return b.lastActivityAt.localeCompare(a.lastActivityAt);
+      if (a.lastActivityAt) return -1;
+      if (b.lastActivityAt) return 1;
+      return (a.clientName ?? "").localeCompare(b.clientName ?? "");
+    });
 }
 
 export interface GhlMessageRow {

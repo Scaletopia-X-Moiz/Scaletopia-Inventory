@@ -714,3 +714,112 @@ No-filter People path, median of 5, measured on this project before any change:
 - people list page 1 (50 rows, count exact): **1,004 ms**
 - `person_filter_options` with no filters: **12,399 ms** (pre-existing; not
   caused by this work, worth its own ticket)
+
+---
+
+## 16. CREDENTIAL AUDIT + SESSION STATE (2026-10-01)
+
+Read §15 first for per-task build status. This section adds what only existed in
+the session chat: a full audit of every client's GHL credentials, plus two
+unrelated data bugs found along the way.
+
+### 16.1 All 17 clients audited — only ONE key is broken
+
+Every client row with a `ghl_location_id` was probed read-only on four
+endpoints. **16 of 17 can read messages today.**
+
+| slug | GHL location name | contacts | conversations | export | pushed rows |
+|---|---|---|---|---|---|
+| internal | Internal (DO NOT SETUP) | ok | ok | ok | 0 |
+| dma | Internal (DO NOT SETUP) | ok | ok | ok | 0 |
+| **testing** | Internal (DO NOT SETUP) | ok | **401** | **401** | **10** |
+| acceler8 | Acceler8 - Active | ok | ok | ok | 0 |
+| bigleap | Big Leap - **Inactive** | ok | ok | ok | 0 |
+| chamber_media | Chamber Media - Active | ok | ok | ok | 0 |
+| chamber_media_secondary | Chamber Media Secondary - Active | ok | ok | ok | 0 |
+| go_fish_digital | Go fish Digital - Active | ok | ok | ok | 0 |
+| growth_lab | Growth Lab - Active | ok | ok | ok | 0 |
+| kynship | Kynship - Active | ok | ok | ok | 0 |
+| leadgenix | Leadgenix - Active | ok | ok | ok | 0 |
+| redo | Redo - Active | ok | ok | ok | 0 |
+| scaletopia | Scaletopia (A2P verified) - Active | ok | ok | ok | 0 |
+| seedx | Seedx - **Inactive** | ok | ok | ok | 0 |
+| strike_tax_advisory | **Leadgenix Secondary - Active** | ok | ok | ok | 0 |
+| taktical_digital | Taktical Digital - Active | ok | ok | ok | 0 |
+| wise_digital_partners | Wise Digital Partners - Active | ok | ok | ok | 0 |
+
+**The blocker:** `testing` is the ONLY row with pushed contacts (10) and the ONLY
+one that cannot read conversations. The feature is therefore inert until fixed.
+
+Fix (no new GHL token needed — `internal` points at the same location and has a
+working key; the value never passes through a transcript):
+
+```sql
+update clients
+set ghl_api_key = (select ghl_api_key from clients where slug = 'internal')
+where slug = 'testing';
+```
+
+NOT YET APPLIED as of this writing.
+
+### 16.2 Two unrelated bugs found (NOT part of this feature)
+
+1. **`strike_tax_advisory` points at the wrong GHL sub-account.** Its
+   `ghl_location_id` resolves to a location GHL names **"Leadgenix Secondary"**,
+   not Strike Tax Advisory. This affects the PUSH path, not just last activity —
+   leads pushed to that client would land in another client's sub-account. It has
+   0 pushes so far, so likely no damage yet. Verify the correct location ID
+   before anyone pushes to it.
+2. **`bigleap` and `seedx`** point at sub-accounts GHL marks **Inactive**.
+   Reachable, but probably dormant. Worth confirming they are still wanted.
+
+### 16.3 A non-bug, already checked
+
+The audit flagged that `GET /conversations/messages/export` returns 422
+("limit must not be less than 10") for any `limit < 10`. **The built code uses
+`MESSAGE_EXPORT_LIMIT = 200`** (`lib/ghl/conversations.ts:27`), so this does not
+apply. Do not "fix" it.
+
+### 16.4 What a fresh agent should do FIRST
+
+Do not start by reading all 716 lines of this file. Order of operations:
+
+1. Read §15 (per-task status), then §16 (this section). §11-13 are settled
+   research — read only if you need to justify the rule.
+2. Apply the SQL in 16.1.
+3. **Run ONE real sync against the 10 pushed contacts on `testing` and show the
+   data.** Nothing in this build has ever run end to end — three attempts died to
+   the environment. This single step validates or breaks the entire feature and
+   should happen before any new work.
+4. Only then take on new direction/changes.
+
+### 16.5 Standing warnings for any agent touching this
+
+- **Do NOT run the full `npm test` suite.** The user states it is unreliable.
+  `lib/data/people.test.ts` showed 37 failures that were never baselined against
+  `main` (another agent was applying unrelated migrations to the live DB at the
+  same time, 22 active connections — all timing signal from that window is
+  junk). Run only targeted test files.
+- **Do NOT rewrite the filter RPCs.** The build deliberately avoided this by
+  resolving the filter as an id set off `platform_pushes`
+  (`resolveLastActivityIds`). `lib/data/ticket-25-esp-filter.sql:23-31` records a
+  ~60x slowdown and a timeout from the last attempt. `people_matching_virtual_filters`,
+  `person_filter_options` and `person_push_status_counts` are currently
+  byte-identical to `main`. Keep them that way.
+- **Never print a GHL token.** Read credentials inside a script, never via a SQL
+  select into a transcript.
+- Branch `feat/ghl-last-activity`, 12 commits, clean tree, **not pushed**.
+- Two migrations applied to the live project (`ghl_activity`,
+  `ghl_activity_sweep_cursor`), both purely additive. Rollback:
+  `lib/data/ghl-activity-rollback.sql`.
+
+### 16.6 Known gaps carried forward
+
+- No live end-to-end run. No browser click-test of drawer, filter or refresh.
+- Filter facet counts are not scoped by the filter (row counts ARE correct).
+  Same pre-existing behaviour as the `pushJobId` filter.
+- `body` truncation untested against email (Internal has zero email traffic).
+- Old leaked Private Integration token from the original research session still
+  needs revoking (§9).
+- 10 `@rblaw.net` test contacts still exist in GHL + `platform_pushes`. Keep as
+  fixtures or delete — undecided.

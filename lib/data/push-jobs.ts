@@ -63,6 +63,12 @@ export interface PushJobListResult {
 }
 
 export interface CreatePushJobInput {
+  /** Pre-chosen job id. Only for a caller that must write rows keyed on the
+   * job BEFORE the job becomes claimable — the activity refresh fills
+   * `ghl_activity_queue` under the job id first, because a worker that
+   * claimed the job in between would find an empty queue and report a
+   * no-op success. Omitted (the default) lets Postgres mint it. */
+  id?: string;
   clientId: string;
   platform: string;
   entity: string;
@@ -170,6 +176,7 @@ export async function createPushJob(input: CreatePushJobInput): Promise<PushJob>
   const { data, error } = await supabaseAdmin
     .from("push_jobs")
     .insert({
+      ...(input.id ? { id: input.id } : {}),
       client_id: input.clientId,
       platform: input.platform,
       entity: input.entity,
@@ -404,6 +411,74 @@ export async function touchJobLease(id: string): Promise<void> {
     .update({ started_at: new Date().toISOString() })
     .eq("id", id);
   if (error) throw error;
+}
+
+/** Replaces a job's `options` blob wholesale.
+ *
+ * Callers read-modify-write the object they already hold, so this is only
+ * safe for fields nothing else writes concurrently — today that is the
+ * activity sync's budget-stop marker, written by the one worker that owns the
+ * job at the time. */
+export async function updateJobOptions(id: string, options: Record<string, unknown>): Promise<void> {
+  const { error } = await supabaseAdmin.from("push_jobs").update({ options }).eq("id", id);
+  if (error) throw error;
+}
+
+/** Terminal `ghl_activity` jobs carrying a resume marker under
+ * `options.<optionKey>` — a budget stop (`budgetStop`) or a bounded failure
+ * retry (`failureRetry`). Both mean the same durable thing: this job finished
+ * with work still in a private `ghl_activity_queue` partition, and something
+ * has to come back for it.
+ *
+ * Narrowed in SQL on the marker's own presence rather than scanned in app
+ * code: the marker is cleared the moment a continuation is queued, so the
+ * matching set is normally empty and always tiny. Terminal statuses only —
+ * both paths finish the job row before leaving the marker.
+ *
+ * `optionKey` is a module constant from lib/ghl/activity-scope, never caller
+ * input, so interpolating it into the PostgREST path is safe. */
+export async function listMarkedActivityJobs(optionKey: string, limit = 25): Promise<PushJob[]> {
+  const { data, error } = await supabaseAdmin
+    .from("push_jobs")
+    .select(await pushJobColumns())
+    .eq("platform", "ghl_activity")
+    .in("status", ["partial", "failed"])
+    .not(`options->${optionKey}`, "is", null)
+    .order("finished_at", { ascending: true })
+    .limit(limit);
+  if (error) throw error;
+  return ((data ?? []) as unknown as RawPushJob[]).map(toPushJob);
+}
+
+/** Takes a resume marker off a job, and reports whether THIS caller is the one
+ * that took it.
+ *
+ * The `field`/`value` predicate makes it a claim rather than a plain update:
+ * two overlapping worker invocations both read the same marked job, and only
+ * the one whose conditional update actually matched a row may queue the
+ * continuation. The other sees `false` and leaves the partition alone —
+ * otherwise one work list would be adopted by two jobs, which is the exact
+ * collision `ghl_activity_queue.job_id` exists to prevent.
+ *
+ * The field is whatever makes that marker unique in time: the budget stop's
+ * `day`, the failure retry's `failedAt`. */
+export async function claimActivityJobMarker(
+  id: string,
+  marker: { key: string; field: string; value: string },
+  /** The job's options WITHOUT the marker. Passed in rather than computed
+   * here because PostgREST can only replace the whole jsonb value, and
+   * rebuilding it from `{}` would throw away the scope and `full` flag the
+   * finished row is the audit record for. */
+  nextOptions: Record<string, unknown>
+): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from("push_jobs")
+    .update({ options: nextOptions })
+    .eq("id", id)
+    .eq(`options->${marker.key}->>${marker.field}`, marker.value)
+    .select("id");
+  if (error) throw error;
+  return (data ?? []).length > 0;
 }
 
 /** Updates the live progress counters a running job reports mid-run. */

@@ -213,6 +213,7 @@ describe("canSkipContact — the incremental skip", () => {
       ghlContactId: "c1",
       lastActivityAt,
       activitySyncedAt: "2026-09-01T00:00:00.000Z",
+      wasDeduped: true,
     },
   ];
 
@@ -252,7 +253,7 @@ describe("canSkipContact — the incremental skip", () => {
     // direct read.
     expect(
       canSkipContact({ ghlContactId: "c1", lastMessageDate: "2026-09-20T10:00:00.000Z" }, [
-        { personId: "p1", ghlContactId: "c1", lastActivityAt: null, activitySyncedAt: null },
+        { personId: "p1", ghlContactId: "c1", lastActivityAt: null, activitySyncedAt: null, wasDeduped: true },
       ])
     ).toBe(false);
   });

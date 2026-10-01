@@ -38,10 +38,15 @@ export interface PushContactResult {
   /** True when the upsert matched an already-existing GHL contact (response
    * `new: false`) rather than creating a fresh one — any tags this push
    * carries were appended to that existing contact's tag list, not sent
-   * in-body. False both for a genuine create (`new: true`) and for the rare
-   * case GHL's response didn't include a recognizable `new` flag (see
-   * extractNewFlag). */
-  deduped: boolean;
+   * in-body. False for a genuine create (`new: true`).
+   *
+   * NULL when GHL's response carried no recognizable `new` flag, which is a
+   * genuinely different answer from false and must stay distinguishable: this
+   * value is persisted as `platform_pushes.was_deduped` and the activity sync
+   * uses it to decide whether a contact is worth an API call at all. Collapsing
+   * "unknown" into "brand new" would make the sync skip a contact that may well
+   * have a years-old conversation (lib/ghl/sync-activity.ts mayHaveMessages). */
+  deduped: boolean | null;
 }
 
 export class GhlApiError extends Error {
@@ -168,10 +173,8 @@ function extractContactId(json: unknown): string | null {
  * {...}}`, live-verified against the Internal test location 2026-08-18 —
  * `new: true` on first create, `new: false` on a dedupe match against an
  * existing contact). Absent/non-boolean (a response shape we haven't seen
- * live) is treated as "not deduped" — the same default a plain create would
- * have produced before this endpoint existed, so an unrecognized shape errs
- * toward the pre-upsert behavior rather than silently marking normal creates
- * as dedupes. */
+ * live) returns null — "we don't know", which callers must not round to either
+ * answer. See PushContactResult.deduped. */
 function extractNewFlag(json: unknown): boolean | null {
   if (!json || typeof json !== "object") return null;
   const value = (json as Record<string, unknown>).new;
@@ -222,8 +225,7 @@ async function appendTagsToContact(
  *
  * `deduped` is read off the upsert response's `new` flag (also
  * live-confirmed: `true` on create, `false` on a dedupe match) via
- * extractNewFlag — see that function's doc for the fallback when the flag is
- * missing. Dedupe matching itself is entirely GHL's own server-side logic
+ * extractNewFlag — null when the flag is missing, see PushContactResult. Dedupe matching itself is entirely GHL's own server-side logic
  * (observed keying off phone on the Internal location, not email); this
  * client doesn't influence which field it matches on. */
 export async function pushContactToGhl(
@@ -248,7 +250,8 @@ export async function pushContactToGhl(
     throw new GhlApiError("GHL contact upsert succeeded but returned no contact id");
   }
 
-  const deduped = extractNewFlag(json) === false;
+  const isNew = extractNewFlag(json);
+  const deduped = isNew === null ? null : !isNew;
 
   if (tags && tags.length > 0) {
     await appendTagsToContact(fetchImpl, credentials, contactId, tags);
