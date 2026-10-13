@@ -11,6 +11,7 @@ import { SourceChip } from "@/components/companies/source-chip";
 import { EnrichmentList } from "@/components/companies/enrichment-list";
 import { ReverifyEmail } from "@/components/shared/reverify-email";
 import { ReverifyPhone } from "@/components/shared/reverify-phone";
+import { LastActivityCard } from "@/components/people/ghl-activity";
 import { LinkedCompanyCard } from "@/components/people/linked-company-card";
 
 export const dynamic = "force-dynamic";
@@ -112,6 +113,8 @@ export default async function PersonDetailPage({
               </div>
             </CardContent>
           </Card>
+
+          <LastActivityCard personId={person.id} personName={person.fullName} />
 
           <section className="flex flex-col gap-2">
             <h2 className="text-sm font-semibold text-ink">Linked company</h2>
