@@ -140,190 +140,152 @@ $$;
 -- linked person's existing tag-parsed niche_tokens (already computed at their
 -- own last import/backfill) rather than recomputing from tags here, since this
 -- RPC has no access to lib/data/niche.ts's nichesFromTags.
+--
+-- IMPORT KEY LOOKUP (2026-09-30, lib/data/import-key-lookup.sql — re-applied
+-- to production via migration import_bulk_update_canonical_match):
+--   * Row matching uses the SAME rules preflight (import_match_companies)
+--     counts with, so every record preflight calls "existing" is actually
+--     updated: domain first (exact); if no row has that domain, fall back to
+--     the canonical LinkedIn key regexp_replace(lower(rtrim(linkedin_url,'/')),
+--     '^https?://(www\.)?','') — served by idx_companies_linkedin_canon.
+--     BEHAVIOUR CHANGE: the LinkedIn match no longer requires the stored row
+--     to have `domain IS NULL`, and a record whose domain is new but whose
+--     LinkedIn exists now updates that row (it used to silently update
+--     nothing). The stored row's own domain/linkedin_url are left as-is on a
+--     LinkedIn match; the incoming domain is NOT written onto it.
+--   * All rows sharing the key are updated and ALL of them get the people
+--     propagation (previously RETURNING ... INTO only propagated the first).
+--   * The known-clients list for niche_tokens_from_tags is computed once per
+--     call (import_known_clients skip-scan, defined in
+--     lib/data/import-key-lookup.sql — apply that file first) instead of a full-table
+--     array_agg(DISTINCT client) per updated company; this record's own
+--     incoming client is added so the result matches the old per-row query.
 CREATE OR REPLACE FUNCTION import_bulk_update_companies(
   updates jsonb
-) RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
 DECLARE
   rec jsonb;
-  updated_company_id uuid;
+  v_ids uuid[];
+  v_by_linkedin boolean;
+  v_known_clients text[];
+  v_client text;
 BEGIN
+  v_known_clients := ARRAY(
+    SELECT DISTINCT lower(trim(k)) FROM import_known_clients() k WHERE trim(k) <> ''
+  );
+
   FOR rec IN SELECT * FROM jsonb_array_elements(updates) LOOP
+    v_ids := NULL;
+    v_by_linkedin := false;
+
     IF (rec->>'domain') IS NOT NULL THEN
-      UPDATE companies SET
-        tags = ARRAY(SELECT jsonb_array_elements_text(rec->'tags')),
-        source = CASE
-          WHEN source IS NULL THEN rec->>'source'
-          WHEN source LIKE '%' || (rec->>'source') || '%' THEN source
-          ELSE source || ',' || (rec->>'source')
-        END,
-        last_updated = (rec->>'last_updated')::timestamptz,
-        company_name  = COALESCE(rec->>'company_name',  company_name),
-        website_url   = COALESCE(rec->>'website_url',   website_url),
-        linkedin_url  = COALESCE(rec->>'linkedin_url',  linkedin_url),
-        industry      = COALESCE(rec->>'industry',      industry),
-        city          = COALESCE(rec->>'city',          city),
-        state         = COALESCE(rec->>'state',         state),
-        country       = COALESCE(rec->>'country',       country),
-        phone         = COALESCE(rec->>'phone',         phone),
-        email         = COALESCE(rec->>'email',         email),
-        description   = COALESCE(rec->>'description',   description),
-        revenue       = COALESCE(rec->>'revenue',       revenue),
-        client        = COALESCE(rec->>'client',        client),
-        niche         = COALESCE(rec->>'niche',         niche),
-        employee_count = COALESCE(
-          CASE WHEN rec->>'employee_count' ~ '^[0-9]+$'
-            THEN (rec->>'employee_count')::int ELSE NULL END,
-          employee_count
-        ),
-        founded_year = COALESCE(
-          CASE WHEN rec->>'founded_year' ~ '^[0-9]+$'
-            THEN (rec->>'founded_year')::int ELSE NULL END,
-          founded_year
-        ),
-        -- Canonical columns (docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md).
-        -- country_id/industry_id follow the same COALESCE-if-supplied
-        -- semantics as the raw fields above (push.ts only includes them when
-        -- the record supplies a new raw value). source_tokens is a set
-        -- union, not an overwrite, because `source` itself is appended to
-        -- (not replaced) by the CASE below — new_source_tokens carries just
-        -- this record's own canonical token(s).
-        country_id = COALESCE(rec->>'country_id', country_id),
-        industry_id = COALESCE(rec->>'industry_id', industry_id),
-        source_tokens = ARRAY(
-          SELECT DISTINCT unnest(
-            COALESCE(source_tokens, '{}'::text[]) ||
-            COALESCE(ARRAY(SELECT jsonb_array_elements_text(rec->'new_source_tokens')), '{}'::text[])
-          )
-        ),
-        custom_data = CASE
-          WHEN rec->'custom_data' IS NOT NULL AND jsonb_typeof(rec->'custom_data') = 'object'
-            THEN (
-              SELECT jsonb_object_agg(
-                key,
-                CASE
-                  WHEN old_val IS NOT NULL AND new_val IS NOT NULL AND old_val != new_val
-                    THEN old_val || ', ' || new_val
-                  WHEN new_val IS NOT NULL THEN new_val
-                  ELSE old_val
-                END
-              )
-              FROM (
-                SELECT
-                  COALESCE(o.key, n.key) AS key,
-                  o.value #>> '{}' AS old_val,
-                  n.value #>> '{}' AS new_val
-                FROM jsonb_each(COALESCE(custom_data, '{}'::jsonb)) o
-                FULL OUTER JOIN jsonb_each(rec->'custom_data') n ON o.key = n.key
-              ) merged
-            )
-          ELSE custom_data
-        END
-      WHERE domain = rec->>'domain'
-      RETURNING id INTO updated_company_id;
-
-      IF updated_company_id IS NOT NULL THEN
-        UPDATE people p SET
-          industry_id = c.industry_id,
-          employee_count = c.employee_count,
-          company_linkedin_url = c.linkedin_url,
-          niche_tokens = CASE
-            WHEN c.niche IS NOT NULL AND c.niche <> '' THEN ARRAY[c.niche]
-            ELSE niche_tokens_from_tags(p.tags, (
-              SELECT array_agg(DISTINCT lower(trim(cl.client)))
-              FROM companies cl WHERE cl.client IS NOT NULL AND trim(cl.client) <> ''
-            ))
-          END
-        FROM companies c
-        WHERE p.company_id = c.id AND c.id = updated_company_id;
-      END IF;
-    ELSIF (rec->>'linkedin_url') IS NOT NULL THEN
-      UPDATE companies SET
-        tags = ARRAY(SELECT jsonb_array_elements_text(rec->'tags')),
-        source = CASE
-          WHEN source IS NULL THEN rec->>'source'
-          WHEN source LIKE '%' || (rec->>'source') || '%' THEN source
-          ELSE source || ',' || (rec->>'source')
-        END,
-        last_updated = (rec->>'last_updated')::timestamptz,
-        company_name  = COALESCE(rec->>'company_name',  company_name),
-        website_url   = COALESCE(rec->>'website_url',   website_url),
-        industry      = COALESCE(rec->>'industry',      industry),
-        city          = COALESCE(rec->>'city',          city),
-        state         = COALESCE(rec->>'state',         state),
-        country       = COALESCE(rec->>'country',       country),
-        phone         = COALESCE(rec->>'phone',         phone),
-        email         = COALESCE(rec->>'email',         email),
-        description   = COALESCE(rec->>'description',   description),
-        revenue       = COALESCE(rec->>'revenue',       revenue),
-        client        = COALESCE(rec->>'client',        client),
-        niche         = COALESCE(rec->>'niche',         niche),
-        employee_count = COALESCE(
-          CASE WHEN rec->>'employee_count' ~ '^[0-9]+$'
-            THEN (rec->>'employee_count')::int ELSE NULL END,
-          employee_count
-        ),
-        founded_year = COALESCE(
-          CASE WHEN rec->>'founded_year' ~ '^[0-9]+$'
-            THEN (rec->>'founded_year')::int ELSE NULL END,
-          founded_year
-        ),
-        -- Canonical columns (docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md).
-        -- country_id/industry_id follow the same COALESCE-if-supplied
-        -- semantics as the raw fields above (push.ts only includes them when
-        -- the record supplies a new raw value). source_tokens is a set
-        -- union, not an overwrite, because `source` itself is appended to
-        -- (not replaced) by the CASE below — new_source_tokens carries just
-        -- this record's own canonical token(s).
-        country_id = COALESCE(rec->>'country_id', country_id),
-        industry_id = COALESCE(rec->>'industry_id', industry_id),
-        source_tokens = ARRAY(
-          SELECT DISTINCT unnest(
-            COALESCE(source_tokens, '{}'::text[]) ||
-            COALESCE(ARRAY(SELECT jsonb_array_elements_text(rec->'new_source_tokens')), '{}'::text[])
-          )
-        ),
-        custom_data = CASE
-          WHEN rec->'custom_data' IS NOT NULL AND jsonb_typeof(rec->'custom_data') = 'object'
-            THEN (
-              SELECT jsonb_object_agg(
-                key,
-                CASE
-                  WHEN old_val IS NOT NULL AND new_val IS NOT NULL AND old_val != new_val
-                    THEN old_val || ', ' || new_val
-                  WHEN new_val IS NOT NULL THEN new_val
-                  ELSE old_val
-                END
-              )
-              FROM (
-                SELECT
-                  COALESCE(o.key, n.key) AS key,
-                  o.value #>> '{}' AS old_val,
-                  n.value #>> '{}' AS new_val
-                FROM jsonb_each(COALESCE(custom_data, '{}'::jsonb)) o
-                FULL OUTER JOIN jsonb_each(rec->'custom_data') n ON o.key = n.key
-              ) merged
-            )
-          ELSE custom_data
-        END
-      WHERE linkedin_url = rec->>'linkedin_url' AND domain IS NULL
-      RETURNING id INTO updated_company_id;
-
-      IF updated_company_id IS NOT NULL THEN
-        UPDATE people p SET
-          industry_id = c.industry_id,
-          employee_count = c.employee_count,
-          company_linkedin_url = c.linkedin_url,
-          niche_tokens = CASE
-            WHEN c.niche IS NOT NULL AND c.niche <> '' THEN ARRAY[c.niche]
-            ELSE niche_tokens_from_tags(p.tags, (
-              SELECT array_agg(DISTINCT lower(trim(cl.client)))
-              FROM companies cl WHERE cl.client IS NOT NULL AND trim(cl.client) <> ''
-            ))
-          END
-        FROM companies c
-        WHERE p.company_id = c.id AND c.id = updated_company_id;
-      END IF;
+      SELECT array_agg(c.id) INTO v_ids FROM companies c WHERE c.domain = rec->>'domain';
     END IF;
+
+    IF v_ids IS NULL AND (rec->>'linkedin_url') IS NOT NULL THEN
+      SELECT array_agg(c.id) INTO v_ids
+      FROM companies c
+      WHERE c.linkedin_url IS NOT NULL
+        AND regexp_replace(lower(rtrim(c.linkedin_url, '/')), '^https?://(www\.)?', '')
+          = regexp_replace(lower(rtrim(rec->>'linkedin_url', '/')), '^https?://(www\.)?', '');
+      v_by_linkedin := v_ids IS NOT NULL;
+    END IF;
+
+    CONTINUE WHEN v_ids IS NULL;
+
+    UPDATE companies SET
+      tags = ARRAY(SELECT jsonb_array_elements_text(rec->'tags')),
+      source = CASE
+        WHEN source IS NULL THEN rec->>'source'
+        WHEN source LIKE '%' || (rec->>'source') || '%' THEN source
+        ELSE source || ',' || (rec->>'source')
+      END,
+      last_updated = (rec->>'last_updated')::timestamptz,
+      company_name  = COALESCE(rec->>'company_name',  company_name),
+      website_url   = COALESCE(rec->>'website_url',   website_url),
+      -- Matched by domain: COALESCE the incoming LinkedIn in (as before).
+      -- Matched by LinkedIn: keep the stored value (as the old LinkedIn branch did).
+      linkedin_url  = CASE WHEN v_by_linkedin THEN linkedin_url
+                           ELSE COALESCE(rec->>'linkedin_url', linkedin_url) END,
+      industry      = COALESCE(rec->>'industry',      industry),
+      city          = COALESCE(rec->>'city',          city),
+      state         = COALESCE(rec->>'state',         state),
+      country       = COALESCE(rec->>'country',       country),
+      phone         = COALESCE(rec->>'phone',         phone),
+      email         = COALESCE(rec->>'email',         email),
+      description   = COALESCE(rec->>'description',   description),
+      revenue       = COALESCE(rec->>'revenue',       revenue),
+      client        = COALESCE(rec->>'client',        client),
+      niche         = COALESCE(rec->>'niche',         niche),
+      employee_count = COALESCE(
+        CASE WHEN rec->>'employee_count' ~ '^[0-9]+$'
+          THEN (rec->>'employee_count')::int ELSE NULL END,
+        employee_count
+      ),
+      founded_year = COALESCE(
+        CASE WHEN rec->>'founded_year' ~ '^[0-9]+$'
+          THEN (rec->>'founded_year')::int ELSE NULL END,
+        founded_year
+      ),
+      -- Canonical columns (docs/adr/0001-dbside-companies-list-via-app-owned-canonical-columns.md).
+      -- country_id/industry_id follow the same COALESCE-if-supplied
+      -- semantics as the raw fields above (push.ts only includes them when
+      -- the record supplies a new raw value). source_tokens is a set
+      -- union, not an overwrite, because `source` itself is appended to
+      -- (not replaced) by the CASE below — new_source_tokens carries just
+      -- this record's own canonical token(s).
+      country_id = COALESCE(rec->>'country_id', country_id),
+      industry_id = COALESCE(rec->>'industry_id', industry_id),
+      source_tokens = ARRAY(
+        SELECT DISTINCT unnest(
+          COALESCE(source_tokens, '{}'::text[]) ||
+          COALESCE(ARRAY(SELECT jsonb_array_elements_text(rec->'new_source_tokens')), '{}'::text[])
+        )
+      ),
+      custom_data = CASE
+        WHEN rec->'custom_data' IS NOT NULL AND jsonb_typeof(rec->'custom_data') = 'object'
+          THEN (
+            SELECT jsonb_object_agg(
+              key,
+              CASE
+                WHEN old_val IS NOT NULL AND new_val IS NOT NULL AND old_val != new_val
+                  THEN old_val || ', ' || new_val
+                WHEN new_val IS NOT NULL THEN new_val
+                ELSE old_val
+              END
+            )
+            FROM (
+              SELECT
+                COALESCE(o.key, n.key) AS key,
+                o.value #>> '{}' AS old_val,
+                n.value #>> '{}' AS new_val
+              FROM jsonb_each(COALESCE(custom_data, '{}'::jsonb)) o
+              FULL OUTER JOIN jsonb_each(rec->'custom_data') n ON o.key = n.key
+            ) merged
+          )
+        ELSE custom_data
+      END
+    WHERE id = ANY(v_ids);
+
+    -- The old per-row array_agg ran AFTER this company's update, so it
+    -- included the client just written; keep that by adding it here.
+    v_client := lower(trim(rec->>'client'));
+    IF v_client IS NOT NULL AND v_client <> '' AND NOT (v_client = ANY(v_known_clients)) THEN
+      v_known_clients := v_known_clients || v_client;
+    END IF;
+
+    UPDATE people p SET
+      industry_id = c.industry_id,
+      employee_count = c.employee_count,
+      company_linkedin_url = c.linkedin_url,
+      niche_tokens = CASE
+        WHEN c.niche IS NOT NULL AND c.niche <> '' THEN ARRAY[c.niche]
+        ELSE niche_tokens_from_tags(p.tags, v_known_clients)
+      END
+    FROM companies c
+    WHERE p.company_id = c.id AND c.id = ANY(v_ids);
   END LOOP;
 END;
 $$;
@@ -369,78 +331,95 @@ ON CONFLICT (source_key) DO NOTHING;
 -- which only includes them when this update actually resolved a company_id
 -- (lib/import/push.ts) — a lookup miss must leave the prior linked company's
 -- values in place, same as company_id itself.
+--
+-- IMPORT KEY LOOKUP (2026-09-30, see lib/data/import-key-lookup.sql): the
+-- match now uses the same canonical keys preflight (import_match_people)
+-- counts with — LinkedIn via regexp_replace(lower(rtrim(linkedin_url,'/')),
+-- '^https?://(www\.)?','') (idx_people_linkedin_canon; stored URLs mostly lack
+-- the trailing slash normalizeLinkedInUrl adds, so the old exact match missed
+-- them) and email via lower(email) (idx_people_email_lower). The BUG A
+-- precedence is unchanged: a record with a LinkedIn is matched ONLY by
+-- LinkedIn; email is used only when the record has no LinkedIn.
 CREATE OR REPLACE FUNCTION import_bulk_update_people(
   updates jsonb
-) RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
 DECLARE
   rec jsonb;
+  v_ids uuid[];
 BEGIN
   FOR rec IN SELECT * FROM jsonb_array_elements(updates) LOOP
-    IF (rec->>'linkedin_url') IS NOT NULL OR (rec->>'email') IS NOT NULL THEN
-      UPDATE people SET
-        -- Only overwrite company_id when this row resolved to one; a lookup
-        -- miss (no matching company for the row's domain) must not unlink
-        -- an existing match.
-        company_id = COALESCE((rec->>'company_id')::uuid, company_id),
-        tags = ARRAY(SELECT jsonb_array_elements_text(rec->'tags')),
-        source = CASE
-          WHEN source IS NULL THEN rec->>'source'
-          WHEN source LIKE '%' || (rec->>'source') || '%' THEN source
-          ELSE source || ',' || (rec->>'source')
-        END,
-        source_tokens = ARRAY(
-          SELECT DISTINCT unnest(
-            COALESCE(source_tokens, '{}'::text[]) ||
-            COALESCE(ARRAY(SELECT jsonb_array_elements_text(rec->'new_source_tokens')), '{}'::text[])
-          )
-        ),
-        industry_id = COALESCE(rec->>'industry_id', industry_id),
-        employee_count = COALESCE(
-          CASE WHEN rec->>'employee_count' ~ '^[0-9]+$'
-            THEN (rec->>'employee_count')::int ELSE NULL END,
-          employee_count
-        ),
-        company_linkedin_url = COALESCE(rec->>'company_linkedin_url', company_linkedin_url),
-        niche_tokens = CASE
-          WHEN rec->'niche_tokens' IS NOT NULL
-            THEN ARRAY(SELECT jsonb_array_elements_text(rec->'niche_tokens'))
-          ELSE niche_tokens
-        END,
-        last_updated = (rec->>'last_updated')::timestamptz,
-        custom_data = CASE
-          WHEN rec->'custom_data' IS NOT NULL AND jsonb_typeof(rec->'custom_data') = 'object'
-            THEN (
-              SELECT jsonb_object_agg(
-                key,
-                CASE
-                  WHEN old_val IS NOT NULL AND new_val IS NOT NULL AND old_val != new_val
-                    THEN old_val || ', ' || new_val
-                  WHEN new_val IS NOT NULL THEN new_val
-                  ELSE old_val
-                END
-              )
-              FROM (
-                SELECT
-                  COALESCE(o.key, n.key) AS key,
-                  o.value #>> '{}' AS old_val,
-                  n.value #>> '{}' AS new_val
-                FROM jsonb_each(COALESCE(custom_data, '{}'::jsonb)) o
-                FULL OUTER JOIN jsonb_each(rec->'custom_data') n ON o.key = n.key
-              ) merged
-            )
-          ELSE custom_data
-        END
-      WHERE
-        -- Deterministic precedence: prefer linkedin_url as the identity and
-        -- only fall back to email when linkedin is absent from the record. This
-        -- guarantees a record with a linkedin can never match unrelated people
-        -- by a shared email.
-        CASE
-          WHEN rec->>'linkedin_url' IS NOT NULL THEN linkedin_url = rec->>'linkedin_url'
-          WHEN rec->>'email' IS NOT NULL THEN lower(email) = lower(rec->>'email')
-          ELSE false
-        END;
+    v_ids := NULL;
+
+    IF (rec->>'linkedin_url') IS NOT NULL THEN
+      SELECT array_agg(p.id) INTO v_ids
+      FROM people p
+      WHERE p.linkedin_url IS NOT NULL
+        AND regexp_replace(lower(rtrim(p.linkedin_url, '/')), '^https?://(www\.)?', '')
+          = regexp_replace(lower(rtrim(rec->>'linkedin_url', '/')), '^https?://(www\.)?', '');
+    ELSIF (rec->>'email') IS NOT NULL THEN
+      SELECT array_agg(p.id) INTO v_ids
+      FROM people p
+      WHERE p.email IS NOT NULL AND lower(p.email) = lower(rec->>'email');
     END IF;
+
+    CONTINUE WHEN v_ids IS NULL;
+
+    UPDATE people SET
+      -- Only overwrite company_id when this row resolved to one; a lookup
+      -- miss (no matching company for the row's domain) must not unlink
+      -- an existing match.
+      company_id = COALESCE((rec->>'company_id')::uuid, company_id),
+      tags = ARRAY(SELECT jsonb_array_elements_text(rec->'tags')),
+      source = CASE
+        WHEN source IS NULL THEN rec->>'source'
+        WHEN source LIKE '%' || (rec->>'source') || '%' THEN source
+        ELSE source || ',' || (rec->>'source')
+      END,
+      source_tokens = ARRAY(
+        SELECT DISTINCT unnest(
+          COALESCE(source_tokens, '{}'::text[]) ||
+          COALESCE(ARRAY(SELECT jsonb_array_elements_text(rec->'new_source_tokens')), '{}'::text[])
+        )
+      ),
+      industry_id = COALESCE(rec->>'industry_id', industry_id),
+      employee_count = COALESCE(
+        CASE WHEN rec->>'employee_count' ~ '^[0-9]+$'
+          THEN (rec->>'employee_count')::int ELSE NULL END,
+        employee_count
+      ),
+      company_linkedin_url = COALESCE(rec->>'company_linkedin_url', company_linkedin_url),
+      niche_tokens = CASE
+        WHEN rec->'niche_tokens' IS NOT NULL
+          THEN ARRAY(SELECT jsonb_array_elements_text(rec->'niche_tokens'))
+        ELSE niche_tokens
+      END,
+      last_updated = (rec->>'last_updated')::timestamptz,
+      custom_data = CASE
+        WHEN rec->'custom_data' IS NOT NULL AND jsonb_typeof(rec->'custom_data') = 'object'
+          THEN (
+            SELECT jsonb_object_agg(
+              key,
+              CASE
+                WHEN old_val IS NOT NULL AND new_val IS NOT NULL AND old_val != new_val
+                  THEN old_val || ', ' || new_val
+                WHEN new_val IS NOT NULL THEN new_val
+                ELSE old_val
+              END
+            )
+            FROM (
+              SELECT
+                COALESCE(o.key, n.key) AS key,
+                o.value #>> '{}' AS old_val,
+                n.value #>> '{}' AS new_val
+              FROM jsonb_each(COALESCE(custom_data, '{}'::jsonb)) o
+              FULL OUTER JOIN jsonb_each(rec->'custom_data') n ON o.key = n.key
+            ) merged
+          )
+        ELSE custom_data
+      END
+    WHERE id = ANY(v_ids);
   END LOOP;
 END;
 $$;

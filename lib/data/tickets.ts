@@ -20,6 +20,7 @@ export interface TicketRow {
   status: TicketStatus;
   priority: TicketPriority;
   githubIssue: number | null;
+  loomUrl: string | null;
   createdBy: string;
   createdByEmail: string | null;
   currentNote: string | null;
@@ -38,6 +39,7 @@ interface RawTicketRow {
   status: TicketStatus;
   priority: TicketPriority;
   github_issue: number | null;
+  loom_url: string | null;
   created_by: string;
   current_note: string | null;
   note_updated_by: string | null;
@@ -49,7 +51,7 @@ interface RawTicketRow {
 }
 
 const TICKET_COLUMNS =
-  "id,title,description,category,status,priority,github_issue,created_by,current_note,note_updated_by,note_updated_at,created_at,updated_at," +
+  "id,title,description,category,status,priority,github_issue,loom_url,created_by,current_note,note_updated_by,note_updated_at,created_at,updated_at," +
   "creator:profiles!tickets_created_by_fkey(email),note_author:profiles!tickets_note_updated_by_fkey(email)";
 
 function firstOf<T>(value: T | T[] | null): T | null {
@@ -66,6 +68,7 @@ function toTicketRow(raw: RawTicketRow): TicketRow {
     status: raw.status,
     priority: raw.priority,
     githubIssue: raw.github_issue,
+    loomUrl: raw.loom_url,
     createdBy: raw.created_by,
     createdByEmail: firstOf(raw.creator)?.email ?? null,
     currentNote: raw.current_note,
@@ -232,6 +235,19 @@ export async function setTicketGithubIssue(id: number, issue: number): Promise<T
   const { data, error } = await supabaseAdmin
     .from("tickets")
     .update({ github_issue: issue, updated_at: new Date().toISOString() })
+    .eq("id", id)
+    .select(TICKET_COLUMNS)
+    .single();
+
+  if (error) throw error;
+  return toTicketRow(data as unknown as RawTicketRow);
+}
+
+/** Sets (or clears, with null) the dev's Loom walkthrough for a ticket. */
+export async function setTicketLoomUrl(id: number, loomUrl: string | null): Promise<TicketRow> {
+  const { data, error } = await supabaseAdmin
+    .from("tickets")
+    .update({ loom_url: loomUrl, updated_at: new Date().toISOString() })
     .eq("id", id)
     .select(TICKET_COLUMNS)
     .single();
