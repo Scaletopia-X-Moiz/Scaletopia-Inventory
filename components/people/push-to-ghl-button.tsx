@@ -22,6 +22,8 @@ import {
 } from "@/lib/ghl/field-mapping";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
 import type { EnrichmentField } from "@/lib/data/enrichment-fields";
+import { BindableColumnOptions } from "@/components/shared/bindable-column-options";
+import { buildPeoplePushBindableColumns, toCompanyDiscoveryParams } from "@/lib/push/company-source";
 import {
   fetchSavedPushFieldMapping,
   savePushFieldMapping,
@@ -246,6 +248,10 @@ export function PushToGhlButton({
   // and virtualColumns — same discovery endpoint the EmailBison button uses
   // (app/api/people/enrichment-fields), already scoped server-side.
   const [enrichmentFields, setEnrichmentFields] = useState<EnrichmentField[]>([]);
+  // The linked companies' custom_data keys (e.g. speciality_therapy), offered
+  // after the person fields under "Company fields" — bound per person from
+  // their company at push time (lib/push/company-source.ts).
+  const [companyEnrichmentFields, setCompanyEnrichmentFields] = useState<EnrichmentField[]>([]);
 
   const [preview, setPreview] = useState<PreviewCounts | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -272,6 +278,7 @@ export function PushToGhlButton({
     setMapping({});
     setMatchScores({});
     setEnrichmentFields([]);
+    setCompanyEnrichmentFields([]);
     setStandardFields(FALLBACK_STANDARD_FIELDS);
     setPreview(null);
     setPreviewError(null);
@@ -327,6 +334,7 @@ export function PushToGhlButton({
     setMapping({});
     setMatchScores({});
     setEnrichmentFields([]);
+    setCompanyEnrichmentFields([]);
     setStandardFields(FALLBACK_STANDARD_FIELDS);
 
     // Best-effort, mirrors the EmailBison button's enrichment-fields fetch —
@@ -340,6 +348,20 @@ export function PushToGhlButton({
         setEnrichmentFields(data.fields);
       } catch {
         setEnrichmentFields([]);
+      }
+    })();
+
+    // Company-scoped discovery with only the facets that mean the same thing
+    // on a company — the People page's full params (phoneType etc.) would make
+    // it match no companies. Best-effort, like the person fetch above.
+    (async () => {
+      try {
+        const res = await fetch(`/api/companies/enrichment-fields?${toCompanyDiscoveryParams(paramsStr)}`);
+        if (!res.ok) throw new Error(res.status.toString());
+        const data = (await res.json()) as { fields: EnrichmentField[] };
+        setCompanyEnrichmentFields(data.fields);
+      } catch {
+        setCompanyEnrichmentFields([]);
       }
     })();
 
@@ -478,19 +500,14 @@ export function PushToGhlButton({
 
   // Standard fields, then active virtual columns, then every other
   // enrichment (custom_data) key discovered on the current view — deduped by
-  // key, mirrors the EmailBison button's bindableColumns.
-  const bindableColumnKeys = new Set(BINDABLE_RECORD_COLUMNS.map((c) => c.key));
-  const bindableColumns = [...BINDABLE_RECORD_COLUMNS];
-  for (const c of virtualColumns) {
-    if (bindableColumnKeys.has(c.key)) continue;
-    bindableColumnKeys.add(c.key);
-    bindableColumns.push({ key: c.key, label: c.key });
-  }
-  for (const f of enrichmentFields) {
-    if (bindableColumnKeys.has(f.key)) continue;
-    bindableColumnKeys.add(f.key);
-    bindableColumns.push({ key: f.key, label: f.key });
-  }
+  // key, mirrors the EmailBison button's bindableColumns — then the linked
+  // company's enrichment keys in their own "Company fields" group.
+  const bindableColumns = buildPeoplePushBindableColumns(
+    BINDABLE_RECORD_COLUMNS,
+    virtualColumns,
+    enrichmentFields,
+    companyEnrichmentFields
+  );
 
   return (
     <AlertDialog.Root open={status !== "idle"} onOpenChange={(open) => !open && handleCancel()}>
@@ -646,11 +663,7 @@ export function PushToGhlButton({
                                 >
                                   <option value="skip">— ignore —</option>
                                   <option value={LITERAL_SENTINEL}>Static value</option>
-                                  {bindableColumns.map((col) => (
-                                    <option key={col.key} value={col.key}>
-                                      {col.label}
-                                    </option>
-                                  ))}
+                                  <BindableColumnOptions columns={bindableColumns} />
                                 </select>
                                 {literal ? (
                                   <input
@@ -701,11 +714,7 @@ export function PushToGhlButton({
                                     className="w-full rounded border border-rule bg-paper px-2 py-1 text-xs text-ink outline-none focus:border-stamp"
                                   >
                                     <option value="">Choose a column…</option>
-                                    {bindableColumns.map((col) => (
-                                      <option key={col.key} value={col.key}>
-                                        {col.label}
-                                      </option>
-                                    ))}
+                                    <BindableColumnOptions columns={bindableColumns} />
                                   </select>
                                 ) : row.source === "literal" ? (
                                   <input

@@ -6,6 +6,7 @@ import type {
 } from "@/lib/ghl/types";
 import { resolveMappedValue } from "@/lib/push/resolve-mapped-value";
 import { isLiteralSource, literalSourceText } from "@/lib/push/standard-field-source";
+import { isCompanyCustomKey, resolveCompanyCustomValue } from "@/lib/push/company-source";
 
 /** Maps a bindable "People-table column" name (offered in the GHL push
  * mapping step, ticket #142) to the matching GhlPushRecord field — the
@@ -89,6 +90,10 @@ function resolveGhlColumnValue(
   record: GhlPushRecord | undefined,
   customData: Record<string, unknown> | null
 ): unknown {
+  // A company-source binding reads the linked company's custom_data, never
+  // the person's (and is checked first so a company key named like a record
+  // field, e.g. "city", isn't shadowed by it).
+  if (isCompanyCustomKey(columnKey)) return resolveCompanyCustomValue(columnKey, record?.companyCustomData);
   const recordField = GHL_KNOWN_RECORD_FIELDS[columnKey];
   if (recordField && record) return record[recordField];
   return customData?.[columnKey] ?? null;

@@ -86,6 +86,12 @@ export interface GhlPushRecord {
   companyTags: string[] | null;
   companyCreatedAt: string | null;
   companyLastUpdated: string | null;
+  /** The linked company's raw custom_data (enrichment) blob, so a field can
+   * be bound to a company custom_data key (see lib/push/company-source.ts).
+   * Only populated by the people loaders when the push's mapping binds a
+   * company key; absent/null otherwise, and null when the person has no
+   * linked company. */
+  companyCustomData?: Record<string, unknown> | null;
 }
 
 /** Shape produced by buildGhlContactPayload — distinct from lib/ghl/client.ts's

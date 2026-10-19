@@ -130,3 +130,29 @@ describe("resolveDefaultFieldMapping (emailbison)", () => {
     });
   });
 });
+
+describe("resolveDefaultFieldMapping (ghl) company virtual columns", () => {
+  it("auto-maps to a company-source virtual column via its company-source key", () => {
+    const result = resolveDefaultFieldMapping({
+      platform: "ghl",
+      records: [{ companyName: "Acme Inc", brandName: null }],
+      virtualColumns: [{ key: "speciality_therapy", type: "text", source: "company" }],
+      customFields: [customField({ id: "f1", name: "speciality_therapy" })],
+    });
+
+    expect(result.customFieldMapping).toEqual([
+      { ghlFieldId: "f1", source: "column", columnKey: "company_custom:speciality_therapy" },
+    ]);
+  });
+
+  it("leaves a person-source virtual column bound by its bare key", () => {
+    const result = resolveDefaultFieldMapping({
+      platform: "ghl",
+      records: [{ companyName: "Acme Inc", brandName: null }],
+      virtualColumns: [{ key: "speciality_therapy", type: "text", source: "person" }],
+      customFields: [customField({ id: "f1", name: "speciality_therapy" })],
+    });
+
+    expect(result.customFieldMapping[0].columnKey).toBe("speciality_therapy");
+  });
+});

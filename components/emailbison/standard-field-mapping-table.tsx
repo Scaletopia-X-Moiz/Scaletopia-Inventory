@@ -1,6 +1,8 @@
 "use client";
 
 import type { EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
+import { BindableColumnOptions } from "@/components/shared/bindable-column-options";
+import type { BindableColumn } from "@/lib/push/company-source";
 import {
   LITERAL_SENTINEL,
   isLiteralSource,
@@ -42,7 +44,7 @@ export function StandardFieldMappingTable({
   /** The source options offered per row — bindable People/Company-table
    * columns plus active virtual/enrichment columns, same set the
    * custom-variable editor's column-bound rows offer. */
-  columns: { key: string; label: string }[];
+  columns: BindableColumn[];
   onChange: (next: EmailBisonStandardFieldMapping) => void;
 }) {
   return (
@@ -82,11 +84,7 @@ export function StandardFieldMappingTable({
                       >
                         <option value="skip">— ignore —</option>
                         <option value={LITERAL_SENTINEL}>Static value</option>
-                        {columns.map((col) => (
-                          <option key={col.key} value={col.key}>
-                            {col.label}
-                          </option>
-                        ))}
+                        <BindableColumnOptions columns={columns} />
                       </select>
                       {literal ? (
                         <input

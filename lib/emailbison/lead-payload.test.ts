@@ -391,3 +391,45 @@ describe("resolveCustomVariables", () => {
     expect(resolveCustomVariables(entries, fullRecord, null)).toEqual([]);
   });
 });
+
+describe("company-source bindings (company custom_data)", () => {
+  const withCompany: EmailBisonPushRecord = {
+    ...fullRecord,
+    companyCustomData: { speciality_therapy: "trauma therapy", score: "company-9" },
+  };
+
+  it("resolves a company-bound custom variable from the linked company's custom_data", () => {
+    const entries = [{ name: "specialty", value: "", columnKey: "company_custom:speciality_therapy" }];
+    expect(resolveCustomVariables(entries, withCompany, { lead_score: 7 })).toEqual([
+      { name: "specialty", value: "trauma therapy" },
+    ]);
+  });
+
+  it("keeps person and company values distinct for the same key", () => {
+    const entries = [
+      { name: "p", value: "", columnKey: "score" },
+      { name: "c", value: "", columnKey: "company_custom:score" },
+    ];
+    expect(resolveCustomVariables(entries, withCompany, { score: "person-1" })).toEqual([
+      { name: "p", value: "person-1" },
+      { name: "c", value: "company-9" },
+    ]);
+  });
+
+  it("omits the variable when no company data is attached", () => {
+    const entries = [{ name: "specialty", value: "", columnKey: "company_custom:speciality_therapy" }];
+    expect(resolveCustomVariables(entries, fullRecord, null)).toEqual([]);
+    expect(resolveCustomVariables(entries, { ...fullRecord, companyCustomData: null }, null)).toEqual([]);
+  });
+
+  it("a company-bound standard field resolves from the company", () => {
+    const payload = buildEmailBisonLeadPayload(withCompany, null, [], "patch", {
+      companyName: "company_custom:speciality_therapy",
+      firstName: "firstName",
+      lastName: "lastName",
+      email: "email",
+      title: "title",
+    });
+    expect(payload.companyName).toBe("trauma therapy");
+  });
+});

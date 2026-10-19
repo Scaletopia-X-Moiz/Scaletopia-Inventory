@@ -7,6 +7,7 @@ import { buildGhlContactPayload, buildGhlCustomFields } from "@/lib/ghl/contact-
 import type { ClientRow } from "@/lib/data/clients";
 import type { GhlFieldMapping, GhlStandardFieldMapping } from "@/lib/ghl/types";
 import type { SessionUser } from "@/lib/auth/dal";
+import { usesCompanyCustomData } from "@/lib/push/company-source";
 
 /** GHL's v2 API caps a location at 100 requests / 10s (~10 req/s). With the
  * upsert-based client (lib/ghl/client.ts) now spending 1-2 calls per contact
@@ -256,7 +257,13 @@ export async function runPeopleGhlPush(
 
   onProgress?.({ phase: "resolving", done: 0, total: 0, pushed: 0, errors: 0 });
 
-  const candidates = await getPeopleForGhl(filters);
+  // The linked company's custom_data is only fetched when a field is bound to
+  // a company enrichment key (lib/push/company-source.ts).
+  const includeCompanyCustomData = usesCompanyCustomData([
+    ...fieldMapping.map((m) => m.columnKey),
+    ...Object.values(standardFieldMapping ?? {}),
+  ]);
+  const candidates = await getPeopleForGhl(filters, { includeCompanyCustomData });
   const { total_matched, eligible, skipped } = splitGhlEligibility(candidates);
 
   if (eligible.length === 0) {

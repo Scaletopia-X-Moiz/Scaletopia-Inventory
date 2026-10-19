@@ -11,6 +11,8 @@ import type { EmailBisonCustomVariableEntry, EmailBisonStandardFieldMapping } fr
 import type { EmailBisonCustomVariable } from "@/lib/emailbison/client";
 import type { ActiveVirtualColumn } from "@/lib/data/virtual-columns";
 import type { EnrichmentField } from "@/lib/data/enrichment-fields";
+import { BindableColumnOptions } from "@/components/shared/bindable-column-options";
+import { buildPeoplePushBindableColumns, toCompanyDiscoveryParams } from "@/lib/push/company-source";
 import { StandardFieldMappingTable } from "@/components/emailbison/standard-field-mapping-table";
 import { normalizeFieldSource } from "@/lib/emailbison/lead-payload";
 import {
@@ -191,6 +193,9 @@ export function PushToEmailBisonButton({
   // enrichment" picker uses (app/api/people/enrichment-fields), already
   // scoped + housekeeping-key-filtered server-side.
   const [enrichmentFields, setEnrichmentFields] = useState<EnrichmentField[]>([]);
+  // The linked companies' custom_data keys, offered under "Company fields" and
+  // bound per person from their company at push time (lib/push/company-source.ts).
+  const [companyEnrichmentFields, setCompanyEnrichmentFields] = useState<EnrichmentField[]>([]);
 
   // Pre-populated via resolveDefaultFieldMapping (issue #108) on step entry,
   // by GET /api/emailbison/default-field-mapping — the same candidate set the
@@ -225,6 +230,7 @@ export function PushToEmailBisonButton({
     setReferenceVariables(null);
     setReferenceError(null);
     setEnrichmentFields([]);
+    setCompanyEnrichmentFields([]);
     setStandardFieldMapping(null);
     setStandardFieldMappingError(null);
   }
@@ -263,6 +269,7 @@ export function PushToEmailBisonButton({
     setReferenceVariables(null);
     setReferenceError(null);
     setEnrichmentFields([]);
+    setCompanyEnrichmentFields([]);
     setStandardFieldMapping(null);
     setStandardFieldMappingError(null);
     setPickerLoading(true);
@@ -297,6 +304,20 @@ export function PushToEmailBisonButton({
       }
     })();
 
+    // Company-scoped discovery with only the facets that mean the same thing
+    // on a company — the People page's full params (phoneType etc.) would make
+    // it match no companies. Best-effort, like the person fetch above.
+    const companyEnrichmentPromise = (async () => {
+      try {
+        const res = await fetch(`/api/companies/enrichment-fields?${toCompanyDiscoveryParams(paramsStr)}`);
+        if (!res.ok) throw new Error(res.status.toString());
+        const data = (await res.json()) as { fields: EnrichmentField[] };
+        setCompanyEnrichmentFields(data.fields);
+      } catch {
+        setCompanyEnrichmentFields([]);
+      }
+    })();
+
     // Ticket #114: a saved mapping for this (client, "emailbison_people") pair —
     // if one exists — overrides the pure auto-mapping default. Best-effort: a
     // fetch failure just leaves the auto-mapping default in place, same as
@@ -322,7 +343,7 @@ export function PushToEmailBisonButton({
     })();
 
     try {
-      await Promise.all([referencePromise, enrichmentPromise, mappingPromise]);
+      await Promise.all([referencePromise, enrichmentPromise, companyEnrichmentPromise, mappingPromise]);
     } finally {
       setPickerLoading(false);
     }
@@ -433,18 +454,14 @@ export function PushToEmailBisonButton({
   // enrichment (custom_data) key discovered on the current view — deduped by
   // key so a field that's both an active virtual column and in the
   // discovery sample isn't offered twice.
-  const bindableColumnKeys = new Set(BINDABLE_RECORD_COLUMNS.map((c) => c.key));
-  const bindableColumns = [...BINDABLE_RECORD_COLUMNS];
-  for (const c of virtualColumns) {
-    if (bindableColumnKeys.has(c.key)) continue;
-    bindableColumnKeys.add(c.key);
-    bindableColumns.push({ key: c.key, label: c.key });
-  }
-  for (const f of enrichmentFields) {
-    if (bindableColumnKeys.has(f.key)) continue;
-    bindableColumnKeys.add(f.key);
-    bindableColumns.push({ key: f.key, label: f.key });
-  }
+  // The linked company's enrichment keys follow in their own "Company fields"
+  // group, kept distinct from person keys by source+key.
+  const bindableColumns = buildPeoplePushBindableColumns(
+    BINDABLE_RECORD_COLUMNS,
+    virtualColumns,
+    enrichmentFields,
+    companyEnrichmentFields
+  );
 
   return (
     <AlertDialog.Root open={status !== "idle"} onOpenChange={(open) => !open && handleCancel()}>
@@ -665,11 +682,7 @@ export function PushToEmailBisonButton({
                                 )}
                               >
                                 <option value="">Choose a column…</option>
-                                {bindableColumns.map((col) => (
-                                  <option key={col.key} value={col.key}>
-                                    {col.label}
-                                  </option>
-                                ))}
+                                <BindableColumnOptions columns={bindableColumns} />
                               </select>
                             )}
                             <button

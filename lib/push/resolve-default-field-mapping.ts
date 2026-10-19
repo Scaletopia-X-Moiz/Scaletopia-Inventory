@@ -5,6 +5,7 @@ import { GHL_KNOWN_RECORD_FIELDS } from "@/lib/ghl/contact-payload";
 import type { EmailBisonStandardFieldMapping } from "@/lib/emailbison/types";
 import { fuzzyMatchColumn } from "@/lib/import/normalize";
 import { toLiteralSource } from "@/lib/push/standard-field-source";
+import { toCompanyCustomKey } from "@/lib/push/company-source";
 
 /** The subset of a pushed record resolveDefaultFieldMapping needs to decide
  * the company-name default — satisfied structurally by both GhlPushRecord
@@ -119,16 +120,31 @@ export function resolveDefaultFieldMapping(
   // firstName). Below fuzzyMatchColumn's own 0.4 threshold it returns null,
   // which we carry through as "no entry" — the mapping table renders that as
   // "— ignore —". Deduped so a virtual column that happens to share a name
-  // with a standard field isn't offered twice.
-  const candidateKeys = [
-    ...new Set([...args.virtualColumns.map((column) => column.key), ...Object.keys(GHL_KNOWN_RECORD_FIELDS)]),
-  ];
+  // with a standard field isn't offered twice. An active virtual column that
+  // reads the linked company's custom_data (source "company") is matched on its
+  // bare name but bound via its company-source key (lib/push/company-source.ts),
+  // so it resolves from the company rather than blank from the person.
+  const boundKeyByName = new Map<string, string>();
+  for (const column of args.virtualColumns) {
+    if (boundKeyByName.has(column.key)) continue;
+    const isRecordField = Object.hasOwn(GHL_KNOWN_RECORD_FIELDS, column.key);
+    const bindsToCompany = column.source === "company" && !isRecordField;
+    boundKeyByName.set(column.key, bindsToCompany ? toCompanyCustomKey(column.key) : column.key);
+  }
+  for (const key of Object.keys(GHL_KNOWN_RECORD_FIELDS)) {
+    if (!boundKeyByName.has(key)) boundKeyByName.set(key, key);
+  }
+  const candidateKeys = [...boundKeyByName.keys()];
   const customFieldMapping: GhlFieldMapping[] = [];
   const customFieldScores: Record<string, number> = {};
   for (const field of args.customFields) {
     const match = fuzzyMatchColumn(field.name, candidateKeys);
     if (match) {
-      customFieldMapping.push({ ghlFieldId: field.id, source: "column", columnKey: match.field });
+      customFieldMapping.push({
+        ghlFieldId: field.id,
+        source: "column",
+        columnKey: boundKeyByName.get(match.field) ?? match.field,
+      });
       customFieldScores[field.id] = match.score;
     }
   }

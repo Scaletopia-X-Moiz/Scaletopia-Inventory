@@ -457,3 +457,80 @@ describe("buildGhlCustomFields", () => {
     expect(result).toEqual([{ id: "f8", value: "Acme" }]);
   });
 });
+
+describe("company-source bindings (company custom_data)", () => {
+  // Clinton Nunnally at Foundations Family Counseling: speciality_therapy lives
+  // on the COMPANY's custom_data (company 226d7e2e-c374-48a0-8051-d8e113957393),
+  // not the person's.
+  const clinton: GhlPushRecord = {
+    ...fullRecord,
+    firstName: "Clinton",
+    lastName: "Nunnally",
+    email: "clinton@foundationsfamilycounseling.com",
+    companyName: "Foundations Family Counseling",
+    companyCustomData: { speciality_therapy: "trauma therapy" },
+  };
+  const personCustomData = { lead_score: 7 };
+  const companyBinding: GhlFieldMapping = {
+    ghlFieldId: "specialty",
+    source: "column",
+    columnKey: "company_custom:speciality_therapy",
+  };
+
+  it("sends the linked company's value for a company-bound custom field", () => {
+    const customFields = buildGhlCustomFields(personCustomData, [companyBinding], clinton);
+    expect(customFields).toEqual([{ id: "specialty", value: "trauma therapy" }]);
+
+    const payload = buildGhlContactPayload(clinton, personCustomData, [], customFields);
+    expect(payload.customFields).toEqual([{ id: "specialty", value: "trauma therapy" }]);
+  });
+
+  it("the bare key does NOT read company data (old behavior: person custom_data only)", () => {
+    const bare: GhlFieldMapping = { ghlFieldId: "specialty", source: "column", columnKey: "speciality_therapy" };
+    expect(buildGhlCustomFields(personCustomData, [bare], clinton)).toEqual([]);
+  });
+
+  it("keeps person and company values distinct when the same key is on both", () => {
+    const both = { ...clinton, companyCustomData: { score: "company-9" } };
+    const mapping: GhlFieldMapping[] = [
+      { ghlFieldId: "p", source: "column", columnKey: "score" },
+      { ghlFieldId: "c", source: "column", columnKey: "company_custom:score" },
+    ];
+    expect(buildGhlCustomFields({ score: "person-1" }, mapping, both)).toEqual([
+      { id: "p", value: "person-1" },
+      { id: "c", value: "company-9" },
+    ]);
+  });
+
+  it("a company key named like a record field is not shadowed by the record field", () => {
+    const cityOnCompany = { ...clinton, companyCustomData: { city: "from-company-custom" } };
+    const mapping: GhlFieldMapping[] = [{ ghlFieldId: "c", source: "column", columnKey: "company_custom:city" }];
+    expect(buildGhlCustomFields(null, mapping, cityOnCompany)).toEqual([{ id: "c", value: "from-company-custom" }]);
+  });
+
+  it("omits the field when the person has no linked company data or the key is missing", () => {
+    expect(buildGhlCustomFields(null, [companyBinding], { ...clinton, companyCustomData: null })).toEqual([]);
+    expect(buildGhlCustomFields(null, [companyBinding], { ...clinton, companyCustomData: undefined })).toEqual([]);
+    expect(buildGhlCustomFields(null, [companyBinding], { ...clinton, companyCustomData: { other: "x" } })).toEqual([]);
+  });
+
+  it("joins a company list value with a comma and space like a person list value", () => {
+    const rec = { ...clinton, companyCustomData: { specialties: ["trauma", "grief"] } };
+    const mapping: GhlFieldMapping[] = [{ ghlFieldId: "s", source: "column", columnKey: "company_custom:specialties" }];
+    expect(buildGhlCustomFields(null, mapping, rec)).toEqual([{ id: "s", value: "trauma, grief" }]);
+  });
+
+  it("a company-bound standard field resolves from the company too", () => {
+    const payload = buildGhlContactPayload(clinton, null, [], [], {
+      companyName: "company_custom:speciality_therapy",
+      firstName: "firstName",
+      lastName: "lastName",
+      email: "email",
+      phone: "phone",
+      city: "city",
+      country: "country",
+    });
+    expect(payload.companyName).toBe("trauma therapy");
+    expect(payload.firstName).toBe("Clinton");
+  });
+});

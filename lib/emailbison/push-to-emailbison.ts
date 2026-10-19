@@ -19,6 +19,7 @@ import type {
   EmailBisonStandardFieldMapping,
 } from "@/lib/emailbison/types";
 import type { SessionUser } from "@/lib/auth/dal";
+import { usesCompanyCustomData } from "@/lib/push/company-source";
 
 const PLATFORM = "emailbison";
 
@@ -547,6 +548,17 @@ async function runEmailBisonAddToWorkspace<TFilters>(
   return { total_matched, pushed, created, updated, errors, failed_people, failed, succeededPersonIds, failedPersonIds, nextOffset, done: isDone };
 }
 
+/** People loader for a push run: embeds the linked company's custom_data only
+ * when a custom variable or standard field is bound to a company enrichment
+ * key (lib/push/company-source.ts), so other pushes skip that extra blob. */
+function peopleLoaderFor(deps: Pick<RunEmailBisonPushDeps, "customVariables" | "standardFieldMapping">) {
+  const includeCompanyCustomData = usesCompanyCustomData([
+    ...(deps.customVariables ?? []).map((v) => v.columnKey),
+    ...Object.values(deps.standardFieldMapping ?? {}),
+  ]);
+  return (filters: PersonListFilters) => getPeopleForEmailBison(filters, { includeCompanyCustomData });
+}
+
 /** Add to EmailBison, triggered from the People table. */
 export function runPeopleAddToEmailBison(
   filters: PersonListFilters,
@@ -555,7 +567,7 @@ export function runPeopleAddToEmailBison(
   deps: RunEmailBisonPushDeps = {}
 ): Promise<EmailBisonPushResult> {
   return runEmailBisonAddToWorkspace(
-    { label: "people", idColumn: "person_id", targetTable: "people", loadRecords: getPeopleForEmailBison },
+    { label: "people", idColumn: "person_id", targetTable: "people", loadRecords: peopleLoaderFor(deps) },
     filters,
     client,
     actor,
@@ -970,7 +982,7 @@ export function runPeopleAddToCampaign(
   deps: RunEmailBisonCampaignPushDeps = {}
 ): Promise<EmailBisonCampaignPushResult> {
   return runEmailBisonAddToCampaign(
-    { label: "people", idColumn: "person_id", targetTable: "people", loadRecords: getPeopleForEmailBison },
+    { label: "people", idColumn: "person_id", targetTable: "people", loadRecords: peopleLoaderFor(deps) },
     filters,
     client,
     campaignId,

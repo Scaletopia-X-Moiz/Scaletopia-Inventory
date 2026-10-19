@@ -6,6 +6,7 @@ import type {
 } from "@/lib/emailbison/types";
 import { resolveMappedValue } from "@/lib/push/resolve-mapped-value";
 import { isLiteralSource, literalSourceText } from "@/lib/push/standard-field-source";
+import { isCompanyCustomKey, resolveCompanyCustomValue } from "@/lib/push/company-source";
 
 /** Maps a bindable "People-table column" name (as offered in the Add-to-
  * EmailBison row-adder, issue #52/#61, and in the standard-field mapping's
@@ -107,6 +108,9 @@ function resolveEmailBisonColumnValue(
   record: EmailBisonPushRecord,
   customData: Record<string, unknown> | null
 ): unknown {
+  // A company-source binding reads the linked company's custom_data, never
+  // the person's (see lib/push/company-source.ts).
+  if (isCompanyCustomKey(columnKey)) return resolveCompanyCustomValue(columnKey, record.companyCustomData);
   const recordField = KNOWN_RECORD_FIELDS[columnKey];
   return recordField ? record[recordField] : (customData?.[columnKey] ?? null);
 }

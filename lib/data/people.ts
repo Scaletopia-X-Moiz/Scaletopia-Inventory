@@ -724,7 +724,7 @@ interface FullPersonRow extends RawPersonRow {
   employee_count: number | null;
   niche_tokens: string[] | null;
   /** Not in LIST_COLUMNS (the narrow list-page select) — only reachable via
-   * FULL_ROW_COLUMNS's `*`, needed for the createdAt bindable push field. */
+   * fullRowColumns's `*`, needed for the createdAt bindable push field. */
   created_at: string | null;
   /** The linked company's cleaned name (lib/clean-names/clean-names.ts),
    * joined in alongside the person's own denormalized (raw) company_name so
@@ -770,6 +770,9 @@ interface FullPersonRow extends RawPersonRow {
     source: string | null;
     tags: string[] | null;
     technologies: string[] | null;
+    /** Only present when the fetch asked for it (FullRowOptions) — the
+     * company-side enrichment blob a push can bind a field to. */
+    custom_data?: Record<string, unknown> | null;
   } | null;
 }
 
@@ -779,8 +782,20 @@ interface FullPersonRow extends RawPersonRow {
  * column the push dialogs expose as a bindable `company*` field, so a
  * Companies-side push can bind any real company column without a second round
  * trip. These columns already exist on the companies table — no DDL needed. */
-const FULL_ROW_COLUMNS =
-  "*, companies(brand_name, city, state, country, industry, employee_count, website_url, linkedin_url, domain, phone, phone_type, phone_status, email, email_status, niche, quality_tier, client, created_at, description, domain_status, email_verified_at, founded_year, keywords, last_updated, mx_provider, phone_verified_at, revenue, security_gateway, source, tags, technologies)";
+const COMPANY_EMBED_COLUMNS =
+  "brand_name, city, state, country, industry, employee_count, website_url, linkedin_url, domain, phone, phone_type, phone_status, email, email_status, niche, quality_tier, client, created_at, description, domain_status, email_verified_at, founded_year, keywords, last_updated, mx_provider, phone_verified_at, revenue, security_gateway, source, tags, technologies";
+
+/** Options for the by-id full-row fetch. `includeCompanyCustomData` also
+ * embeds the linked company's custom_data — only the GHL/EmailBison people
+ * pushes need it (a field bound to a company enrichment key, see
+ * lib/push/company-source.ts), so every other caller skips the extra blob. */
+export interface FullRowOptions {
+  includeCompanyCustomData?: boolean;
+}
+
+function fullRowColumns(options: FullRowOptions): string {
+  return `*, companies(${COMPANY_EMBED_COLUMNS}${options.includeCompanyCustomData ? ", custom_data" : ""})`;
+}
 
 export interface PersonExportRow {
   firstName: string | null;
@@ -820,7 +835,7 @@ const FULL_ROW_ID_CHUNK_SIZE = 200;
 const FULL_ROW_FETCH_CONCURRENCY = 10;
 
 /** Full `*` rows for a set of ids, chunked and fetched with bounded concurrency. */
-async function fetchPeopleByIds(ids: string[]): Promise<Map<string, FullPersonRow>> {
+async function fetchPeopleByIds(ids: string[], options: FullRowOptions = {}): Promise<Map<string, FullPersonRow>> {
   const byId = new Map<string, FullPersonRow>();
   if (ids.length === 0) return byId;
 
@@ -832,7 +847,7 @@ async function fetchPeopleByIds(ids: string[]): Promise<Map<string, FullPersonRo
   for (let i = 0; i < chunks.length; i += FULL_ROW_FETCH_CONCURRENCY) {
     const window = chunks.slice(i, i + FULL_ROW_FETCH_CONCURRENCY);
     const results = await Promise.all(
-      window.map((chunk) => supabaseAdmin.from("people").select(FULL_ROW_COLUMNS).in("id", chunk))
+      window.map((chunk) => supabaseAdmin.from("people").select(fullRowColumns(options)).in("id", chunk))
     );
     for (const { data, error } of results) {
       if (error) throw error;
@@ -849,10 +864,13 @@ async function fetchPeopleByIds(ids: string[]): Promise<Map<string, FullPersonRo
  * (including custom_data) only for those ids — so it never fetches `*` for the
  * whole people table, which was slow enough to stall a push before the first
  * row went out. Returned already sorted, in the same order as the list/export. */
-async function fetchFullFilteredPeople(filters: PersonListFilters): Promise<FullPersonRow[]> {
+async function fetchFullFilteredPeople(
+  filters: PersonListFilters,
+  options: FullRowOptions = {}
+): Promise<FullPersonRow[]> {
   const matched = sortByLastUpdatedDesc(await fetchFilteredRows(filters));
   const ids = matched.map((row) => row.id);
-  const byId = await fetchPeopleByIds(ids);
+  const byId = await fetchPeopleByIds(ids, options);
   return ids
     .map((id) => byId.get(id))
     .filter((row): row is FullPersonRow => row != null);
@@ -1017,6 +1035,7 @@ function toGhlPushRecord(row: FullPersonRow): GhlPushRecord {
     companyTags: row.companies?.tags ?? null,
     companyCreatedAt: row.companies?.created_at ?? null,
     companyLastUpdated: row.companies?.last_updated ?? null,
+    companyCustomData: row.companies?.custom_data ?? null,
   };
 }
 
@@ -1024,8 +1043,11 @@ function toGhlPushRecord(row: FullPersonRow): GhlPushRecord {
  * order) as getAllFilteredPeople. Includes every matched person regardless of
  * phone_type; the push engine (lib/ghl/push-to-ghl.ts) is responsible for
  * splitting eligible (mobile/toll-free) from skipped (landline/other). */
-export async function getPeopleForGhl(filters: PersonListFilters): Promise<GhlPushCandidate[]> {
-  const rows = await fetchFullFilteredPeople(filters);
+export async function getPeopleForGhl(
+  filters: PersonListFilters,
+  options: FullRowOptions = {}
+): Promise<GhlPushCandidate[]> {
+  const rows = await fetchFullFilteredPeople(filters, options);
   return rows.map((row) => ({
     id: row.id,
     displayName: row.full_name,
@@ -1114,6 +1136,7 @@ function toEmailBisonPushRecord(row: FullPersonRow): EmailBisonPushRecord {
     companySource: row.companies?.source ?? null,
     companyTags: row.companies?.tags ?? null,
     companyTechnologies: row.companies?.technologies ?? null,
+    companyCustomData: row.companies?.custom_data ?? null,
   };
 }
 
@@ -1131,9 +1154,10 @@ function toEmailBisonPushCandidate(row: FullPersonRow): EmailBisonPushCandidate 
  * "Add to EmailBison" and "Add to Campaign" when triggered from the People
  * table. */
 export async function getPeopleForEmailBison(
-  filters: PersonListFilters
+  filters: PersonListFilters,
+  options: FullRowOptions = {}
 ): Promise<EmailBisonPushCandidate[]> {
-  const rows = await fetchFullFilteredPeople(filters);
+  const rows = await fetchFullFilteredPeople(filters, options);
   return rows.map(toEmailBisonPushCandidate);
 }
 
