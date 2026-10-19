@@ -35,7 +35,7 @@ import type { EnrichmentField } from "@/lib/data/enrichment-fields";
  * only when the *native* filter scope changes — page/vc/vf are stripped from
  * the scope key, so adding a column or editing a condition never re-fires
  * discovery (that's what keeps the pickers stable and edits instant). */
-function useEnrichmentFields(endpoint: string) {
+function useEnrichmentFields(endpoint: string, selfEntity: "company" | "person") {
   const searchParams = useSearchParams();
   // Discovery result tagged with the scope it was fetched for, so a scope
   // change invalidates it by derivation (below) rather than via a
@@ -63,14 +63,19 @@ function useEnrichmentFields(endpoint: string) {
     if (startedRef.current === scopeKey) return;
     startedRef.current = scopeKey;
     setState({ scope: scopeKey, fields: null, loading: true });
-    fetch(`${endpoint}?${scopeKey}`)
+    // `from` tells the shared endpoint which page's URL this is, so it can drop
+    // the filters that only make sense on this page from the other entity's
+    // discovery. Appended here, not in scopeKey, so it never keys the cache.
+    const params = new URLSearchParams(scopeKey);
+    params.set("from", selfEntity === "person" ? "people" : "companies");
+    fetch(`${endpoint}?${params.toString()}`)
       .then((r) => {
         if (!r.ok) throw new Error(r.status.toString());
         return r.json() as Promise<{ fields: EnrichmentField[] }>;
       })
       .then((data) => setState({ scope: scopeKey, fields: data.fields, loading: false }))
       .catch(() => setState({ scope: scopeKey, fields: [], loading: false }));
-  }, [scopeKey, endpoint]);
+  }, [scopeKey, endpoint, selfEntity]);
 
   return { fields, loading, ensureLoaded };
 }
@@ -116,7 +121,7 @@ export function VirtualColumnsBar({
    * source scoping, and the ANY/ALL quantifier UI (ticket #30). */
   selfEntity: "company" | "person";
 }) {
-  const { fields, loading, ensureLoaded } = useEnrichmentFields(endpoint);
+  const { fields, loading, ensureLoaded } = useEnrichmentFields(endpoint, selfEntity);
 
   const conditionCount = useMemo(
     () => (activeFilterSet?.groups ?? []).reduce((n, g) => n + g.conditions.length, 0),
