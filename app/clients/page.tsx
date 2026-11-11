@@ -18,7 +18,8 @@ export default async function ClientsPage() {
         <div className="mx-auto max-w-5xl">
           <h1 className="mb-1 text-xl font-semibold text-ink">Clients</h1>
           <p className="mb-6 text-sm text-ink-soft">
-            GHL push credentials for each agency client. Edits save automatically.
+            GHL and EmailBison push credentials for each agency client. Edits save automatically. New
+            sub-accounts in Airtable&apos;s Locations table are added every hour, or now with Sync from Airtable.
           </p>
           <ClientsView clients={clients} />
         </div>

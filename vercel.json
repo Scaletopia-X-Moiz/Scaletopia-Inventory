@@ -7,6 +7,10 @@
     {
       "path": "/api/internal/import-worker",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/internal/clients-sync",
+      "schedule": "17 * * * *"
     }
   ]
 }

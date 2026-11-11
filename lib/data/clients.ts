@@ -79,6 +79,40 @@ export async function listClientOptions(): Promise<ClientOption[]> {
   return (data ?? []) as ClientOption[];
 }
 
+export interface GhlActivityClientOption extends ClientOption {
+  /** People this databank has pushed to the sub-account (`platform_pushes`,
+   * platform = ghl). Last activity only ever covers these people. */
+  pushedCount: number;
+}
+
+/** Sub-accounts for the People "Last activity" filter: clients with a GHL
+ * location that are active or have push history, each with how many people
+ * were pushed there. The count is shown in the picker because a sub-account
+ * nobody pushed to from here can only ever return zero people, which reads
+ * as a broken filter otherwise (2026-11-12: Acceler8 / Chamber Media
+ * Secondary had 0 pushes). One indexed head-count per client. */
+export async function listGhlActivityClientOptions(): Promise<GhlActivityClientOption[]> {
+  const { data, error } = await supabaseAdmin
+    .from("clients")
+    .select("id,name,is_active")
+    .not("ghl_location_id", "is", null)
+    .order("name", { ascending: true });
+  if (error) throw error;
+
+  const rows = await Promise.all(
+    ((data ?? []) as { id: string; name: string; is_active: boolean }[]).map(async (c) => {
+      const { count, error: countError } = await supabaseAdmin
+        .from("platform_pushes")
+        .select("id", { count: "exact", head: true })
+        .eq("client_id", c.id)
+        .eq("platform", "ghl");
+      if (countError) throw countError;
+      return { id: c.id, name: c.name, pushedCount: count ?? 0, isActive: c.is_active };
+    })
+  );
+  return rows.filter((r) => r.isActive || r.pushedCount > 0).map(({ id, name, pushedCount }) => ({ id, name, pushedCount }));
+}
+
 /** Fetches a single client by id. Returns null if it doesn't exist. */
 export async function getClientById(id: string): Promise<ClientRow | null> {
   const { data, error } = await supabaseAdmin

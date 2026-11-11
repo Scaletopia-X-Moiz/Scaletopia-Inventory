@@ -35,7 +35,10 @@ export function LastActivityFilterPopover({
   value,
   onChange,
 }: {
-  clientOptions: { id: string; name: string }[];
+  /** `pushedCount` (people pushed to the sub-account from here) is optional:
+   * when present it is shown, and a sub-account with none gets a warning,
+   * because Last activity can only ever match pushed people. */
+  clientOptions: { id: string; name: string; pushedCount?: number }[];
   value: LastActivityFilter | undefined;
   onChange: (next: LastActivityFilter | undefined) => void;
 }) {
@@ -44,6 +47,7 @@ export function LastActivityFilterPopover({
   const [from, setFrom] = useState(value?.op === "between" ? (value.from?.slice(0, 10) ?? "") : "");
   const [to, setTo] = useState(value?.op === "between" ? (value.to?.slice(0, 10) ?? "") : "");
   const [days, setDays] = useState(value?.op === "within_days" ? String(value.days) : "30");
+  const selectedClient = clientOptions.find((client) => client.id === clientId);
 
   const echoRef = useRef<string>(JSON.stringify(value ?? null));
   useEffect(() => {
@@ -94,13 +98,21 @@ export function LastActivityFilterPopover({
             <option value="">Choose a client…</option>
             {clientOptions.map((client) => (
               <option key={client.id} value={client.id}>
-                {client.name}
+                {client.pushedCount === undefined
+                  ? client.name
+                  : `${client.name} (${client.pushedCount.toLocaleString()} pushed)`}
               </option>
             ))}
           </select>
           <p className="text-[11px] text-ink-mute">
             Last activity is per sub-account, and only people pushed to it are matched.
           </p>
+          {selectedClient?.pushedCount === 0 && (
+            <p className="text-[11px] text-danger">
+              No one has been pushed to {selectedClient.name} from the databank, so this filter will match no
+              one. People who reached this sub-account another way (Clay, n8n, GHL imports) aren&apos;t tracked.
+            </p>
+          )}
         </div>
 
         <div className="flex flex-col gap-1.5">

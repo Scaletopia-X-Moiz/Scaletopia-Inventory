@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { PeopleFilterSlip } from "@/components/people/filter-slip";
-import type { ClientOption } from "@/lib/data/clients";
+import type { ClientOption, GhlActivityClientOption } from "@/lib/data/clients";
 
 interface FilterOption {
   id: string;
@@ -36,7 +36,13 @@ const EMPTY: PersonFilterOptions = {
 // results are cached per unique query string rather than once globally.
 const cache = new Map<string, PersonFilterOptions>();
 
-export function PeopleFilterSlipClient({ clientOptions }: { clientOptions: ClientOption[] }) {
+export function PeopleFilterSlipClient({
+  clientOptions,
+  activityClientOptions,
+}: {
+  clientOptions: ClientOption[];
+  activityClientOptions?: GhlActivityClientOption[];
+}) {
   const searchParams = useSearchParams();
   const facetParams = new URLSearchParams(searchParams);
   facetParams.delete("page");
@@ -72,5 +78,12 @@ export function PeopleFilterSlipClient({ clientOptions }: { clientOptions: Clien
     return () => controller.abort();
   }, [paramsStr]);
 
-  return <PeopleFilterSlip options={options} loading={loadedFor !== paramsStr} clientOptions={clientOptions} />;
+  return (
+    <PeopleFilterSlip
+      options={options}
+      loading={loadedFor !== paramsStr}
+      clientOptions={clientOptions}
+      activityClientOptions={activityClientOptions}
+    />
+  );
 }

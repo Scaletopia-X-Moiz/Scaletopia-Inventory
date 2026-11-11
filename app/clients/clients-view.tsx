@@ -2,13 +2,15 @@
 
 import { useActionState, useEffect, useRef, useState, useTransition } from "react";
 import { Dialog } from "radix-ui";
-import { Check, Loader2, Plus, X } from "lucide-react";
+import { Check, Loader2, Plus, RefreshCw, X } from "lucide-react";
 import type { ClientRow } from "@/lib/data/clients";
 import {
   createClientAction,
+  syncClientsFromAirtableAction,
   updateClientField,
   type ClientCredentialField,
   type CreateClientState,
+  type SyncFromAirtableState,
 } from "./actions";
 
 type TextField = Exclude<ClientCredentialField, "isActive">;
@@ -253,6 +255,55 @@ function AddClientDialog() {
   );
 }
 
+/** Runs the Airtable -> clients sync on demand (it also runs hourly). New GHL
+ * sub-accounts / EmailBison workspaces in Airtable's Locations table are added;
+ * existing rows are never overwritten, so anything that needs a human is
+ * listed instead. */
+function SyncFromAirtable() {
+  const [state, setState] = useState<SyncFromAirtableState | null>(null);
+  const [isPending, startTransition] = useTransition();
+
+  return (
+    <div className="flex flex-col items-end gap-2">
+      <button
+        type="button"
+        disabled={isPending}
+        onClick={() => startTransition(async () => setState(await syncClientsFromAirtableAction()))}
+        className="flex items-center justify-center gap-2 rounded-lg border border-rule px-4 py-2 text-sm text-ink-soft transition-colors hover:bg-hover disabled:opacity-60"
+      >
+        {isPending ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
+        Sync from Airtable
+      </button>
+      {state && (
+        <div className="w-full max-w-xl rounded-lg border border-rule bg-card p-3 text-xs text-ink-soft">
+          {state.error ? (
+            <p className="text-danger">{state.error}</p>
+          ) : (
+            <>
+              <p className="text-ink">
+                {state.inserted?.length ? `Added: ${state.inserted.join(", ")}.` : "No new clients in Airtable."}
+                {state.filled?.length ? ` Filled missing credentials on: ${state.filled.join(", ")}.` : ""}
+              </p>
+              {state.notes && state.notes.length > 0 && (
+                <details className="mt-2">
+                  <summary className="cursor-pointer">{state.notes.length} row(s) need a human</summary>
+                  <ul className="mt-1 list-disc space-y-1 pl-4">
+                    {state.notes.map((n, i) => (
+                      <li key={i}>
+                        <span className="font-medium text-ink">{n.name}</span> ({n.kind}): {n.detail}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ClientsView({ clients }: { clients: ClientRow[] }) {
   const { topRef, bottomRef, spacerRef, onTopScroll, onBottomScroll } = useSyncedHorizontalScroll();
 
@@ -260,14 +311,18 @@ export function ClientsView({ clients }: { clients: ClientRow[] }) {
     return (
       <div className="flex flex-col items-start gap-4 rounded-xl border border-rule bg-card p-6 text-sm text-ink-soft">
         <p>No clients yet.</p>
-        <AddClientDialog />
+        <div className="flex gap-2">
+          <SyncFromAirtable />
+          <AddClientDialog />
+        </div>
       </div>
     );
   }
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex justify-end">
+      <div className="flex flex-wrap items-start justify-end gap-2">
+        <SyncFromAirtable />
         <AddClientDialog />
       </div>
       <div ref={topRef} onScroll={onTopScroll} className="scroll-x-visible overflow-x-auto overflow-y-hidden">

@@ -15,7 +15,7 @@ import {
   parseLastActivityFilter,
   type LastActivityFilter,
 } from "@/lib/data/last-activity-filter";
-import type { ClientOption } from "@/lib/data/clients";
+import type { ClientOption, GhlActivityClientOption } from "@/lib/data/clients";
 import type { PersonFilterOptions } from "@/lib/data/people";
 
 const MULTI_PARAMS = [
@@ -33,9 +33,13 @@ export function PeopleFilterSlip({
   options,
   loading = false,
   clientOptions,
+  activityClientOptions,
 }: {
   options: PersonFilterOptions;
   clientOptions: ClientOption[];
+  /** Sub-accounts (with push counts) for the Last activity filter; falls back
+   * to `clientOptions` without counts. */
+  activityClientOptions?: GhlActivityClientOption[];
   /** Facet options are still being fetched. */
   loading?: boolean;
 }) {
@@ -429,7 +433,7 @@ export function PeopleFilterSlip({
         countsEndpoint="/api/people/push-status-counts"
       />
       <LastActivityFilterPopover
-        clientOptions={clientOptions}
+        clientOptions={activityClientOptions ?? clientOptions}
         value={lastActivityValue}
         onChange={setLastActivity}
       />

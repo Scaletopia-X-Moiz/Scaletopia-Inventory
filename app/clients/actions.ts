@@ -8,6 +8,8 @@ import {
   type UpdateClientCredentialsInput,
 } from "@/lib/data/clients";
 import { logActivity } from "@/lib/activity/log";
+import { supabaseAdmin } from "@/lib/supabase/admin";
+import { syncClientsFromAirtable } from "@/lib/clients/location-sync";
 
 export type ClientCredentialField = keyof UpdateClientCredentialsInput;
 
@@ -109,4 +111,33 @@ export async function updateClientField(
   await logActivity("client.credentials_update", { clientId, field }, admin);
   revalidatePath("/clients");
   return {};
+}
+
+export interface SyncFromAirtableState {
+  error?: string;
+  inserted?: string[];
+  filled?: string[];
+  notes?: { kind: string; name: string; detail: string }[];
+}
+
+/** Pulls new GHL sub-accounts / EmailBison workspaces from Airtable's
+ * Locations table into `clients` (lib/clients/location-sync-plan.ts has the
+ * rules: insert or fill-empty only, nothing existing is overwritten). The
+ * hourly cron /api/internal/clients-sync runs the same thing. Returns names
+ * only, never a key. */
+export async function syncClientsFromAirtableAction(): Promise<SyncFromAirtableState> {
+  const admin = await requireAdminOrDev();
+  const airtableToken = process.env.AIRTABLE_TOKEN;
+  if (!airtableToken) return { error: "AIRTABLE_TOKEN is not set on the server, so Airtable can't be read." };
+
+  try {
+    const { result } = await syncClientsFromAirtable({ supabase: supabaseAdmin, airtableToken });
+    const inserted = result?.inserted.map((r) => r.name) ?? [];
+    const filled = result?.filled.map((r) => r.name) ?? [];
+    await logActivity("client.airtable_sync", { inserted, filled, trigger: "button" }, admin);
+    revalidatePath("/clients");
+    return { inserted, filled, notes: result?.notes ?? [] };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : "Sync failed." };
+  }
 }
