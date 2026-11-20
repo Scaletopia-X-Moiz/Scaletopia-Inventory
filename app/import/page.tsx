@@ -11,7 +11,6 @@ import {
   type ProviderPreset,
   type TargetTable,
 } from "@/lib/import/providers";
-import { fetchActiveClients } from "@/lib/data/active-clients-client";
 import { normalizeOpenTags, MAX_OPEN_TAGS, MAX_OPEN_TAG_LENGTH } from "@/lib/import/open-tags";
 import { fuzzyMatchColumn } from "@/lib/import/normalize";
 import { parseCSV, applyColumnMap, filterMappedNonEmptyRows, serializeCSV } from "@/lib/import/csv";
@@ -823,8 +822,15 @@ function StepMetadata({
       })
       .catch(() => {});
 
-    // Client is a dropdown of ACTIVE clients only, so nobody mistypes a name.
-    fetchActiveClients<{ clients: { name: string }[] }>()
+    // Client is a dropdown of clients whose Airtable Client Status is Active, so nobody mistypes a name.
+    fetch("/api/clients/import-options")
+      .then(async (res) => {
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as { error?: string };
+          throw new Error(body.error ?? "Failed to load clients");
+        }
+        return (await res.json()) as { clients: { name: string }[] };
+      })
       .then((data) => setClientNames(data.clients.map((c) => c.name)))
       .catch((e) => setClientsErr(e instanceof Error ? e.message : "Failed to load clients"))
       .finally(() => setClientsLoading(false));
