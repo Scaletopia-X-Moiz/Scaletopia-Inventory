@@ -49,7 +49,7 @@ Raw enrichment data (many sources, inconsistent formats)
 | **Push to Clay** | Send the current filtered view to a Clay webhook (URL entered per-device at push time) for downstream enrichment workflows |
 | **Email & Phone Verification** | Integrated verification via Clearout and MillionVerifier |
 | **Import Pipeline** | Backfill and seed scripts for bringing new client datasets in cleanly, with canonical-column backfill for historical rows |
-| **Open Tags** | Free-form, GHL-style tags added in the import wizard and stored in a separate `open_tags` column (never in the fixed `[client, niche, date]` `tags`, so they can't pollute the niche facet). Re-imports merge new open tags into existing rows. Companies and People have a Tags filter (include/exclude). Import Client is a dropdown of active clients. DB setup: `lib/data/open-tags.sql` (rollback: `open-tags-rollback.sql`) |
+| **Open Tags** | Free-form, GHL-style tags added in the import wizard and stored in a separate `open_tags` column (never in the fixed `[client, niche, date]` `tags`, so they can't pollute the niche facet). Re-imports merge new open tags into existing rows. Companies and People have a Tags filter (include/exclude). Import Client is a required dropdown of clients whose Airtable `Client Status` is Active (Operations & Data Analytics base, Clients table; needs `AIRTABLE_TOKEN`), not the push-credentials `clients` table. DB setup: `lib/data/open-tags.sql` (rollback: `open-tags-rollback.sql`) |
 | **Activity & Push History** | Full audit trail of pushes and record activity per client |
 | **Ticketing** | Lightweight internal ticket tracking tied to client records |
 
