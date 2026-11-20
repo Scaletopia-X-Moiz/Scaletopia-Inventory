@@ -72,6 +72,7 @@ function makeJob(overrides: Partial<ImportJob> = {}): ImportJob {
     status: "running",
     sourceKey: "manual-csv",
     tags: ["client", "niche", "2026-01-01"],
+    openTags: [],
     stages: [{ targetTable: "companies", columnMap: { Domain: "domain", Name: "company_name" } }],
     storagePath: "imports/abc.csv",
     fileName: "leads.csv",
@@ -237,6 +238,17 @@ describe("import-worker tick", () => {
     await POST(req());
     expect(runImportTick).toHaveBeenCalledWith(expect.objectContaining({ offset: 1 }));
     expect(finishImportJob).toHaveBeenCalledWith("job-1", expect.objectContaining({ inserted: 2 }));
+  });
+
+  it("passes openTags to the tick and appends them to the history row tags", async () => {
+    claimNextImportJob.mockResolvedValueOnce(makeJob({ openTags: ["Spring Promo"] })).mockResolvedValue(null);
+    runImportTick.mockResolvedValue(tickResult());
+    await POST(req());
+    expect(runImportTick).toHaveBeenCalledWith(expect.objectContaining({ openTags: ["Spring Promo"] }));
+    expect(historyInsert).toHaveBeenCalledWith(
+      "import_history",
+      expect.objectContaining({ tags: ["client", "niche", "2026-01-01", "Spring Promo"] })
+    );
   });
 
   it("advances from stage 0 to stage 1 for a two-stage job, one history row per stage", async () => {

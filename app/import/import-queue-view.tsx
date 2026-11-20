@@ -284,6 +284,14 @@ function JobCard({ job }: { job: ImportJobSummary }) {
                 {t}
               </span>
             ))}
+          {(job.openTags ?? []).map((t, i) => (
+            <span
+              key={`open-${t}-${i}`}
+              className="inline-flex items-center rounded-full border border-dashed border-rule px-2 py-0.5 text-[11px] text-ink-soft"
+            >
+              {t}
+            </span>
+          ))}
         </div>
         <span
           className={cn(

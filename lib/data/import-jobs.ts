@@ -34,6 +34,8 @@ export interface ImportJobSummary {
   status: ImportJobStatus;
   sourceKey: string;
   tags: string[];
+  /** Open (GHL-style) tags merged into every record; separate from the fixed [client, niche, date] `tags`. */
+  openTags: string[];
   stages: ImportJobStage[];
   storagePath: string;
   fileName: string | null;
@@ -65,6 +67,7 @@ export interface ImportJob extends ImportJobSummary {
 export interface CreateImportJobInput {
   sourceKey: string;
   tags: string[];
+  openTags?: string[];
   stages: ImportJobStage[];
   storagePath: string;
   fileName?: string | null;
@@ -82,7 +85,7 @@ export interface ImportJobListResult {
  * that can be megabytes per job (same reason /api/import/history omits it).
  * Fetched lazily per job via getImportJobFailedRecords. */
 const IMPORT_JOB_SUMMARY_COLUMNS =
-  "id,status,source_key,tags,stages,storage_path,file_name,row_count,cursor,stage_results,total,processed,inserted,updated,failed,error,triggered_by_user_id,triggered_by_email,created_at,started_at,finished_at";
+  "id,status,source_key,tags,open_tags,stages,storage_path,file_name,row_count,cursor,stage_results,total,processed,inserted,updated,failed,error,triggered_by_user_id,triggered_by_email,created_at,started_at,finished_at";
 
 const IMPORT_JOB_COLUMNS = `${IMPORT_JOB_SUMMARY_COLUMNS},failed_records`;
 
@@ -91,6 +94,7 @@ interface RawImportJob {
   status: ImportJobStatus;
   source_key: string;
   tags: string[] | null;
+  open_tags?: string[] | null;
   stages: ImportJobStage[] | null;
   storage_path: string;
   file_name: string | null;
@@ -117,6 +121,7 @@ export function toImportJobSummary(raw: RawImportJob): ImportJobSummary {
     status: raw.status,
     sourceKey: raw.source_key,
     tags: raw.tags ?? [],
+    openTags: raw.open_tags ?? [],
     stages: raw.stages ?? [],
     storagePath: raw.storage_path,
     fileName: raw.file_name,
@@ -148,6 +153,7 @@ export async function createImportJob(input: CreateImportJobInput): Promise<Impo
     .insert({
       source_key: input.sourceKey,
       tags: input.tags,
+      open_tags: input.openTags ?? [],
       stages: input.stages,
       storage_path: input.storagePath,
       file_name: input.fileName ?? null,

@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { cn } from "@/lib/utils";
 
 export interface ChipOption {
@@ -16,6 +17,7 @@ export function FilterChipGroup({
   onToggle,
   onToggleExclude,
   loading = false,
+  searchable = false,
 }: {
   title: string;
   options: ChipOption[];
@@ -26,17 +28,35 @@ export function FilterChipGroup({
   /** True while the facet options are still being fetched, so an empty list
    * reads as "loading" rather than "no data". */
   loading?: boolean;
+  /** Adds a small search box (for long, free-form lists such as open tags). */
+  searchable?: boolean;
 }) {
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const visible = needle
+    ? options.filter(
+        (o) => o.label.toLowerCase().includes(needle) || selected.includes(o.id) || Boolean(excluded?.includes(o.id))
+      )
+    : options;
   return (
     <div className="flex flex-col gap-2">
       <p className="text-xs font-medium text-ink-soft">{title}</p>
+      {searchable && options.length > 8 && (
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={`Search ${title.toLowerCase()}`}
+          className="rounded-md border border-rule bg-card px-2 py-1 text-xs text-ink outline-none placeholder:text-ink-soft/70 focus:border-stamp"
+        />
+      )}
       {options.length === 0 && loading ? (
         <p className="text-xs text-ink-soft/70">Loading…</p>
       ) : options.length === 0 ? (
         <p className="text-xs text-ink-soft/70">No {title.toLowerCase()} data for the current filters.</p>
       ) : (
         <div className="flex flex-wrap gap-1.5">
-          {options.map((option) => {
+          {visible.map((option) => {
             const included = selected.includes(option.id);
             const isExcluded = Boolean(excluded?.includes(option.id));
             return (
@@ -54,6 +74,7 @@ export function FilterChipGroup({
                 <button
                   type="button"
                   aria-pressed={included}
+                  title={option.label}
                   onClick={() => onToggle(option.id)}
                   onKeyDown={(e) => {
                     if (e.key === " " || e.key === "Enter") {
@@ -62,7 +83,7 @@ export function FilterChipGroup({
                     }
                   }}
                   className={cn(
-                    "rounded-full px-2.5 py-1 focus-visible:ring-2 focus-visible:ring-stamp/50 focus-visible:ring-offset-2",
+                    "max-w-[260px] truncate rounded-full px-2.5 py-1 focus-visible:ring-2 focus-visible:ring-stamp/50 focus-visible:ring-offset-2",
                     isExcluded && "line-through",
                     !included && !isExcluded && "focus-visible:ring-offset-0"
                   )}

@@ -55,6 +55,7 @@ const rawJob = {
   status: "queued" as const,
   source_key: "manual-csv",
   tags: ["client", "niche", "2026-01-01"],
+  open_tags: ["Spring Promo"],
   stages: [{ targetTable: "companies" as const, columnMap: { Domain: "domain" } }],
   storage_path: "imports/abc.csv",
   file_name: "leads.csv",
@@ -102,6 +103,7 @@ describe("toImportJob", () => {
     const job = toImportJob({
       ...rawJob,
       tags: null,
+      open_tags: null,
       stages: null,
       stage_results: null,
       row_count: null,
@@ -114,6 +116,7 @@ describe("toImportJob", () => {
     });
     expect(job).toMatchObject({
       tags: [],
+      openTags: [],
       stages: [],
       stageResults: [],
       rowCount: 0,
@@ -124,6 +127,10 @@ describe("toImportJob", () => {
       failed: 0,
       failedRecords: [],
     });
+  });
+
+  it("maps open_tags to openTags", () => {
+    expect(toImportJobSummary(rawJob).openTags).toEqual(["Spring Promo"]);
   });
 
   it("the summary mapper carries no failedRecords", () => {

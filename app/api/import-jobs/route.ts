@@ -1,3 +1,4 @@
+import { isStringArray, normalizeOpenTags } from "@/lib/import/open-tags";
 import { after, type NextRequest } from "next/server";
 import { getUser } from "@/lib/auth/dal";
 import { logActivity } from "@/lib/activity/log";
@@ -77,6 +78,11 @@ export async function POST(request: NextRequest): Promise<Response> {
     return Response.json({ error: "tags must be [client, niche, date]" }, { status: 400 });
   }
 
+  if (body.openTags !== undefined && !isStringArray(body.openTags)) {
+    return Response.json({ error: "openTags must be an array of strings" }, { status: 400 });
+  }
+  const openTags = normalizeOpenTags(body.openTags);
+
   const parsed = parseStages(body.stages);
   if ("error" in parsed) {
     return Response.json({ error: parsed.error }, { status: 400 });
@@ -85,6 +91,7 @@ export async function POST(request: NextRequest): Promise<Response> {
   const job = await createImportJob({
     sourceKey,
     tags: tags as string[],
+    openTags,
     stages: parsed.stages,
     storagePath: path,
     fileName: typeof fileName === "string" ? fileName : null,
@@ -99,6 +106,7 @@ export async function POST(request: NextRequest): Promise<Response> {
       jobId: job.id,
       sourceKey,
       tags,
+      openTags,
       stages: parsed.stages.map((s) => s.targetTable),
       fileName: job.fileName,
       rowCount: job.rowCount,

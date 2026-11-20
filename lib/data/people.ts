@@ -4,6 +4,7 @@ import { normalizeSourceTokens, sourceLabel } from "@/lib/data/source";
 import { countryLabel } from "@/lib/data/country";
 import { industryLabel } from "@/lib/data/industry";
 import { emailStatusLabel } from "@/lib/data/email-status";
+import { applyOpenTagsFilter } from "@/lib/data/open-tags";
 import { isMxProviderFilterActive, mxProviderLabel } from "@/lib/data/mx-provider";
 import { EMPLOYEE_BUCKETS, employeeBucketOf } from "@/lib/data/employee-size";
 import { filterCustomData, toWebhookCustomData } from "@/lib/data/custom-data";
@@ -46,6 +47,8 @@ export interface PersonListFilters {
    * push-status filter does; see resolveVirtualFilterIds. Exclude keeps
    * people with no ESP (no company, or a company with no MX lookup). */
   mxProvider?: IncludeExclude;
+  /** Open (GHL-style) tags on people.open_tags: include = overlap, exclude = no overlap. */
+  openTags?: IncludeExclude;
   jobTitle?: string;
   /** How the `jobTitle` include terms match: "contains" (substring, default)
    * or "equals" (whole value, case-insensitive). */
@@ -151,6 +154,7 @@ export interface PersonFilterOptions {
   emailStatuses: FilterOption[];
   phoneTypes: FilterOption[];
   mxProviders: FilterOption[];
+  openTags: FilterOption[];
 }
 
 interface RawPersonRow {
@@ -307,6 +311,7 @@ function applyPersonFilters(query: any, filters: PersonListFilters): any {
   q = applyPresenceFilter(q, "phone", filters.phone);
   q = applyScalarIncludeExclude(q, "email_status", filters.emailStatus);
   q = applyScalarIncludeExclude(q, "phone_type", filters.phoneType);
+  q = applyOpenTagsFilter(q, filters.openTags);
 
   return q;
 }
@@ -1270,6 +1275,7 @@ interface PersonFilterOptionsRpcResult {
   /** Added by the T25 migration; optional so a DB without it degrades to an
    * empty ESP facet instead of a crash. */
   mxProviders?: FacetIdCount[];
+  openTags?: FacetIdCount[];
 }
 
 /** Serializes PersonListFilters into the jsonb shape person_filter_options
@@ -1302,6 +1308,7 @@ export function toFilterOptionsRpcPayload(filters: PersonListFilters): Record<st
     emailStatus: filters.emailStatus ?? { include: [], exclude: [] },
     phoneType: filters.phoneType ?? { include: [], exclude: [] },
     mxProvider: filters.mxProvider ?? { include: [], exclude: [] },
+    openTags: filters.openTags ?? { include: [], exclude: [] },
     virtualFilters: filters.virtualFilters ?? { combinator: "and", groups: [] },
     pushStatus: pushStatusRpcPayload(filters.pushStatus),
   };
@@ -1351,6 +1358,9 @@ export async function getPersonFilterOptions(
       .sort(sortByCountDesc),
     mxProviders: (result.mxProviders ?? [])
       .map(({ id, count }) => ({ id, label: mxProviderLabel(id), count }))
+      .sort(sortByCountDesc),
+    openTags: (result.openTags ?? [])
+      .map(({ id, count }) => ({ id, label: id, count }))
       .sort(sortByCountDesc),
   };
 }
@@ -1438,6 +1448,7 @@ export interface PersonDetail {
   domain: string | null;
   sources: string[];
   tags: string[];
+  openTags: string[];
   lastUpdated: string | null;
   customData: Record<string, unknown>;
   linkedCompany: LinkedCompany | null;
@@ -1507,6 +1518,7 @@ export async function getPersonDetail(id: string): Promise<PersonDetail | null> 
     domain: data.domain,
     sources: normalizeSourceTokens(data.source),
     tags: data.tags ?? [],
+    openTags: data.open_tags ?? [],
     lastUpdated: data.last_updated,
     customData: filterCustomData(data.custom_data, PERSON_EXTRA_BLOCKED_KEYS),
     linkedCompany,

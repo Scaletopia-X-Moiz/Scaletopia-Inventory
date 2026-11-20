@@ -134,8 +134,11 @@ export default async function PersonDetailPage({
           <section className="flex flex-col gap-2">
             <h2 className="text-sm font-semibold text-ink">Tags</h2>
             <div className="flex flex-wrap gap-2">
-              {person.tags.length > 0 ? (
-                person.tags.map((tag, i) => <TagChip key={`${tag}-${i}`} value={tag} />)
+              {person.tags.length + person.openTags.length > 0 ? (
+                <>
+                  {person.tags.map((tag, i) => <TagChip key={`${tag}-${i}`} value={tag} />)}
+                  {person.openTags.map((tag, i) => <TagChip key={`open-${tag}-${i}`} value={tag} />)}
+                </>
               ) : (
                 <span className="text-sm text-ink-soft">No tags</span>
               )}

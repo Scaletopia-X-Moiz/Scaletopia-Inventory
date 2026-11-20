@@ -108,6 +108,23 @@ describe("POST /api/import-jobs", () => {
     expect(after).toHaveBeenCalledTimes(1);
   });
 
+  it("normalizes openTags and passes them to createImportJob", async () => {
+    const res = await POST(post({ ...validBody, openTags: [" Spring Promo ", "spring promo", "Q4 Long Tag"] }));
+    expect(res.status).toBe(200);
+    expect(createImportJob).toHaveBeenCalledWith(
+      expect.objectContaining({ openTags: ["Spring Promo", "Q4 Long Tag"] })
+    );
+  });
+
+  it("defaults openTags to [] and 400s on a non-array / non-string openTags", async () => {
+    await POST(post(validBody));
+    expect(createImportJob).toHaveBeenCalledWith(expect.objectContaining({ openTags: [] }));
+    createImportJob.mockClear();
+    expect((await POST(post({ ...validBody, openTags: "x" }))).status).toBe(400);
+    expect((await POST(post({ ...validBody, openTags: ["a", 1] }))).status).toBe(400);
+    expect(createImportJob).not.toHaveBeenCalled();
+  });
+
   it("accepts a [companies, people] two-stage job", async () => {
     const res = await POST(
       post({

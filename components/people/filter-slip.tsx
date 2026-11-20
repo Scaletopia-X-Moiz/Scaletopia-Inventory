@@ -27,6 +27,7 @@ const MULTI_PARAMS = [
   "emailStatus",
   "phoneType",
   "esp",
+  "tags",
 ] as const;
 
 export function PeopleFilterSlip({
@@ -399,6 +400,18 @@ export function PeopleFilterSlip({
           excluded={getExcluded("phoneType")}
           onToggle={(id) => toggleInclude("phoneType", id)}
           onToggleExclude={(id) => toggleExclude("phoneType", id)}
+        />
+      </FilterPopover>
+      <FilterPopover label="Tags" count={facetCount("tags")}>
+        <FilterChipGroup
+          loading={loading}
+          title="Tags"
+          searchable
+          options={toOptions(options.openTags)}
+          selected={getAll("tags")}
+          excluded={getExcluded("tags")}
+          onToggle={(id) => toggleInclude("tags", id)}
+          onToggleExclude={(id) => toggleExclude("tags", id)}
         />
       </FilterPopover>
       <FilterPopover label="ESP" count={facetCount("esp")}>

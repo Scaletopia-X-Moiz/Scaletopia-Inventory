@@ -1,6 +1,7 @@
 import type { CompanyListFilters, SingleSelectFilter } from "@/lib/data/companies";
 import { parseIncludeExcludeParam } from "@/lib/data/include-exclude";
 import { MX_PROVIDER_PARAM, sanitizeMxProviderFilter } from "@/lib/data/mx-provider";
+import { OPEN_TAGS_PARAM } from "@/lib/data/open-tags";
 import { parseVirtualFiltersParam, parseVirtualColumnsParam } from "@/lib/data/virtual-columns";
 import { parsePushStatusFilter } from "@/lib/data/push-status-filter";
 
@@ -31,6 +32,7 @@ export function parseCompanyFilters(searchParams: URLSearchParams): CompanyListF
     emailStatus: parseIncludeExcludeParam(searchParams, "emailStatus"),
     phoneType: parseIncludeExcludeParam(searchParams, "phoneType"),
     mxProvider: sanitizeMxProviderFilter(parseIncludeExcludeParam(searchParams, MX_PROVIDER_PARAM)),
+    openTags: parseIncludeExcludeParam(searchParams, OPEN_TAGS_PARAM),
     pushJobId: searchParams.get("pushJobId") ?? undefined,
     pushJobOutcome: asPushJobOutcome(searchParams.get("pushJobOutcome")),
     pushStatus: parsePushStatusFilter(searchParams),

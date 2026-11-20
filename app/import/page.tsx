@@ -11,6 +11,8 @@ import {
   type ProviderPreset,
   type TargetTable,
 } from "@/lib/import/providers";
+import { fetchActiveClients } from "@/lib/data/active-clients-client";
+import { normalizeOpenTags, MAX_OPEN_TAGS, MAX_OPEN_TAG_LENGTH } from "@/lib/import/open-tags";
 import { fuzzyMatchColumn } from "@/lib/import/normalize";
 import { parseCSV, applyColumnMap, filterMappedNonEmptyRows, serializeCSV } from "@/lib/import/csv";
 import { Upload, History, ListChecks, CheckCircle, AlertCircle, Loader2, Download, ChevronRight, RefreshCw, Plus } from "lucide-react";
@@ -47,6 +49,8 @@ interface WizardMeta {
   client: string;
   niche: string;
   date: string;
+  /** Open (GHL-style) tags merged into every record; optional. */
+  openTags: string[];
 }
 
 interface HistoryRow {
@@ -775,61 +779,84 @@ function StepMapping({
   );
 }
 
+const ALL_CLIENTS_OPTION = "All clients";
+
 function StepMetadata({
   onNext,
   onBack,
   defaultClient,
   defaultNiche,
+  defaultOpenTags,
 }: {
-  onNext: (client: string, niche: string, date: string) => void;
+  onNext: (client: string, niche: string, date: string, openTags: string[]) => void;
   onBack: () => void;
   defaultClient: string;
   defaultNiche: string;
+  defaultOpenTags: string[];
 }) {
   const today = new Date().toISOString().slice(0, 10);
   const [client, setClient] = useState(defaultClient);
   const [niche, setNiche] = useState(defaultNiche);
   const [date, setDate] = useState(today);
+  const [openTags, setOpenTags] = useState<string[]>(defaultOpenTags);
+  const [tagDraft, setTagDraft] = useState("");
 
-  const [clientSuggestions, setClientSuggestions] = useState<string[]>([]);
+  const [clientNames, setClientNames] = useState<string[]>([]);
+  const [clientsLoading, setClientsLoading] = useState(true);
+  const [clientsErr, setClientsErr] = useState<string | null>(null);
   const [nicheSuggestions, setNicheSuggestions] = useState<string[]>([]);
   const [validationErr, setValidationErr] = useState<string | null>(null);
 
   useEffect(() => {
-    // Merge localStorage cache with Supabase-backed suggestions
-    let localClients: string[] = [];
     let localNiches: string[] = [];
     try {
       const saved = JSON.parse(localStorage.getItem("import_metadata_history") ?? "{}");
-      localClients = saved.clients ?? [];
       localNiches = saved.niches ?? [];
     } catch {}
-
-    setClientSuggestions(localClients);
     setNicheSuggestions(localNiches);
 
     fetch("/api/import/autocomplete")
       .then((r) => r.json())
-      .then((data: { clients: string[]; niches: string[] }) => {
-        if (!data.clients || !data.niches) return;
-        setClientSuggestions((prev) => Array.from(new Set([...data.clients, ...prev])));
+      .then((data: { niches: string[] }) => {
+        if (!data.niches) return;
         setNicheSuggestions((prev) => Array.from(new Set([...data.niches, ...prev])));
       })
       .catch(() => {});
+
+    // Client is a dropdown of ACTIVE clients only, so nobody mistypes a name.
+    fetchActiveClients<{ clients: { name: string }[] }>()
+      .then((data) => setClientNames(data.clients.map((c) => c.name)))
+      .catch((e) => setClientsErr(e instanceof Error ? e.message : "Failed to load clients"))
+      .finally(() => setClientsLoading(false));
   }, []);
+
+  // "All clients" is what existing data uses for client-agnostic lists; keep a
+  // preset default selectable even if it isn't an active client any more.
+  const clientOptions = Array.from(
+    new Set([ALL_CLIENTS_OPTION, ...clientNames, ...(defaultClient ? [defaultClient] : [])])
+  );
+
+  function commitTagDraft(raw: string = tagDraft) {
+    // A pasted comma-separated string adds several tags at once.
+    const parts = raw.split(",");
+    if (parts.every((p) => !p.trim())) { setTagDraft(""); return; }
+    setOpenTags((prev) => normalizeOpenTags([...prev, ...parts]));
+    setTagDraft("");
+  }
 
   function saveAndNext() {
     if (!client.trim() || !niche.trim() || !date) {
-      setValidationErr("All three fields are required.");
+      setValidationErr("Client, niche and date are required.");
       return;
     }
     try {
       const saved = JSON.parse(localStorage.getItem("import_metadata_history") ?? "{}");
-      const clients = Array.from(new Set([client, ...(saved.clients ?? [])])).slice(0, 20);
       const niches = Array.from(new Set([niche, ...(saved.niches ?? [])])).slice(0, 20);
-      localStorage.setItem("import_metadata_history", JSON.stringify({ clients, niches }));
+      localStorage.setItem("import_metadata_history", JSON.stringify({ niches }));
     } catch {}
-    onNext(client.trim(), niche.trim(), date);
+    // Include a tag still sitting in the input box so it isn't silently lost.
+    const finalTags = normalizeOpenTags([...openTags, ...tagDraft.split(",")]);
+    onNext(client.trim(), niche.trim(), date, finalTags);
   }
 
   return (
@@ -842,17 +869,16 @@ function StepMetadata({
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">
           <label className="text-xs font-medium text-ink-soft uppercase tracking-wide">Client</label>
-          <input
-            type="text"
-            list="clients-list"
+          <select
             value={client}
             onChange={(e) => { setClient(e.target.value); setValidationErr(null); }}
-            placeholder="e.g. kynship"
+            disabled={clientsLoading}
             className="rounded-lg border border-rule bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-stamp"
-          />
-          <datalist id="clients-list">
-            {clientSuggestions.map((s) => <option key={s} value={s} />)}
-          </datalist>
+          >
+            <option value="">{clientsLoading ? "Loading clients…" : "Select a client"}</option>
+            {clientOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+          </select>
+          {clientsErr && <p className="text-xs text-red-500">Couldn&apos;t load active clients: {clientsErr}</p>}
         </div>
 
         <div className="flex flex-col gap-1.5">
@@ -878,6 +904,48 @@ function StepMetadata({
             onChange={(e) => { setDate(e.target.value); setValidationErr(null); }}
             className="rounded-lg border border-rule bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-stamp"
           />
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <label className="text-xs font-medium text-ink-soft uppercase tracking-wide">
+            Open tags <span className="normal-case tracking-normal text-ink-mute">(optional)</span>
+          </label>
+          <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-rule bg-paper px-2 py-1.5 focus-within:border-stamp">
+            {openTags.map((t) => (
+              <span key={t} className="inline-flex max-w-full items-center gap-1 rounded-full border border-dashed border-rule bg-hover px-2.5 py-0.5 text-xs text-ink">
+                <span className="truncate">{t}</span>
+                <button
+                  type="button"
+                  aria-label={`Remove ${t}`}
+                  onClick={() => setOpenTags((prev) => prev.filter((x) => x !== t))}
+                  className="text-ink-soft hover:text-ink"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            <input
+              type="text"
+              value={tagDraft}
+              maxLength={MAX_OPEN_TAG_LENGTH * 10}
+              disabled={openTags.length >= MAX_OPEN_TAGS}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v.includes(",")) commitTagDraft(v);
+                else setTagDraft(v);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); commitTagDraft(); }
+                else if (e.key === "Backspace" && !tagDraft && openTags.length) setOpenTags((prev) => prev.slice(0, -1));
+              }}
+              onBlur={() => commitTagDraft()}
+              placeholder={openTags.length ? "" : "Type a tag, press Enter or comma"}
+              className="min-w-[160px] flex-1 bg-transparent px-1 py-0.5 text-sm text-ink outline-none"
+            />
+          </div>
+          <p className="text-xs text-ink-mute">
+            Long tags with spaces are fine. Added to every record; existing tags on matching records are kept.
+          </p>
         </div>
       </div>
 
@@ -1034,6 +1102,7 @@ function StepSummary({
   useEffect(() => { runPreflight(); }, [runPreflight]);
 
   const tags = [meta.client, meta.niche, meta.date];
+  const openTags = meta.openTags;
 
   return (
     <div className="flex flex-col gap-6">
@@ -1092,6 +1161,11 @@ function StepSummary({
         <div className="flex flex-wrap gap-2">
           {tags.map((tag, i) => (
             <span key={i} className="rounded-full border border-rule bg-hover px-2.5 py-0.5 text-xs font-medium text-ink">
+              {tag}
+            </span>
+          ))}
+          {openTags.map((tag) => (
+            <span key={`open-${tag}`} className="rounded-full border border-dashed border-rule bg-hover px-2.5 py-0.5 text-xs font-medium text-ink">
               {tag}
             </span>
           ))}
@@ -1363,6 +1437,7 @@ export default function ImportPage() {
     client: "",
     niche: "",
     date: new Date().toISOString().slice(0, 10),
+    openTags: [],
   });
 
   // Id of the job the last confirm enqueued, shown on the "queued" step.
@@ -1382,6 +1457,7 @@ export default function ImportPage() {
       client: "",
       niche: "",
       date: new Date().toISOString().slice(0, 10),
+      openTags: [],
     });
     setQueuedJobId(null);
     setErrorMsg(null);
@@ -1493,6 +1569,7 @@ export default function ImportPage() {
           rowCount: nonEmptyRows.length,
           sourceKey,
           tags,
+          openTags: finalMeta.openTags,
           stages,
         }),
       });
@@ -1629,8 +1706,9 @@ export default function ImportPage() {
                     <StepMetadata
                       defaultClient={meta.client}
                       defaultNiche={meta.niche}
-                      onNext={(client, niche, date) => {
-                        const updatedMeta = { ...meta, client, niche, date };
+                      defaultOpenTags={meta.openTags}
+                      onNext={(client, niche, date, openTags) => {
+                        const updatedMeta = { ...meta, client, niche, date, openTags };
                         setMeta(updatedMeta);
                         setStep("summary");
                       }}

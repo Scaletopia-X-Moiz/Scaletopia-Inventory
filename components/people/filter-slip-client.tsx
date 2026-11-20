@@ -19,6 +19,7 @@ interface PersonFilterOptions {
   emailStatuses: FilterOption[];
   phoneTypes: FilterOption[];
   mxProviders: FilterOption[];
+  openTags: FilterOption[];
 }
 
 const EMPTY: PersonFilterOptions = {
@@ -30,6 +31,7 @@ const EMPTY: PersonFilterOptions = {
   emailStatuses: [],
   phoneTypes: [],
   mxProviders: [],
+  openTags: [],
 };
 
 // Facet counts depend on the active filters (see getPersonFilterOptions), so

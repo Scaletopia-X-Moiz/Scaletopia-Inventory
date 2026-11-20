@@ -18,6 +18,8 @@ export interface PushOptions {
   targetTable: "companies" | "people";
   sourceKey: string;
   tags: [string, string, string];
+  /** Open (GHL-style) tags merged into every record (optional). */
+  openTags?: string[];
   // BUG F: `columnMap` was removed — mapping already happens in the route via
   // `applyColumnMap` before records reach `pushRecords`, so it was dead weight
   // here.
@@ -312,6 +314,7 @@ async function bulkInsert(
   targetTable: "companies" | "people",
   sourceKey: string,
   tags: [string, string, string],
+  openTags: string[],
   companyById: Map<string, PersonCompanyRow>,
   knownClients: Set<string>,
   onProgress?: (done: number, total: number) => void
@@ -371,6 +374,7 @@ async function bulkInsert(
     ...r,
     source: sourceKey,
     tags,
+    open_tags: openTags,
     last_updated: now,
     ...canonicalColumnsFor(r),
   }));
@@ -397,6 +401,7 @@ async function bulkUpdate(
   targetTable: "companies" | "people",
   sourceKey: string,
   tags: [string, string, string],
+  openTags: string[],
   companyById: Map<string, PersonCompanyRow>,
   knownClients: Set<string>,
   onProgress?: (done: number, total: number) => void
@@ -448,6 +453,8 @@ async function bulkUpdate(
         domain: r.domain ?? null,
         linkedin_url: r.linkedin_url ?? null,
         tags,
+        // Merged (not overwritten) into the row's open_tags by the RPC; omitted when empty.
+        ...(openTags.length > 0 ? { open_tags: openTags } : {}),
         source: sourceKey,
         new_source_tokens: normalizeSourceTokens(sourceKey),
         last_updated: now,
@@ -490,6 +497,8 @@ async function bulkUpdate(
             if (tags[1]) enrichment.niche = tags[1];
             withCanonicalIdentityIds(enrichment);
 
+            // Error recovery only: open_tags is deliberately NOT written here (a
+            // plain update would overwrite rather than merge).
             const query = supabaseAdmin.from("companies").update({
               tags,
               source: sourceKey,
@@ -563,6 +572,8 @@ async function bulkUpdate(
         email: r.email ?? null,
         company_id: r.company_id ?? null,
         tags,
+        // Merged (not overwritten) into the row's open_tags by the RPC; omitted when empty.
+        ...(openTags.length > 0 ? { open_tags: openTags } : {}),
         source: sourceKey,
         new_source_tokens: normalizeSourceTokens(sourceKey),
         last_updated: now,
@@ -589,6 +600,8 @@ async function bulkUpdate(
               typeof rec.linkedin_url === "string" ? rec.linkedin_url : null;
             const email =
               typeof rec.email === "string" ? rec.email : null;
+            // Error recovery only: open_tags is deliberately NOT written here (a
+            // plain update would overwrite rather than merge).
             const query = supabaseAdmin.from("people").update({
               tags,
               source: sourceKey,
@@ -750,6 +763,8 @@ export interface ImportTickOptions {
   targetTable: "companies" | "people";
   sourceKey: string;
   tags: [string, string, string];
+  /** Open (GHL-style) tags merged into every record (optional). */
+  openTags?: string[];
   /** Index into the DEDUPED list to resume from (0 for a fresh stage). */
   offset: number;
   /** Epoch ms. The tick stops after the chunk in flight once this passes. */
@@ -833,6 +848,7 @@ function recordSignature(rec: Record<string, unknown>): string {
  */
 export async function runImportTick(opts: ImportTickOptions): Promise<ImportTickResult> {
   const { records, targetTable, sourceKey, tags, offset, deadline, onProgress, partial } = opts;
+  const openTags = opts.openTags ?? [];
   const chunkSize = opts.chunkSize ?? IMPORT_TICK_CHUNK;
 
   const deduped = prepareImportRecords(records, targetTable);
@@ -920,6 +936,7 @@ export async function runImportTick(opts: ImportTickOptions): Promise<ImportTick
       targetTable,
       sourceKey,
       tags,
+      openTags,
       companyById,
       knownClients
     );
@@ -944,6 +961,7 @@ export async function runImportTick(opts: ImportTickOptions): Promise<ImportTick
         targetTable,
         sourceKey,
         tags,
+        openTags,
         companyById,
         knownClients
       );
@@ -980,6 +998,7 @@ export async function pushRecords(
   onProgress: ProgressCallback
 ): Promise<PushResult> {
   const { records, targetTable, sourceKey, tags } = options;
+  const openTags = options.openTags ?? [];
   const inputCount = records.length;
 
   // BUG E: track running counts in the outer scope so that if this push throws
@@ -1015,6 +1034,7 @@ export async function pushRecords(
       targetTable,
       sourceKey,
       tags,
+      openTags,
       offset: 0,
       deadline: Infinity,
       onProgress,
@@ -1036,7 +1056,7 @@ export async function pushRecords(
       .insert({
         source_key: sourceKey,
         target_table: targetTable,
-        tags,
+        tags: [...tags, ...openTags],
         input_count: inputCount,
         deduped_count: dedupedCount,
         inserted_count: inserted,
@@ -1080,7 +1100,7 @@ export async function pushRecords(
       await supabaseAdmin.from("import_history").insert({
         source_key: sourceKey,
         target_table: targetTable,
-        tags,
+        tags: [...tags, ...openTags],
         input_count: inputCount,
         deduped_count: dedupedCount,
         inserted_count: inserted,

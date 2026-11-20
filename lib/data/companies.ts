@@ -17,6 +17,7 @@ import type { EmailBisonPushCandidate } from "@/lib/data/people";
 import type { EmailBisonPushRecord } from "@/lib/emailbison/types";
 import type { IncludeExclude } from "@/lib/data/include-exclude";
 import type { ActiveVirtualColumn, VirtualFilterSet } from "@/lib/data/virtual-columns";
+import { applyOpenTagsFilter } from "@/lib/data/open-tags";
 import { isFilterSetActive, virtualColumnIdentity } from "@/lib/data/virtual-columns";
 import {
   pushStatusRpcPayload,
@@ -44,6 +45,8 @@ export interface CompanyListFilters {
   /** ESP (companies.mx_provider) include/exclude, ticket #25. Exclude keeps
    * companies with no ESP recorded, matching the SQL RPCs. */
   mxProvider?: IncludeExclude;
+  /** Open (GHL-style) tags on companies.open_tags: include = overlap, exclude = no overlap. */
+  openTags?: IncludeExclude;
   /** Restrict to companies a push run touched — the companies linked (via
    * people.company_id) to the people tagged in `push_job_records` for this job
    * (#123). This is the People→company link a GHL Companies-triggered push
@@ -132,6 +135,7 @@ export interface CompanyFilterOptions {
   emailStatuses: FilterOption[];
   phoneTypes: FilterOption[];
   mxProviders: FilterOption[];
+  openTags: FilterOption[];
 }
 
 interface RawCompanyRow {
@@ -252,6 +256,7 @@ function applyCompanyFilters(query: any, filters: CompanyListFilters): any {
   q = applyScalarIncludeExclude(q, "email_status", filters.emailStatus);
   q = applyScalarIncludeExclude(q, "phone_type", filters.phoneType);
   q = applyMxProviderFilter(q, filters.mxProvider);
+  q = applyOpenTagsFilter(q, filters.openTags);
 
   return q;
 }
@@ -1080,6 +1085,7 @@ interface CompanyFilterOptionsRpcResult {
   /** Added by the T25 migration; optional so a DB without it degrades to an
    * empty ESP facet instead of a crash. */
   mxProviders?: FacetIdCount[];
+  openTags?: FacetIdCount[];
 }
 
 /** Serializes CompanyListFilters into the jsonb shape company_filter_options
@@ -1104,6 +1110,7 @@ export function toFilterOptionsRpcPayload(filters: CompanyListFilters): Record<s
     emailStatus: filters.emailStatus ?? { include: [], exclude: [] },
     phoneType: filters.phoneType ?? { include: [], exclude: [] },
     mxProvider: filters.mxProvider ?? { include: [], exclude: [] },
+    openTags: filters.openTags ?? { include: [], exclude: [] },
     virtualFilters: filters.virtualFilters ?? { combinator: "and", groups: [] },
     pushStatus: pushStatusRpcPayload(filters.pushStatus),
   };
@@ -1153,6 +1160,9 @@ export async function getCompanyFilterOptions(
       .sort(sortByCountDesc),
     mxProviders: (result.mxProviders ?? [])
       .map(({ id, count }) => ({ id, label: mxProviderLabel(id), count }))
+      .sort(sortByCountDesc),
+    openTags: (result.openTags ?? [])
+      .map(({ id, count }) => ({ id, label: id, count }))
       .sort(sortByCountDesc),
   };
 }
@@ -1206,6 +1216,7 @@ export interface CompanyDetail {
   niche: string | null;
   client: string | null;
   tags: string[];
+  openTags: string[];
   lastUpdated: string | null;
   domainStatus: string | null;
   mxProvider: string | null;
@@ -1251,6 +1262,7 @@ export async function getCompanyDetail(id: string): Promise<CompanyDetail | null
     niche: data.niche,
     client: data.client,
     tags: data.tags ?? [],
+    openTags: data.open_tags ?? [],
     lastUpdated: data.last_updated,
     domainStatus: data.domain_status,
     mxProvider: data.mx_provider,

@@ -1,6 +1,7 @@
 import type { PersonListFilters, SingleSelectFilter } from "@/lib/data/people";
 import { parseIncludeExcludeParam } from "@/lib/data/include-exclude";
 import { MX_PROVIDER_PARAM, sanitizeMxProviderFilter } from "@/lib/data/mx-provider";
+import { OPEN_TAGS_PARAM } from "@/lib/data/open-tags";
 import { parseVirtualFiltersParam, parseVirtualColumnsParam } from "@/lib/data/virtual-columns";
 import { parsePushStatusFilter } from "@/lib/data/push-status-filter";
 import { parseLastActivityFilter } from "@/lib/data/last-activity-filter";
@@ -30,6 +31,7 @@ export function parsePersonFilters(searchParams: URLSearchParams): PersonListFil
     emailStatus: parseIncludeExcludeParam(searchParams, "emailStatus"),
     phoneType: parseIncludeExcludeParam(searchParams, "phoneType"),
     mxProvider: sanitizeMxProviderFilter(parseIncludeExcludeParam(searchParams, MX_PROVIDER_PARAM)),
+    openTags: parseIncludeExcludeParam(searchParams, OPEN_TAGS_PARAM),
     jobTitle: searchParams.get("title") ?? undefined,
     jobTitleOp: searchParams.get("titleOp") === "equals" ? "equals" : undefined,
     jobTitleExclude: searchParams.get("title_exclude") ?? undefined,
