@@ -41,7 +41,7 @@ Raw enrichment data (many sources, inconsistent formats)
 | Module | What it does |
 |---|---|
 | **Canonical Normalization** | Raw fields (country, industry, source) are normalized in TypeScript and cached to real DB columns so Postgres can filter/aggregate directly — TS stays the single source of truth |
-| **Faceted Filtering** | Per-dimension counts (niche, source, industry, country, email status, phone type) that respect every *other* active filter without zeroing out their own options |
+| **Faceted Filtering** | Per-dimension counts (niche, source, industry, country, email status, phone type, open tags) that respect every *other* active filter without zeroing out their own options |
 | **Virtual Columns** | On-demand, view-only columns over any enrichment field inside `custom_data`, with type inferred by sampling (Text / Number / Boolean / List / Date) and user-overridable |
 | **Companies & People Tables** | Full-featured data grids with search, filter, sort, and bulk selection across large datasets |
 | **Push to GHL** | Create-or-update contact + tag in GoHighLevel, triggerable from either the People or Companies table (company-level push resolves to the same People-level action) |
@@ -49,6 +49,7 @@ Raw enrichment data (many sources, inconsistent formats)
 | **Push to Clay** | Send the current filtered view to a Clay webhook (URL entered per-device at push time) for downstream enrichment workflows |
 | **Email & Phone Verification** | Integrated verification via Clearout and MillionVerifier |
 | **Import Pipeline** | Backfill and seed scripts for bringing new client datasets in cleanly, with canonical-column backfill for historical rows |
+| **Open Tags** | Free-form, GHL-style tags added in the import wizard and stored in a separate `open_tags` column (never in the fixed `[client, niche, date]` `tags`, so they can't pollute the niche facet). Re-imports merge new open tags into existing rows. Companies and People have a Tags filter (include/exclude). Import Client is a dropdown of active clients. DB setup: `lib/data/open-tags.sql` (rollback: `open-tags-rollback.sql`) |
 | **Activity & Push History** | Full audit trail of pushes and record activity per client |
 | **Ticketing** | Lightweight internal ticket tracking tied to client records |
 
